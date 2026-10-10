@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="dark light">
+<title>Agent Hub</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+<symbol id="i-key" viewBox="0 0 24 24"><circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M17 6l3 3M15 8l2 2"/></symbol>
+<symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+<symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></symbol>
+<symbol id="i-moon" viewBox="0 0 24 24"><path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/></symbol>
+<symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
+<symbol id="i-back" viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></symbol>
+<symbol id="i-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5.5A1.5 1.5 0 0 0 14.5 4h-9A1.5 1.5 0 0 0 4 5.5v9A1.5 1.5 0 0 0 5.5 16H8"/></symbol>
+<symbol id="i-eye" viewBox="0 0 24 24"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></symbol>
+<symbol id="i-edit" viewBox="0 0 24 24"><path d="m4 16 12-12a2.1 2.1 0 0 1 3 3L7 19l-4 1zM14 6l3 3"/></symbol>
+<symbol id="i-check" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7"/></symbol>
+<symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3l8 3v6c0 4.5-3.4 8.2-8 9-4.6-.8-8-4.5-8-9V6z"/><path d="M8.8 12.2l2.2 2.2 4.2-4.4"/></symbol>
+<symbol id="i-log" viewBox="0 0 24 24"><rect x="5" y="4" width="14" height="17" rx="2"/><path d="M9 4V3h6v1M8.5 10h7M8.5 14h7M8.5 18h4"/></symbol>
+<symbol id="i-pulse" viewBox="0 0 24 24"><path d="M3 12h4l2.5-6 5 12 2.5-6h4"/></symbol>
+<symbol id="i-chev" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></symbol>
+<symbol id="i-file" viewBox="0 0 24 24"><path d="M6 3h8l5 5v13H6z"/><path d="M14 3v5h5M9 13h6M9 17h6"/></symbol>
+<symbol id="i-ban" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M5.6 5.6l12.8 12.8"/></symbol>
+<symbol id="i-lock" viewBox="0 0 24 24"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></symbol>
+<symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+<symbol id="i-pause" viewBox="0 0 24 24"><path d="M9 5v14M15 5v14"/></symbol>
+<symbol id="i-play" viewBox="0 0 24 24"><path d="M7 5l12 7-12 7z"/></symbol>
+<symbol id="i-rot" viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/></symbol>
+<symbol id="i-out" viewBox="0 0 24 24"><path d="M15 4h4v16h-4M10 8l-4 4 4 4M6 12h10"/></symbol>
+<symbol id="i-kbd" viewBox="0 0 24 24"><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M7 14h10"/></symbol>
+<symbol id="i-bolt" viewBox="0 0 24 24"><path d="M13 2L4 14h7l-1 8 9-12h-7z"/></symbol>
+<symbol id="i-note" viewBox="0 0 24 24"><path d="M6 3h9l4 4v14H6z"/><path d="M14 3v5h5"/></symbol>
+<symbol id="i-hub" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><circle cx="5" cy="6" r="2"/><circle cx="19" cy="6" r="2"/><circle cx="12" cy="20" r="2"/><path d="M6.6 7.2l3.2 3M17.4 7.2l-3.2 3M12 15v3"/></symbol>
+<symbol id="i-home" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></symbol>
+<symbol id="i-ses" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c.8-3.6 3.4-5.5 6.5-5.5s5.7 1.9 6.5 5.5"/><path d="M16 4.6a3.5 3.5 0 0 1 0 6.8M18 14.8c1.9.8 3.1 2.6 3.5 5.2"/></symbol>
+<symbol id="i-pc" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></symbol>
+<symbol id="i-vault" viewBox="0 0 24 24"><path d="M3 6.5A1.5 1.5 0 0 1 4.5 5H9l2 2h8.5A1.5 1.5 0 0 1 21 8.5v9a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 17.5z"/></symbol>
+<symbol id="i-app" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="4"/><path d="M8 12h8M12 8v8"/></symbol>
+<symbol id="i-user" viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21c.8-4 4-6 8-6s7.2 2 8 6"/></symbol>
+<symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/></symbol>
+<symbol id="i-chat" viewBox="0 0 24 24"><path d="M4 5h16v11H9l-5 4z"/></symbol>
+<symbol id="i-team" viewBox="0 0 24 24"><circle cx="12" cy="7" r="3"/><circle cx="5" cy="17" r="2.5"/><circle cx="19" cy="17" r="2.5"/><path d="M10.5 9.5L6.5 15M13.5 9.5l4 5.5M8 17h8"/></symbol>
+<symbol id="i-warn" viewBox="0 0 24 24"><path d="M12 3l10 18H2z"/><path d="M12 10v5M12 18v.01"/></symbol>
+<symbol id="i-link" viewBox="0 0 24 24"><path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/></symbol>
+<symbol id="i-dl" viewBox="0 0 24 24"><path d="M12 4v11M7 11l5 5 5-5M5 20h14"/></symbol>
+<symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/></symbol>
+<symbol id="i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/></symbol>
+<symbol id="i-up" viewBox="0 0 24 24"><path d="M12 19V6M6 11l6-6 6 6"/></symbol>
+<symbol id="i-sl" viewBox="0 0 24 24"><path d="M4 7h10M18 7h2M4 17h2M10 17h10"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/></symbol>
+</defs></svg>
+
+<div class="login" id="login" hidden>
+  <form id="lf" autocomplete="on">
+    <div class="logo"><svg class="i"><use href="#i-hub"/></svg></div>
+    <input class="inp" id="lu" name="username" autocomplete="username" aria-label="User" placeholder="User" required>
+    <input class="inp" id="lp" name="password" type="password" autocomplete="current-password" aria-label="Password" placeholder="Password" required>
+    <input class="inp mono" id="lt" name="totp" inputmode="numeric" autocomplete="one-time-code" aria-label="Code" placeholder="000000" maxlength="6" hidden>
+    <div class="err" id="le" role="alert"></div>
+    <button class="btn pri" style="height:40px;justify-content:center" type="submit">Sign in</button>
+  </form>
+</div>
+
+<aside class="side" aria-label="Navigation">
+  <div class="logo"><svg class="i"><use href="#i-hub"/></svg></div>
+  <button class="nav on" data-go="home" data-tip="Overview" aria-label="Overview"><svg class="i"><use href="#i-home"/></svg></button>
+  <button class="nav" data-go="monitoring" data-tip="Monitoring" aria-label="Monitoring"><svg class="i"><use href="#i-pulse"/></svg></button>
+  <button class="nav" data-go="topology" data-tip="Agents  G" aria-label="Agents"><svg class="i"><use href="#i-ses"/></svg></button>
+  <button class="nav" data-go="security" data-tip="Security  K" aria-label="Security"><svg class="i"><use href="#i-shield"/></svg><i class="bdg" data-request-badge hidden></i></button>
+  <button class="nav" data-go="vault" data-tip="Vault  V" aria-label="Vault"><svg class="i"><use href="#i-vault"/></svg></button>
+  <button class="nav" data-go="log" data-tip="Auditing  L" aria-label="Auditing"><svg class="i"><use href="#i-log"/></svg></button>
+  <div class="sp"></div>
+  <button class="nav" data-go="shortcuts" data-tip="Shortcuts  ?" aria-label="Shortcuts"><svg class="i"><use href="#i-kbd"/></svg></button>
+  <button class="nav" data-go="theme" data-tip="Theme  T" aria-label="Theme"><svg class="i th-ic"><use href="#i-sun"/></svg></button>
+  <button class="nav me-btn" data-me aria-label="Account" aria-haspopup="menu" aria-expanded="false"><span class="av" data-av>A</span></button>
+</aside>
+<div class="menu" id="meMenu" role="menu" aria-label="Account" hidden></div>
+
+<main class="main" id="app" hidden>
+  <header class="top">
+    <h1>Agent Hub</h1>
+    <div class="live"><span class="dot pulse" id="liveDot"></span><span id="clock" class="mono">--:--:--</span></div>
+    <div class="grow"></div>
+    <button class="btn ic show-m" data-go="monitoring" aria-label="Monitoring"><svg class="i"><use href="#i-pulse"/></svg></button>
+    <button class="btn ic show-m" data-go="log" aria-label="Auditing"><svg class="i"><use href="#i-log"/></svg></button>
+    <button class="btn lk" id="lk" data-go="lock" aria-label="Lockdown"><svg class="i"><use href="#i-lock"/></svg><span class="hide-m">Lockdown</span></button>
+    <button class="av show-m" data-me data-av id="avatar" aria-label="Account" aria-haspopup="menu" aria-expanded="false">A</button>
+  </header>
+
+  <div class="lkb" id="lkb" hidden></div>
+  <section class="workspace-bar" id="agentsBar" aria-labelledby="agentsTitle" hidden>
+    <h2 id="agentsTitle"><svg class="i"><use href="#i-ses"/></svg>Agents</h2>
+    <nav class="seg ws-tabs" aria-label="Agent views">
+      <button data-go="topology"><svg class="i"><use href="#i-hub"/></svg>Topology</button>
+      <button data-go="sessions"><svg class="i"><use href="#i-user"/></svg>Sessions</button>
+      <button data-go="teams"><svg class="i"><use href="#i-team"/></svg>Teams</button>
+      <button data-go="chats"><svg class="i"><use href="#i-chat"/></svg>Chats</button>
+    </nav>
+  </section>
+  <section class="workspace-bar" id="securityBar" aria-labelledby="securityTitle" hidden>
+    <h2 id="securityTitle"><svg class="i"><use href="#i-shield"/></svg>Security</h2>
+    <nav class="seg ws-tabs" aria-label="Security views">
+      <button data-go="keys"><svg class="i"><use href="#i-key"/></svg>Keys</button>
+      <button data-go="pcs"><svg class="i"><use href="#i-pc"/></svg>PCs</button>
+      <button data-go="req"><svg class="i"><use href="#i-clock"/></svg>Requests<i class="bdg" data-request-badge hidden></i></button>
+      <button data-go="shares"><svg class="i"><use href="#i-link"/></svg>Shares</button>
+      <button data-go="grant"><svg class="i"><use href="#i-plus"/></svg>Grant access</button>
+    </nav>
+  </section>
+  <section class="workspace-bar" id="vaultBar" aria-labelledby="vaultTitle" hidden>
+    <h2 id="vaultTitle"><svg class="i"><use href="#i-vault"/></svg>Vault</h2>
+    <nav class="seg ws-tabs" aria-label="Vault views">
+      <button data-vault-tab="contents"><svg class="i"><use href="#i-file"/></svg>Contents</button>
+      <button data-vault-tab="access"><svg class="i"><use href="#i-key"/></svg>Access</button>
+      <button data-vault-tab="act"><svg class="i"><use href="#i-pulse"/></svg>Activity</button>
+      <button data-vault-tab="conf"><svg class="i"><use href="#i-warn"/></svg>Conflicts</button>
+    </nav>
+  </section>
+  <section class="workspace-bar" id="auditBar" aria-labelledby="auditTitle" hidden>
+    <h2 id="auditTitle"><svg class="i"><use href="#i-log"/></svg>Auditing</h2>
+    <nav class="seg ws-tabs" aria-label="Auditing views">
+      <button data-go="log" data-arg="audit"><svg class="i"><use href="#i-log"/></svg>Audit</button>
+      <button data-go="log" data-arg="calls"><svg class="i"><use href="#i-bolt"/></svg>Calls</button>
+      <button data-go="log" data-arg="alerts"><svg class="i"><use href="#i-warn"/></svg>Alerts</button>
+    </nav>
+  </section>
+  <section class="workspace-bar ctx-bar" id="ctxBar" aria-labelledby="ctxTitle" hidden></section>
+  <section class="workspace-bar" id="monitoringBar" aria-labelledby="monitoringTitle" hidden>
+    <h2 id="monitoringTitle" tabindex="-1"><svg class="i"><use href="#i-pulse"/></svg>Monitoring</h2>
+  </section>
+  <div id="overview" data-mode="home">
+  <div class="chips" id="chips" aria-label="Urgent"></div>
+  <section class="kpis" id="kpis"></section>
+
+  <section class="grid">
+    <article class="card w-topo">
+      <div class="hd"><h2>Topology</h2><div class="grow"></div><div class="lg" id="topoLg"></div></div>
+      <div id="topo"></div>
+    </article>
+    <article class="card w-alerts">
+      <div class="hd"><h2>Alerts</h2><span class="n" id="alN">0</span></div>
+      <div class="alist" id="alerts"></div>
+    </article>
+    <article class="card w-act">
+      <div class="hd"><h2>Activity</h2><div class="grow"></div><div class="lg" id="actLg"></div></div>
+      <div id="act"><div class="tip" id="tip"></div></div>
+    </article>
+    <article class="card w-teams">
+      <div class="hd"><h2>Teams</h2><span class="n" id="tmN">0</span><div class="grow"></div><button class="btn sm" data-go="tbuild" aria-label="New team"><svg class="i"><use href="#i-plus"/></svg></button></div>
+      <div class="tlist" id="tmCard"></div>
+    </article>
+    <article class="card w-ses">
+      <div class="hd"><h2>Sessions</h2><span class="n" id="sesN">0</span></div>
+      <div class="tscroll"><table class="tbl"><tbody id="sesT"></tbody></table></div>
+    </article>
+    <article class="card w-exp">
+      <div class="hd"><h2>Exposure</h2><div class="grow"></div><button class="btn sm" data-go="vault" aria-label="Vault"><svg class="i"><use href="#i-vault"/></svg></button></div>
+      <div class="tm" id="tm"></div>
+    </article>
+  </section>
+  </div>
+  <section class="card workspace-view" id="workspaceView" aria-labelledby="dT" hidden>
+    <div class="dh" id="viewHeader"><button class="btn ic" id="dBack" aria-label="Back" hidden><svg class="i"><use href="#i-back"/></svg></button><h2 id="dT" tabindex="-1"></h2><div class="dact" id="dA"></div></div>
+    <div class="db" id="dB"></div>
+  </section>
+</main>
+
+<nav class="bnav" aria-label="Navigation">
+  <button class="on" data-go="home"><svg class="i"><use href="#i-home"/></svg>Home</button>
+  <button data-go="topology"><svg class="i"><use href="#i-ses"/></svg>Agents</button>
+  <button data-go="vault"><svg class="i"><use href="#i-vault"/></svg>Vault</button>
+  <button data-go="security"><svg class="i"><use href="#i-shield"/></svg>Security<i class="bdg" data-request-badge hidden></i></button>
+</nav>
+
+<div class="undo" id="undo" role="status"><svg class="i"><use href="#i-lock"/></svg><span></span><button class="btn sm" id="undoGo">Undo</button><i></i></div>
+<div class="toast" id="toast" role="status"><svg class="i"><use href="#i-check"/></svg><span></span></div>
+<script type="module" src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,28 @@
+import { randomToken } from './crypto.js';
+
+/** Immutable ids with the prefixes used in the spec, schema and MCP tools. */
+export const newId = {
+  agent: () => `agent-${randomToken(5)}`,
+  pc: () => `pc-${randomToken(5)}`,
+  credential: () => `crd_${randomToken(10)}`,
+  policy: () => `pol_${randomToken(10)}`,
+  rule: () => `rul_${randomToken(10)}`,
+  notice: () => `ntc_${randomToken(10)}`,
+  invocation: () => `inv_${randomToken(10)}`,
+  event: () => `evt_${randomToken(10)}`,
+  alert: () => `alr_${randomToken(10)}`,
+  team: () => `team_${randomToken(10)}`,
+  task: () => `task_${randomToken(10)}`,
+  item: () => `itm_${randomToken(10)}`,
+  file: () => `fil_${randomToken(10)}`,
+  revision: () => `rev_${randomToken(10)}`,
+  conflict: () => `cfl_${randomToken(10)}`,
+  intent: () => `wri_${randomToken(10)}`,
+  admin: () => `adm_${randomToken(8)}`,
+  share: () => `shr_${randomToken(8)}`,
+  feedback: () => `fbk_${randomToken(8)}`,
+  channel: () => `chn_${randomToken(8)}`,
+  promotion: () => `prm_${randomToken(8)}`,
+  request: () => `acr_${randomToken(8)}`,
+  grant: () => `tgr_${randomToken(8)}`,
+};
