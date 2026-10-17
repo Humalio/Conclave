@@ -9,7 +9,7 @@ import type { Audit, Actor } from '../audit/audit.js';
 import type { Keys } from '../keys/keys.js';
 import { KeyError } from '../keys/keys.js';
 import type { Vault } from '../vault/vault.js';
-import { WRITE_TOOLS } from './lockdown.js';
+import { isWriteTool } from './lockdown.js';
 
 export interface AlertOpts {
   denialMax: number; denialWindowMs: number;
@@ -21,7 +21,7 @@ export const DEFAULT_ALERT_OPTS: AlertOpts = { denialMax: 10, denialWindowMs: 10
 const HOUR = 3600_000;
 
 const volumeClass = (tool: string): 'write' | 'message' | 'channel' | null =>
-  /^channel_(open|send)$/.test(tool) ? 'channel' : tool === 'message_send' ? 'message' : WRITE_TOOLS.has(tool) && /^(file_|share_|task_)/.test(tool) ? 'write' : null;
+  /^channel_(open|send)$/.test(tool) ? 'channel' : tool === 'message_send' ? 'message' : isWriteTool(tool) && /^(file_|share_|task_)/.test(tool) ? 'write' : null;
 
 export class Alerts {
   constructor(private readonly db: Db, private readonly audit: Audit, private readonly keys: Keys, private readonly vault: Vault, readonly opts: AlertOpts = DEFAULT_ALERT_OPTS) {

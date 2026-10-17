@@ -15,6 +15,11 @@ export interface Config {
   adminPassword?: string;
   publicDir: string;
   logLevel: string;
+  /**
+   * Which proxies may set X-Forwarded-For (the client address used in audit and rate limits). Default: loopback and
+   * private networks, where Caddy runs; set TRUST_PROXY=false when clients reach the hub without the proxy.
+   */
+  trustProxy?: boolean | string;
   /** Browser Origins allowed to call /mcp (default none). */
   allowedOrigins: string[];
   /** Path of the bridge program served by setup_pc (default: found next to the server or in ../bridge). */
@@ -33,6 +38,14 @@ export interface Config {
   maintenanceSeconds?: number;
   /** Knowledge graph tuning (src/graph/graph.ts), e.g. debounceMs. */
   graph?: Partial<import('./graph/graph.js').GraphOpts>;
+}
+
+/** TRUST_PROXY: true / false, or a comma list of addresses, CIDR ranges or the names loopback, linklocal, uniquelocal. */
+export function parseTrustProxy(v: string | undefined): boolean | string {
+  const s = (v ?? '').trim();
+  if (!s) return 'loopback,linklocal,uniquelocal';
+  if (/^(true|false)$/i.test(s)) return s.toLowerCase() === 'true';
+  return s;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -57,6 +70,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     channelBridgeMax: env.CHANNEL_MAX_BYTES ? Number(env.CHANNEL_MAX_BYTES) : undefined, channelBufferBytes: env.CHANNEL_BUFFER_BYTES ? Number(env.CHANNEL_BUFFER_BYTES) : undefined,
     channelBytesPerHour: env.CHANNEL_BYTES_PER_HOUR ? Number(env.CHANNEL_BYTES_PER_HOUR) : undefined, shareBytesPerHour: env.SHARE_BYTES_PER_HOUR ? Number(env.SHARE_BYTES_PER_HOUR) : undefined,
     retention: { ...(env.RETENTION_SHARES_DAYS ? { sharesDays: Number(env.RETENTION_SHARES_DAYS) } : {}), ...(env.RETENTION_CHANNELS_DAYS ? { channelsDays: Number(env.RETENTION_CHANNELS_DAYS) } : {}), ...(env.RETENTION_WORK_ITEMS_DAYS ? { workItemsDays: Number(env.RETENTION_WORK_ITEMS_DAYS) } : {}) },
+    trustProxy: parseTrustProxy(env.TRUST_PROXY),
     allowedOrigins: (env.ALLOWED_ORIGINS ?? '').split(',').map((s) => s.trim().replace(/[/]+$/, '')).filter(Boolean),
   };
 }

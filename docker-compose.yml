@@ -1,8 +1,12 @@
+# Agent Hub. Run `deploy/setup.sh` to create .env, or copy .env.example and fill it in.
+# With HTTPS enabled, .env sets COMPOSE_FILE so deploy/docker-compose.https.yml is layered on top.
 services:
   agent-hub:
     build: .
+    # Run as the host user that owns ./data and the vault, so bind mounts are writable.
+    user: "${HUB_UID:-1000}:${HUB_GID:-1000}"
     ports:
-      - "8080:8080"
+      - "${HUB_BIND:-127.0.0.1}:${HUB_PORT:-8080}:8080"
     env_file: .env
     volumes:
       - ./data:/data

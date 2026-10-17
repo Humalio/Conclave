@@ -1,0 +1,29 @@
+# HTTPS front door. Layered over ../docker-compose.yml through COMPOSE_FILE in .env.
+# The hub stops publishing a port; only Caddy is reachable from the network.
+#   HTTPS_MODE=lan     internal certificate for an IP or LAN name; plain HTTP also carries MCP and bridge
+#                      traffic (unencrypted) for clients that do not trust that certificate yet
+#   HTTPS_MODE=domain  public certificate from Let's Encrypt; everything over HTTPS
+services:
+  agent-hub:
+    ports: !reset []
+  caddy:
+    image: caddy:2.10.2-alpine
+    restart: unless-stopped
+    depends_on: [agent-hub]
+    environment:
+      HUB_HOST: ${HUB_HOST:?set HUB_HOST in .env}
+      HTTP_PORT: ${HTTP_PORT:-80}
+      HTTPS_PORT: ${HTTPS_PORT:-443}
+      ACME_EMAIL: ${ACME_EMAIL:-}
+    ports:
+      - "${HTTP_PORT:-80}:${HTTP_PORT:-80}"
+      - "${HTTPS_PORT:-443}:${HTTPS_PORT:-443}"
+    volumes:
+      # Relative paths resolve from the project root (the first compose file's folder).
+      - ./deploy/caddy/${HTTPS_MODE:?set HTTPS_MODE in .env}.Caddyfile:/etc/caddy/Caddyfile:ro
+      # Certificates and the internal certificate authority survive restarts here.
+      - caddy_data:/data
+      - caddy_config:/config
+volumes:
+  caddy_data:
+  caddy_config:

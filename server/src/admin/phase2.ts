@@ -4,12 +4,12 @@ import { z } from 'zod';
 import type { Db } from '../db/db.js';
 import type { Keys } from '../keys/keys.js';
 import { KeyError } from '../keys/keys.js';
-import type { Actor } from '../audit/audit.js';
+import type { Actor, Audit } from '../audit/audit.js';
 import type { Config } from '../config.js';
 import type { Setup } from '../setup/setup.js';
 import type { Links } from '../links/links.js';
 
-export interface Phase2Deps { db: Db; keys: Keys; setup: Setup; links: Links; config: Config }
+export interface Phase2Deps { db: Db; keys: Keys; setup: Setup; links: Links; config: Config; audit: Audit }
 
 export function setupMessage(hub: string, setupKey: string, pcName: string): string {
   return [
@@ -26,7 +26,7 @@ export function setupMessage(hub: string, setupKey: string, pcName: string): str
 type Login = { token_hash: string; app_credential_id: string; session_credential_id: string; created_at: number; last_used_at: number };
 
 export function registerPhase2(api: FastifyInstance, d: Phase2Deps, actor: (r: FastifyRequest) => Actor): void {
-  const { db, keys, setup, links, config } = d;
+  const { db, keys, setup, links, config, audit } = d;
   const body = <T extends z.ZodType>(s: T, req: FastifyRequest): z.infer<T> => s.parse(req.body ?? {});
   const p = (req: FastifyRequest, k = 'id') => (req.params as Record<string, string>)[k]!;
 
@@ -68,8 +68,25 @@ export function registerPhase2(api: FastifyInstance, d: Phase2Deps, actor: (r: F
       ...v, session_keys: sessionKeys, links: links.forAgent(id),
       invocations: db.prepare('SELECT tool,result,error_code,duration_ms,created_at FROM tool_invocations WHERE agent_id=? ORDER BY created_at DESC LIMIT 30').all(id),
       accesses: db.prepare('SELECT path,action,decision,created_at FROM resource_access_events WHERE agent_id=? ORDER BY created_at DESC LIMIT 30').all(id),
-      notices: db.prepare('SELECT seq,kind,body,created_at FROM agent_notices WHERE agent_id=? ORDER BY seq DESC LIMIT 10').all(id),
+      notices: db.prepare('SELECT seq,kind,body,created_at FROM agent_notices WHERE agent_id=? ORDER BY seq DESC LIMIT 50').all(id),
+      // Highest notice any of this agent's logins has confirmed with session_ack; each new login is shown pending notices again.
+      notices_acked_seq: (db.prepare('SELECT COALESCE(MAX(t.notice_acked_seq),0) s FROM session_tokens t JOIN credentials c ON c.id=t.session_credential_id WHERE c.agent_id=?').get(id) as { s: number }).s,
+      role_note: keys.agent(id)!.role_note ?? null,
+      // Standing instructions from teams: the playbook of each team role this agent holds (agents read it with team_info).
+      playbooks: db.prepare(`SELECT t.id team_id, t.name team_name, t.status team_status, m.role, r.playbook FROM team_members m JOIN teams t ON t.id=m.team_id
+        LEFT JOIN team_roles r ON r.team_id=m.team_id AND r.role=m.role WHERE m.agent_id=? ORDER BY t.name`).all(id),
     };
+  });
+  /** Send the agent a directive or a message. It arrives as a notice with the agent's next hub call; the agent confirms it with session_ack. */
+  api.post('/api/agents/:agentId/notices', async (req) => {
+    const id = p(req, 'agentId');
+    const a = keys.agent(id);
+    if (!a || a.status === 'archived') throw new KeyError('not_found', 'agent not found');
+    const b = z.object({ kind: z.enum(['directive', 'message']), body: z.string().trim().min(1).max(4000) }).parse(req.body ?? {});
+    keys.notify(id, b.kind, b.body);
+    const n = db.prepare('SELECT seq,kind,body,created_at FROM agent_notices WHERE agent_id=? ORDER BY seq DESC LIMIT 1').get(id);
+    audit.event(actor(req), 'agent.notice', { kind: 'agent', id }, { kind: b.kind, chars: b.body.length, text: b.body.slice(0, 200) });
+    return { notice: n };
   });
   api.post('/api/sessions/:agentId/archive', async (req) => {
     const r = keys.archiveAgent(p(req, 'agentId'), actor(req));

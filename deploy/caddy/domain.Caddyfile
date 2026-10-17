@@ -1,0 +1,11 @@
+# HTTPS for a public domain name that points at this host. Caddy obtains and renews a
+# Let's Encrypt certificate; ports 80 and 443 must be reachable from the internet for that.
+# Everything, including MCP and bridge traffic, uses HTTPS; plain HTTP only redirects.
+{
+	email {$ACME_EMAIL}
+}
+
+{$HUB_HOST} {
+	encode zstd gzip
+	reverse_proxy agent-hub:8080
+}

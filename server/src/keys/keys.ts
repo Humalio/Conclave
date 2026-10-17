@@ -25,12 +25,15 @@ export interface Credential {
 export interface Agent {
   id: string; label: string; project: string | null; model_label: string | null; role: string | null; role_detail: string | null;
   role_source: 'agent' | 'admin' | null; role_note: string | null; status_text: string | null; status: string; created_at: number; last_seen_at: number | null; archived_at?: number | null;
+  recruited_team_id?: string | null; recruited_by?: string | null;
 }
 export interface Machine { id: string; name: string; description: string | null; status: string; created_at: number; os?: string | null; setup_status?: string; bridge_version?: string | null; bridge_last_seen_at?: number | null }
 export interface Notice { id: string; agent_id: string; seq: number; kind: string; body: string; created_at: number }
 
 const CRED_COLS = 'id,kind,agent_id,machine_id,app_name,label,key_id,status,status_reason,expires_at,replaces_credential_id,policy_id,max_live_sessions,created_at,first_used_at,last_used_at,revoked_at';
 export const TOKEN_IDLE_MS = 60 * 60 * 1000;
+/** SQL condition on agent_notices n: not a task notice, or its task is still in the state the notice describes. */
+const CURRENT_NOTICE = '(n.ref_task_id IS NULL OR EXISTS (SELECT 1 FROM tasks k WHERE k.id=n.ref_task_id AND k.status=n.ref_state))';
 const KEY_RE = /^ah_(app|ses)_([a-z2-7]{12})_([a-z2-7]{32})$/;
 const TOKEN_RE = /^ah_tok_([a-z2-7]{40})$/;
 
@@ -53,7 +56,7 @@ export class Keys {
   updateAgent(id: string, patch: { label?: string; project?: string | null; role?: string | null; role_detail?: string | null }, actor: Actor): Agent {
     const a = this.agent(id); if (!a) throw new KeyError('not_found', 'agent not found');
     const next = { ...a, ...patch };
-    const roleChanged = patch.role !== undefined && patch.role !== a.role;
+    const roleChanged = (patch.role !== undefined && patch.role !== a.role) || (patch.role_detail !== undefined && patch.role_detail !== a.role_detail);
     const adminSetsRole = patch.role !== undefined || patch.role_detail !== undefined;
     this.db.prepare('UPDATE agents SET label=?, project=?, role=?, role_detail=?, role_source=? WHERE id=?')
       .run(next.label, next.project, next.role, next.role_detail, adminSetsRole ? (next.role === null ? null : 'admin') : a.role_source, id);
@@ -149,7 +152,16 @@ export class Keys {
     if (filter.machineId) { w.push('machine_id=?'); a.push(filter.machineId); }
     return this.credentialsWhere(w.join(' AND '), ...a);
   }
-  allKeyIds(): string[] { return (this.db.prepare('SELECT key_id FROM credentials').all() as { key_id: string }[]).map((r) => r.key_id); }
+  /**
+   * Leak guard: is this a key or token the hub issued, whatever its status? An exact verifier check, so text that
+   * merely looks like a key never counts. For 'tok', keyId is '' and secret is the part after ah_tok_.
+   */
+  isIssued(kind: 'app' | 'ses' | 'set' | 'brg' | 'tok', keyId: string, secret: string): boolean {
+    if (kind === 'tok') return !!this.db.prepare('SELECT 1 FROM session_tokens WHERE token_hash=?').get(sha256Hex(`ah_tok_${secret}`));
+    const table = kind === 'set' ? 'setup_keys' : kind === 'brg' ? 'bridge_keys' : 'credentials';
+    const row = this.db.prepare(`SELECT verifier FROM ${table} WHERE key_id=?`).get(keyId) as { verifier: string } | undefined;
+    return !!row && safeEqualHex(row.verifier, this.verifier(secret));
+  }
 
   /** Effective status: revoked > suspended > expired > active. */
   effectiveStatus(c: Credential, now = Date.now()): 'active' | 'suspended' | 'revoked' | 'expired' {
@@ -212,6 +224,8 @@ export class Keys {
         VALUES (?,?,?,?,?,?,?,?,'active',?,?,?,?,?,?)`).run(nid, old.kind, old.agent_id, old.machine_id, old.app_name, old.label, s.keyId, this.verifier(s.secret), old.expires_at, id, old.policy_id, old.max_live_sessions, Date.now(), actor.kind === 'admin' ? actor.id : null);
       this.db.prepare('UPDATE temporary_grants SET credential_id=? WHERE credential_id=?').run(nid, id);
       this.db.prepare("UPDATE access_requests SET credential_id=? WHERE credential_id=? AND status='pending'").run(nid, id);
+      // Team membership names the key its team rules live on; left on the old key, the next re-wire would drop them.
+      this.db.prepare('UPDATE team_members SET credential_id=? WHERE credential_id=?').run(nid, id);
       if (old.agent_id) this.notify(old.agent_id, 'key_rotated', 'Your session key was rotated. Wait for the new key from the administrator, then call session_login with it.');
       this.audit.event(actor, 'key.rotate', { kind: 'credential', id: nid }, { replaces: id });
       return { credential: this.credential(nid)!, secret: s.full };
@@ -326,10 +340,20 @@ export class Keys {
     const live = (this.db.prepare('SELECT COUNT(*) n FROM session_tokens WHERE app_credential_id=? AND revoked_at IS NULL AND expires_at>?').get(app.id, now) as { n: number }).n;
     if (live >= app.max_live_sessions) throw new KeyError('rate_limited', `this app already has ${live} live sessions (limit ${app.max_live_sessions})`);
     const others = (this.db.prepare('SELECT COUNT(*) n FROM session_tokens WHERE session_credential_id=? AND revoked_at IS NULL AND expires_at>?').get(ses.id, now) as { n: number }).n;
-    const token = `ah_tok_${randomToken(25).slice(0, 40)}`;
-    const maxSeq = (this.db.prepare('SELECT COALESCE(MAX(seq),0) s FROM agent_notices WHERE agent_id=?').get(ses.agent_id!) as { s: number }).s;
-    this.db.prepare('INSERT INTO session_tokens(token_hash,app_credential_id,session_credential_id,notice_acked_seq,created_at,last_used_at,expires_at) VALUES (?,?,?,?,?,?,?)')
-      .run(sha256Hex(token), app.id, ses.id, maxSeq, now, now, now + TOKEN_IDLE_MS);
+    const token = `ah_tok_${randomToken(25).slice(0, 40)}`, hash = sha256Hex(token);
+    // A new login continues where the agent left off: notices after the last one it confirmed (so a directive sent
+    // while it was logged out still arrives), and room read positions from its earlier logins (so history is not replayed).
+    // An agent's first login skips the hub's own setup notices but still gets the operator's directives and messages.
+    const prev = (this.db.prepare('SELECT MAX(t.notice_acked_seq) s FROM session_tokens t JOIN credentials c ON c.id=t.session_credential_id WHERE c.agent_id=?').get(ses.agent_id!) as { s: number | null }).s;
+    const firstDirective = (this.db.prepare("SELECT MIN(seq) s FROM agent_notices WHERE agent_id=? AND kind IN ('directive','message')").get(ses.agent_id!) as { s: number | null }).s;
+    const newest = (this.db.prepare('SELECT COALESCE(MAX(seq),0) s FROM agent_notices WHERE agent_id=?').get(ses.agent_id!) as { s: number }).s;
+    const acked = prev !== null ? Math.min(prev, newest) : firstDirective !== null ? firstDirective - 1 : newest;
+    tx(this.db, () => {
+      this.db.prepare('INSERT INTO session_tokens(token_hash,app_credential_id,session_credential_id,notice_acked_seq,created_at,last_used_at,expires_at) VALUES (?,?,?,?,?,?,?)')
+        .run(hash, app.id, ses.id, acked, now, now, now + TOKEN_IDLE_MS);
+      this.db.prepare(`INSERT INTO message_delivery_cursors(agent_id,token_hash,room_id,delivered_seq,acked_seq,updated_at)
+        SELECT agent_id, ?, room_id, MAX(delivered_seq), MAX(acked_seq), ? FROM message_delivery_cursors WHERE agent_id=? GROUP BY room_id`).run(hash, now, ses.agent_id!);
+    });
     this.db.prepare('UPDATE agents SET last_seen_at=? WHERE id=?').run(now, ses.agent_id!);
     return { token, credential: ses, concurrent: others > 0 };
   }
@@ -366,17 +390,27 @@ export class Keys {
   }
 
   // ───────────── Notices ─────────────
-  notify(agentId: string, kind: string, body: string): void {
+  /** ref: a task notice names its task and the state it describes, so it stops being delivered once the task moves on. */
+  notify(agentId: string, kind: string, body: string, ref?: { task: string; state: string }): void {
     tx(this.db, () => {
       const seq = (this.db.prepare('SELECT COALESCE(MAX(seq),0)+1 s FROM agent_notices WHERE agent_id=?').get(agentId) as { s: number }).s;
-      this.db.prepare('INSERT INTO agent_notices(id,agent_id,seq,kind,body,created_at) VALUES (?,?,?,?,?,?)').run(newId.notice(), agentId, seq, kind, body, Date.now());
+      this.db.prepare('INSERT INTO agent_notices(id,agent_id,seq,kind,body,created_at,ref_task_id,ref_state) VALUES (?,?,?,?,?,?,?,?)')
+        .run(newId.notice(), agentId, seq, kind, body, Date.now(), ref?.task ?? null, ref?.state ?? null);
     });
   }
+  /** Notices after this login's cursor, without task notices whose task has left the state they describe.
+      Stale ones are skipped, not acknowledged: the cursor is cumulative and must not clear unrelated notices. */
   pendingNotices(tokenHash: string, agentId: string): Notice[] {
     const acked = (this.db.prepare('SELECT notice_acked_seq s FROM session_tokens WHERE token_hash=?').get(tokenHash) as { s: number } | undefined)?.s ?? 0;
-    return this.db.prepare('SELECT * FROM agent_notices WHERE agent_id=? AND seq>? ORDER BY seq').all(agentId, acked) as unknown as Notice[];
+    return this.db.prepare(`SELECT n.* FROM agent_notices n WHERE n.agent_id=? AND n.seq>? AND ${CURRENT_NOTICE} ORDER BY n.seq`).all(agentId, acked) as unknown as Notice[];
   }
+  /** Whether a stored notice still describes its task's current state (always true for other notices). */
+  noticeCurrent(noticeId: string): boolean {
+    return !!this.db.prepare(`SELECT 1 FROM agent_notices n WHERE n.id=? AND ${CURRENT_NOTICE}`).get(noticeId);
+  }
+  /** Confirm notices up to upTo, never past the agent's newest notice: a too-large number would hide every future one. */
   ackNotices(tokenHash: string, upTo: number): void {
-    this.db.prepare('UPDATE session_tokens SET notice_acked_seq=MAX(notice_acked_seq, ?) WHERE token_hash=?').run(upTo, tokenHash);
+    this.db.prepare(`UPDATE session_tokens SET notice_acked_seq=MAX(notice_acked_seq, MIN(?, (SELECT COALESCE(MAX(n.seq),0) FROM agent_notices n
+      JOIN credentials c ON c.agent_id=n.agent_id WHERE c.id=session_tokens.session_credential_id))) WHERE token_hash=?`).run(upTo, tokenHash);
   }
 }

@@ -16,7 +16,7 @@ export const ALL_ACTIONS = [
   'fs.list', 'fs.read', 'fs.search', 'fs.create', 'fs.update', 'fs.rename', 'fs.delete', 'fs.download', 'fs.history', 'fs.restore', 'fs.conflicts',
   'message.send', 'message.receive', 'channel.open', 'channel.accept', 'share.with',
   'room.join', 'room.post', 'room.read_history', 'room.invite', 'room.create',
-  'team.member', 'task.create', 'task.assign', 'task.claim', 'task.review', 'task.complete', 'task.block', 'team.report', 'team.complete',
+  'team.member', 'task.create', 'task.assign', 'task.claim', 'task.review', 'task.complete', 'task.block', 'team.report', 'team.complete', 'team.recruit', 'team.plan',
   'share.create', 'share.upload', 'share.read', 'share.comment', 'share.suggest', 'share.promote',
   'channel.use',
   'graph.read', 'graph.write', 'graph.review',

@@ -194,12 +194,16 @@ describe('direct messages and permissions', () => {
 describe('rooms', () => {
   const room = (id = '*'): Rules => [{ effect: 'allow', actions: ['room.post', 'room.read_history'], resource: `room:${id}` }];
   it('create, join, post, history, invite and leave follow the grants', async () => {
-    const h = mk('host', [{ effect: 'allow', actions: ['room.create', 'room.invite', 'room.join'], resource: 'room:*' }, ...room()]);
-    const k = mk('member', room());
+    // Adding someone to a room sends them a notice, so the host must be allowed to message them (both ways).
+    const h = mk('host', [{ effect: 'allow', actions: ['room.create', 'room.invite', 'room.join'], resource: 'room:*' }, ...room(), { effect: 'allow', actions: ['message.send'], resource: 'agent:*' }]);
+    const fromHost: Rules = [{ effect: 'allow', actions: ['message.receive'], resource: `agent:${h.id}` }];
+    const k = mk('member', [...room(), ...fromHost]);
     const i = mk('joiner', [{ effect: 'allow', actions: ['room.join'], resource: 'room:*' }]);
-    const j = mk('outsider');
+    const j = mk('outsider', fromHost);
     const H = await login(h), K = await login(k), I = await login(i), J = await login(j);
     expect((await K('room_create', { name: 'nope' })).structuredContent.error).toBe('denied');
+    // the joiner does not accept messages from the host, so the host cannot add it
+    expect((await H('room_create', { name: 'pushy', members: [i.id] })).structuredContent.error).toBe('denied');
     const created = (await H('room_create', { name: 'design', members: [k.id] })).structuredContent;
     const rid = created.room_id as string;
     expect(created.members.sort()).toEqual([h.id, k.id].sort());

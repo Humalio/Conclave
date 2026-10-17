@@ -1,0 +1,15 @@
+# Secrets and runtime state from deployments
+.env
+.env.*
+!.env.example
+/data/
+/vault/
+/local-vault/
+rehearsal-handoffs.json
+
+# Build output and dependencies
+node_modules/
+dist/
+
+# Local design review hub (server/scripts/dev-hub.mjs)
+/.dev/

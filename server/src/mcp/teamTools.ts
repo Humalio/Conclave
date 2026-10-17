@@ -1,13 +1,14 @@
 /** MCP tools for teams, tasks and the work loop (design/08 "Tasks", "Teams and the work loop"). */
 import { z } from 'zod';
 import { KeyError } from '../keys/keys.js';
-import type { Teams, Who, TaskRow } from '../teams/teams.js';
+import type { Teams, Who, TaskRow, TeamPlan } from '../teams/teams.js';
 
-type Out = { text: string; data: Record<string, unknown> };
+type Out = { text: string; data: Record<string, unknown>; authorizedSecrets?: string[] };
 type Reg = (name: string, description: string, shape: z.ZodRawShape, needsToken: boolean, fn: (ctx: any, a: any) => Promise<Out>) => void;
 type ToolErrorCtor = new (code: string, message: string, extra?: Record<string, unknown>) => Error;
 
-export function registerTeamTools(reg: Reg, teams: Teams, ToolError: ToolErrorCtor): void {
+/** messageBudget: charges one message to the sender's hourly limit and throws when it is spent (team_report and team_complete post into the team room). */
+export function registerTeamTools(reg: Reg, teams: Teams, ToolError: ToolErrorCtor, opts: { messageBudget?: (credId: string) => void } = {}): void {
   const who = (ctx: any): Who => { const s = ctx.session; return { agentId: s.agent.id, credId: s.cred.id, tokenHash: s.tokenHash, rules: s.rules, cap: s.cap }; };
   /** Run a team operation, turning hub errors into tool errors. */
   const run = async <T>(fn: () => T | Promise<T>): Promise<T> => {
@@ -27,17 +28,44 @@ export function registerTeamTools(reg: Reg, teams: Teams, ToolError: ToolErrorCt
     if (a.team_id && mine.length === 0) throw new ToolError('denied', 'Not allowed, or does not exist.');
     const list = mine.map((t) => ({
       trust: 'L0', team_id: t.id, name: t.name, goal: t.goal, status: t.status, paused_reason: t.paused_reason, room_id: t.room_id, my_role: t.my_role,
-      playbook: teams.playbook(t.id, t.my_role), lease_minutes: t.lease_minutes, max_review_rounds: t.max_review_rounds,
+      playbook: teams.playbook(t.id, t.my_role), mode: t.delivery_mode, close_on_approve: !!t.close_on_approve, coordinator_reviews: !!t.coordinator_reviews,
+      lease_minutes: t.lease_minutes, max_review_rounds: t.max_review_rounds,
       members: teams.members(t.id).map((m) => ({ agent_id: m.agent_id, role: m.role, me: m.agent_id === w.agentId })),
     }));
-    return { text: list.length ? list.map((t) => `${t.team_id} "${t.name}" [${t.status}] you are ${t.my_role}\nGoal: ${t.goal}\nPlaybook (L0): ${t.playbook}\nMembers: ${t.members.map((m) => `${m.agent_id}(${m.role})`).join(', ')}`).join('\n\n') : 'You are not in a team.', data: { teams: list } };
+    return { text: list.length ? list.map((t) => `${t.team_id} "${t.name}" [${t.status}, ${t.mode === 'on_demand' ? 'on demand: act when woken, never poll' : 'polling: loop on work_next'}] you are ${t.my_role}\nGoal: ${t.goal}\nPlaybook (L0): ${t.playbook}\nMembers: ${t.members.map((m) => `${m.agent_id}(${m.role})`).join(', ')}`).join('\n\n') : 'You are not in a team.', data: { teams: list } };
   });
 
+  reg('team_recruit', 'Coordinator: add an agent to your team, within the limits the administrator set (recruiting must be on). In automatic mode the agent is created now and you get its one-time handoff to start it (for example as a subagent); in ask mode the administrator approves it and starts it.', {
+    team_id: teamId, label: z.string().min(1).max(80).describe('Name of the new agent'), role: z.string().max(30).describe('worker, reviewer or stakeholder (as allowed by the team)'),
+    purpose: z.string().min(1).max(500).describe('What the agent is for; it becomes its role description'),
+  }, true, async (ctx, a) => run(() => {
+    const r = teams.recruit(who(ctx), a);
+    if (r.status === 'pending') return { text: `Request ${r.request_id} is waiting for the administrator. You get a recruit_decision notice when it is decided.`, data: { status: 'pending', request_id: r.request_id } };
+    return { text: `Recruited ${r.agent_id} as ${a.role}. Give this handoff to the agent once; it is not shown again:
+${r.handoff}`, data: { status: 'created', agent_id: r.agent_id, handoff: r.handoff }, authorizedSecrets: [r.secret!] };
+  }));
+
+  const planText = (p: TeamPlan) => [`Plan v${p.version}${p.updated_at ? '' : ' (empty)'}`,
+    ...p.requirements.map((x) => `${x.key} [${x.status}${x.priority ? ', ' + x.priority : ''}] ${x.title}${x.links.length ? ' -> ' + x.links.join(',') : ''}${x.tasks.total ? ` (tasks ${x.tasks.done}/${x.tasks.total})` : ''}`),
+    ...p.milestones.map((x) => `${x.key} [${x.status}]${x.due_at ? ' due ' + new Date(x.due_at).toISOString().slice(0, 10) : ''} ${x.title}`)].join('\n');
+  reg('team_plan', 'The team plan: requirements the goal implies (with status, priority and linked milestones) and milestones. Any member may read it.', { team_id: teamId }, true, async (ctx, a) => {
+    const p = await run(() => teams.readPlan(who(ctx), a.team_id));
+    return { text: planText(p), data: { plan: p } };
+  });
+  reg('team_plan_set', 'Coordinator: replace the whole team plan. Requirements first (most important): key (R1…), title, priority must/should/could, status open/met/unclear/dropped, criteria, evidence, milestones (keys it is delivered by). Milestones: key (M1…), title, due_at (ms), status planned/in_progress/reached/missed/dropped. Pass version from team_plan to avoid overwriting a newer plan.', {
+    team_id: teamId, version: z.number().int().min(0).optional(), requirements: z.array(z.object({ key: z.string().min(1).max(16), title: z.string().min(1).max(200), detail: z.string().max(2000).optional(), priority: z.enum(['must', 'should', 'could']).optional(), status: z.string().max(20).optional(), criteria: z.string().max(1000).optional(), evidence: z.string().max(500).optional(), due_at: z.number().int().optional(), milestones: z.array(z.string().max(16)).max(20).optional() })).max(100), milestones: z.array(z.object({ key: z.string().min(1).max(16), title: z.string().min(1).max(200), detail: z.string().max(2000).optional(), priority: z.enum(['must', 'should', 'could']).optional(), status: z.string().max(20).optional(), criteria: z.string().max(1000).optional(), evidence: z.string().max(500).optional(), due_at: z.number().int().optional(), milestones: z.array(z.string().max(16)).max(20).optional() })).max(100).optional(),
+  }, true, async (ctx, a) => { const p = await run(() => teams.setPlan(who(ctx), a)); return { text: planText(p), data: { plan: p } }; });
+  reg('team_plan_update', 'Coordinator: change single plan items by key (only the fields you give change; new keys are added), or remove keys. Use it for status changes.', {
+    team_id: teamId, requirements: z.array(z.object({ key: z.string().min(1).max(16), title: z.string().min(1).max(200).optional(), detail: z.string().max(2000).optional(), priority: z.enum(['must', 'should', 'could']).optional(), status: z.string().max(20).optional(), criteria: z.string().max(1000).optional(), evidence: z.string().max(500).optional(), due_at: z.number().int().optional(), milestones: z.array(z.string().max(16)).max(20).optional() })).max(50).optional(), milestones: z.array(z.object({ key: z.string().min(1).max(16), title: z.string().min(1).max(200).optional(), detail: z.string().max(2000).optional(), priority: z.enum(['must', 'should', 'could']).optional(), status: z.string().max(20).optional(), criteria: z.string().max(1000).optional(), evidence: z.string().max(500).optional(), due_at: z.number().int().optional(), milestones: z.array(z.string().max(16)).max(20).optional() })).max(50).optional(), remove: z.array(z.string().max(16)).max(50).optional(),
+  }, true, async (ctx, a) => { const p = await run(() => teams.updatePlan(who(ctx), a as never)); return { text: planText(p), data: { plan: p } }; });
+
   reg('team_report', 'Coordinator: post a report to the team room and tell the stakeholders.', { team_id: teamId, summary: z.string().min(1).max(8000) }, true, async (ctx, a) => {
+    opts.messageBudget?.(ctx.session.cred.id);
     await run(() => teams.report(who(ctx), a));
     return { text: 'Report posted.', data: { ok: true } };
   });
   reg('team_complete', 'Coordinator: finish the team. Team permissions are removed and members are told to stop.', { team_id: teamId, summary: z.string().min(1).max(8000) }, true, async (ctx, a) => {
+    opts.messageBudget?.(ctx.session.cred.id);
     const t = await run(() => teams.finishTeam(who(ctx), a));
     return { text: `Team ${t.id} is done.`, data: { team_id: t.id, status: t.status } };
   });
@@ -59,9 +87,11 @@ export function registerTeamTools(reg: Reg, teams: Teams, ToolError: ToolErrorCt
 
   reg('task_create', 'Coordinator: create an open task in a team. claimable lets any worker take it; reviewer names the reviewer (never the assignee).', {
     team_id: teamId, title: z.string().min(1).max(200), description: z.string().max(20000).optional(), claimable: z.boolean().optional(), reviewer: z.string().max(100).optional(),
+    refs: z.array(z.string().max(16)).max(20).optional().describe('Requirement or milestone keys from the team plan this task serves'),
   }, true, async (ctx, a) => one('Created', await run(() => teams.create_task(who(ctx), a))));
   reg('task_update', 'Coordinator: edit title and description only. Fails with conflict if version is stale.', {
     task_id: taskId, version: z.number().int().min(1), title: z.string().min(1).max(200).optional(), description: z.string().max(20000).optional(),
+    refs: z.array(z.string().max(16)).max(20).optional().describe('Requirement or milestone keys from the team plan'),
   }, true, async (ctx, a) => one('Updated', await run(() => teams.update_task(who(ctx), a))));
   reg('task_list', 'Tasks of my team(s), optionally by status or assignee.', {
     team_id: teamId.optional(), room_id: z.string().max(100).optional(), status: z.string().max(30).optional(), assignee: z.string().max(100).optional(),

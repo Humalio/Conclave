@@ -8,7 +8,7 @@
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+<svg class="sprite" width="0" height="0" aria-hidden="true"><defs>
 <symbol id="i-key" viewBox="0 0 24 24"><circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M17 6l3 3M15 8l2 2"/></symbol>
 <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
 <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></symbol>
@@ -50,6 +50,8 @@
 <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/></symbol>
 <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/></symbol>
 <symbol id="i-up" viewBox="0 0 24 24"><path d="M12 19V6M6 11l6-6 6 6"/></symbol>
+<symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8v.01"/></symbol>
+<symbol id="i-more" viewBox="0 0 24 24"><path d="M5 12h.01M12 12h.01M19 12h.01"/></symbol>
 <symbol id="i-sl" viewBox="0 0 24 24"><path d="M4 7h10M18 7h2M4 17h2M10 17h10"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/></symbol>
 </defs></svg>
 
@@ -60,105 +62,124 @@
     <input class="inp" id="lp" name="password" type="password" autocomplete="current-password" aria-label="Password" placeholder="Password" required>
     <input class="inp mono" id="lt" name="totp" inputmode="numeric" autocomplete="one-time-code" aria-label="Code" placeholder="000000" maxlength="6" hidden>
     <div class="err" id="le" role="alert"></div>
-    <button class="btn pri" style="height:40px;justify-content:center" type="submit">Sign in</button>
+    <button class="btn pri lg" type="submit">Sign in</button>
   </form>
 </div>
 
 <aside class="side" aria-label="Navigation">
   <div class="logo"><svg class="i"><use href="#i-hub"/></svg></div>
   <button class="nav on" data-go="home" data-tip="Overview" aria-label="Overview"><svg class="i"><use href="#i-home"/></svg></button>
-  <button class="nav" data-go="monitoring" data-tip="Monitoring" aria-label="Monitoring"><svg class="i"><use href="#i-pulse"/></svg></button>
-  <button class="nav" data-go="topology" data-tip="Agents  G" aria-label="Agents"><svg class="i"><use href="#i-ses"/></svg></button>
+  <button class="nav" data-go="agents" data-tip="Work  G" aria-label="Work"><svg class="i"><use href="#i-ses"/></svg></button>
   <button class="nav" data-go="security" data-tip="Security  K" aria-label="Security"><svg class="i"><use href="#i-shield"/></svg><i class="bdg" data-request-badge hidden></i></button>
   <button class="nav" data-go="vault" data-tip="Vault  V" aria-label="Vault"><svg class="i"><use href="#i-vault"/></svg></button>
   <button class="nav" data-go="log" data-tip="Auditing  L" aria-label="Auditing"><svg class="i"><use href="#i-log"/></svg></button>
   <div class="sp"></div>
   <button class="nav" data-go="shortcuts" data-tip="Shortcuts  ?" aria-label="Shortcuts"><svg class="i"><use href="#i-kbd"/></svg></button>
   <button class="nav" data-go="theme" data-tip="Theme  T" aria-label="Theme"><svg class="i th-ic"><use href="#i-sun"/></svg></button>
-  <button class="nav me-btn" data-me aria-label="Account" aria-haspopup="menu" aria-expanded="false"><span class="av" data-av>A</span></button>
+  <button class="nav me-btn" data-me aria-label="Account" aria-haspopup="menu" aria-expanded="false"><span class="av lg" data-av>A</span></button>
 </aside>
 <div class="menu" id="meMenu" role="menu" aria-label="Account" hidden></div>
 
 <main class="main" id="app" hidden>
-  <header class="top">
-    <h1>Agent Hub</h1>
-    <div class="live"><span class="dot pulse" id="liveDot"></span><span id="clock" class="mono">--:--:--</span></div>
-    <div class="grow"></div>
-    <button class="btn ic show-m" data-go="monitoring" aria-label="Monitoring"><svg class="i"><use href="#i-pulse"/></svg></button>
-    <button class="btn ic show-m" data-go="log" aria-label="Auditing"><svg class="i"><use href="#i-log"/></svg></button>
-    <button class="btn lk" id="lk" data-go="lock" aria-label="Lockdown"><svg class="i"><use href="#i-lock"/></svg><span class="hide-m">Lockdown</span></button>
-    <button class="av show-m" data-me data-av id="avatar" aria-label="Account" aria-haspopup="menu" aria-expanded="false">A</button>
+  <header class="appbar" id="appbar">
+    <h1 id="pageTitle">Overview</h1>
+    <span class="grow"></span>
+    <button class="ibtn show-m" id="appAct" data-go="tbuild" aria-label="New team" hidden><svg class="i"><use href="#i-plus"/></svg></button>
+    <span class="clock"><span class="dot pulse" id="liveDot"></span><span id="clock">--:--:--</span></span>
+    <button class="btn bad lk hide-m" id="lk" data-go="lock" aria-label="Lockdown"><svg class="i"><use href="#i-lock"/></svg>Lockdown</button>
+    <button class="btn warn enrol hide-m" id="enrol2fa" data-go="account" hidden title="Your admin login has no second factor"><svg class="i"><use href="#i-shield"/></svg>Enrol 2FA</button>
+    <button class="ibtn show-m" id="moreBtn" aria-label="More" aria-haspopup="dialog"><svg class="i"><use href="#i-more"/></svg><i class="amb" id="moreDot" hidden></i></button>
   </header>
 
+  <header class="appbar detail" id="dbar" aria-label="Screen"></header>
   <div class="lkb" id="lkb" hidden></div>
   <section class="workspace-bar" id="agentsBar" aria-labelledby="agentsTitle" hidden>
-    <h2 id="agentsTitle"><svg class="i"><use href="#i-ses"/></svg>Agents</h2>
+    <h2 id="agentsTitle"><svg class="i"><use href="#i-ses"/></svg>Work</h2>
     <nav class="seg ws-tabs" aria-label="Agent views">
-      <button data-go="topology"><svg class="i"><use href="#i-hub"/></svg>Topology</button>
-      <button data-go="sessions"><svg class="i"><use href="#i-user"/></svg>Sessions</button>
       <button data-go="teams"><svg class="i"><use href="#i-team"/></svg>Teams</button>
+      <button data-go="topology"><svg class="i"><use href="#i-pulse"/></svg>Activity</button>
+      <button data-go="sessions"><svg class="i"><use href="#i-user"/></svg>Sessions</button>
       <button data-go="chats"><svg class="i"><use href="#i-chat"/></svg>Chats</button>
     </nav>
   </section>
   <section class="workspace-bar" id="securityBar" aria-labelledby="securityTitle" hidden>
     <h2 id="securityTitle"><svg class="i"><use href="#i-shield"/></svg>Security</h2>
-    <nav class="seg ws-tabs" aria-label="Security views">
+    <nav class="seg ws-tabs only-d" aria-label="Security views">
       <button data-go="keys"><svg class="i"><use href="#i-key"/></svg>Keys</button>
       <button data-go="pcs"><svg class="i"><use href="#i-pc"/></svg>PCs</button>
       <button data-go="req"><svg class="i"><use href="#i-clock"/></svg>Requests<i class="bdg" data-request-badge hidden></i></button>
       <button data-go="shares"><svg class="i"><use href="#i-link"/></svg>Shares</button>
       <button data-go="grant"><svg class="i"><use href="#i-plus"/></svg>Grant access</button>
+      <button data-go="reset"><svg class="i"><use href="#i-rot"/></svg>Reset</button>
+    </nav>
+    <nav class="tabs only-m" role="tablist" aria-label="Security views">
+      <button type="button" role="tab" data-go="keys">Keys</button>
+      <button type="button" role="tab" data-go="pcs">PCs</button>
+      <button type="button" role="tab" data-go="req">Requests<i class="bdg" data-request-badge hidden></i></button>
+      <button type="button" role="tab" data-go="shares">Shares</button>
+      <button type="button" role="tab" data-go="grant">Grant access</button>
+      <button type="button" role="tab" data-go="reset">Reset</button>
     </nav>
   </section>
   <section class="workspace-bar" id="vaultBar" aria-labelledby="vaultTitle" hidden>
     <h2 id="vaultTitle"><svg class="i"><use href="#i-vault"/></svg>Vault</h2>
-    <nav class="seg ws-tabs" aria-label="Vault views">
+    <nav class="seg ws-tabs only-d" aria-label="Vault views">
       <button data-vault-tab="contents"><svg class="i"><use href="#i-file"/></svg>Contents</button>
       <button data-vault-tab="access"><svg class="i"><use href="#i-key"/></svg>Access</button>
       <button data-vault-tab="act"><svg class="i"><use href="#i-pulse"/></svg>Activity</button>
       <button data-vault-tab="conf"><svg class="i"><use href="#i-warn"/></svg>Conflicts</button>
     </nav>
+    <nav class="tabs only-m" role="tablist" aria-label="Vault views">
+      <button type="button" role="tab" data-vault-tab="contents">Contents</button>
+      <button type="button" role="tab" data-vault-tab="access">Access</button>
+      <button type="button" role="tab" data-vault-tab="act">Activity</button>
+      <button type="button" role="tab" data-vault-tab="conf">Conflicts</button>
+    </nav>
   </section>
   <section class="workspace-bar" id="auditBar" aria-labelledby="auditTitle" hidden>
     <h2 id="auditTitle"><svg class="i"><use href="#i-log"/></svg>Auditing</h2>
-    <nav class="seg ws-tabs" aria-label="Auditing views">
+    <nav class="seg ws-tabs only-d" aria-label="Auditing views">
       <button data-go="log" data-arg="audit"><svg class="i"><use href="#i-log"/></svg>Audit</button>
       <button data-go="log" data-arg="calls"><svg class="i"><use href="#i-bolt"/></svg>Calls</button>
+      <button data-go="log" data-arg="files"><svg class="i"><use href="#i-file"/></svg>Files</button>
       <button data-go="log" data-arg="alerts"><svg class="i"><use href="#i-warn"/></svg>Alerts</button>
+      <button data-go="log" data-arg="telemetry"><svg class="i"><use href="#i-pulse"/></svg>Telemetry</button>
+    </nav>
+    <nav class="tabs only-m" role="tablist" aria-label="Audit views">
+      <button type="button" role="tab" data-go="log" data-arg="audit">Audit</button>
+      <button type="button" role="tab" data-go="log" data-arg="calls">Calls</button>
+      <button type="button" role="tab" data-go="log" data-arg="files">Files</button>
+      <button type="button" role="tab" data-go="log" data-arg="alerts">Alerts<span class="cnt" data-alert-count></span></button>
+      <button type="button" role="tab" data-go="log" data-arg="telemetry">Telemetry</button>
     </nav>
   </section>
   <section class="workspace-bar ctx-bar" id="ctxBar" aria-labelledby="ctxTitle" hidden></section>
-  <section class="workspace-bar" id="monitoringBar" aria-labelledby="monitoringTitle" hidden>
-    <h2 id="monitoringTitle" tabindex="-1"><svg class="i"><use href="#i-pulse"/></svg>Monitoring</h2>
-  </section>
   <div id="overview" data-mode="home">
-  <div class="chips" id="chips" aria-label="Urgent"></div>
-  <section class="kpis" id="kpis"></section>
+  <div id="ovAlert" hidden></div>
+  <section class="card stats kpistrip" id="kpis" aria-label="Key figures"></section>
 
   <section class="grid">
-    <article class="card w-topo">
-      <div class="hd"><h2>Topology</h2><div class="grow"></div><div class="lg" id="topoLg"></div></div>
+    <article class="card w-fleet">
+      <div class="hd"><h2>Fleet</h2><div class="grow"></div><span class="meta" id="fleetN"></span></div>
       <div id="topo"></div>
     </article>
-    <article class="card w-alerts">
-      <div class="hd"><h2>Alerts</h2><span class="n" id="alN">0</span></div>
-      <div class="alist" id="alerts"></div>
+    <article class="card w-teams">
+      <div class="hd"><h2>Teams</h2><span class="meta" id="tmN">0</span><div class="grow"></div><button class="btn ic" data-go="tbuild" aria-label="New team"><svg class="i"><use href="#i-plus"/></svg></button></div>
+      <div id="tmCard"></div>
     </article>
     <article class="card w-act">
-      <div class="hd"><h2>Activity</h2><div class="grow"></div><div class="lg" id="actLg"></div></div>
+      <div class="hd"><h2>Activity</h2><span class="meta">Last hour</span></div>
+      <div class="lg" id="actLg"></div>
       <div id="act"><div class="tip" id="tip"></div></div>
-    </article>
-    <article class="card w-teams">
-      <div class="hd"><h2>Teams</h2><span class="n" id="tmN">0</span><div class="grow"></div><button class="btn sm" data-go="tbuild" aria-label="New team"><svg class="i"><use href="#i-plus"/></svg></button></div>
-      <div class="tlist" id="tmCard"></div>
-    </article>
-    <article class="card w-ses">
-      <div class="hd"><h2>Sessions</h2><span class="n" id="sesN">0</span></div>
-      <div class="tscroll"><table class="tbl"><tbody id="sesT"></tbody></table></div>
+      <div class="empty" id="actEmpty" hidden>No vault, tool or denial events in the last hour.</div>
     </article>
     <article class="card w-exp">
-      <div class="hd"><h2>Exposure</h2><div class="grow"></div><button class="btn sm" data-go="vault" aria-label="Vault"><svg class="i"><use href="#i-vault"/></svg></button></div>
-      <div class="tm" id="tm"></div>
+      <div class="hd"><h2>Exposure</h2><span id="expInfo"></span><div class="grow"></div><span class="meta" id="expMeta">keys per folder</span></div>
+      <div id="tm"></div>
+    </article>
+    <article class="card w-ses">
+      <div class="hd"><h2>Sessions</h2><span class="meta" id="sesN">0</span><div class="grow"></div><button class="btn sm" data-go="sessions">All sessions</button></div>
+      <div id="sesT"></div>
     </article>
   </section>
   </div>
@@ -170,9 +191,10 @@
 
 <nav class="bnav" aria-label="Navigation">
   <button class="on" data-go="home"><svg class="i"><use href="#i-home"/></svg>Home</button>
-  <button data-go="topology"><svg class="i"><use href="#i-ses"/></svg>Agents</button>
+  <button data-go="agents"><svg class="i"><use href="#i-ses"/></svg>Work</button>
   <button data-go="vault"><svg class="i"><use href="#i-vault"/></svg>Vault</button>
   <button data-go="security"><svg class="i"><use href="#i-shield"/></svg>Security<i class="bdg" data-request-badge hidden></i></button>
+  <button data-go="log"><svg class="i"><use href="#i-log"/></svg>Audit</button>
 </nav>
 
 <div class="undo" id="undo" role="status"><svg class="i"><use href="#i-lock"/></svg><span></span><button class="btn sm" id="undoGo">Undo</button><i></i></div>

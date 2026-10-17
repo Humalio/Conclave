@@ -19,6 +19,9 @@ const create = z.object({
 const patch = z.object({
   name: z.string().trim().min(1).max(80).optional(), goal: z.string().trim().min(1).max(4000).optional(), limits: limits.optional(), checkpoints: z.array(z.enum(['done'])).optional(),
   lease_minutes: z.number().int().min(1).max(1440).optional(), max_review_rounds: z.number().int().min(1).max(20).optional(), stall_minutes: z.number().int().min(1).max(1440).optional(),
+  close_on_approve: z.boolean().optional(), coordinator_reviews: z.boolean().optional(), delivery_mode: z.enum(['poll', 'on_demand']).optional(),
+  recruiting: z.enum(['off', 'propose', 'auto']).optional(), recruit_max: z.number().int().min(1).max(20).optional(), recruit_roles: z.array(z.enum(['worker', 'reviewer', 'stakeholder'])).min(1).optional(),
+  recruit_template_id: z.string().max(100).nullable().optional(), recruit_days: z.number().int().min(1).max(90).optional(),
 });
 
 export function registerTeams(api: FastifyInstance, d: TeamsDeps, actor: (r: FastifyRequest) => Actor): void {
@@ -57,4 +60,30 @@ export function registerTeams(api: FastifyInstance, d: TeamsDeps, actor: (r: Fas
     return { task: teams.taskView(t), events: teams.taskEvents(t.id) };
   });
   api.post('/api/teams/:id/tasks/:taskId/approve', async (req) => ({ task: teams.taskView(teams.approve(p(req).id, p(req).taskId!, actor(req))) }));
+  // Recruit requests from coordinators in teams set to 'propose'. Approving creates the agent; its one-time handoff comes back here.
+  api.get('/api/recruits', async (req) => ({ requests: teams.recruitRequests(undefined, (req.query as { status?: string }).status) }));
+  api.post('/api/recruits/:id/approve', async (req) => {
+    const r = teams.approveRecruit(p(req).id, actor(req));
+    return { agent: r.agent, key_id: r.credential.id, secret: r.secret, handoff: r.handoff };
+  });
+  api.post('/api/recruits/:id/deny', async (req) => {
+    teams.denyRecruit(p(req).id, body(z.object({ note: z.string().trim().max(500).optional() }), req).note || null, actor(req));
+    return { denied: true };
+  });
+  api.post('/api/teams/:id/plan-request', async (req) => {
+    const b = body(z.object({ note: z.string().trim().max(500).optional() }), req);
+    return { team: teams.view(teams.requestPlan(p(req).id, b.note || null, actor(req))) };
+  });
+  api.get('/api/teams/:id/status', async (req) => {
+    const t = teams.mustTeam(p(req).id);
+    return { reports: teams.statusReports(t.id, 20), requested_at: t.status_requested_at ?? null, request_note: t.status_request_note ?? null };
+  });
+  api.post('/api/teams/:id/status-request', async (req) => {
+    const b = body(z.object({ note: z.string().trim().max(500).optional() }), req);
+    return { team: teams.view(teams.requestStatus(p(req).id, b.note || null, actor(req))) };
+  });
+  api.post('/api/teams/:id/tasks/:taskId/dismiss', async (req) => {
+    const b = body(z.object({ dismissed: z.boolean() }), req);
+    return { task: teams.taskView(teams.dismiss(p(req).id, p(req).taskId!, b.dismissed, actor(req))) };
+  });
 }

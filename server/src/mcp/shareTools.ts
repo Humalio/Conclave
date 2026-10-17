@@ -246,12 +246,17 @@ export function registerShareTools(reg: Reg, d: ShareToolDeps): void {
         const bytes = await shares.fileBytes(e);
         const r = await store.write(rel, bytes, base ?? 'absent', action === 'fs.create' ? 'create' : 'update', {
           agentId: s.agent.id, credentialId: s.cred.id, allowLarge: true,
-          recheck: () => { const c = keys.credential(s.cred.id); if (!c || keys.effectiveStatus(c) !== 'active') throw new VaultError('denied', DENIED); },
+          // At commit time, as the file tools do: the key is still active and its current grants still allow this write.
+          recheck: () => {
+            const c = keys.credential(s.cred.id); if (!c || keys.effectiveStatus(c) !== 'active') throw new VaultError('denied', DENIED);
+            if (!authorize(keys.rulesFor(s.cred.id), keys.rulesFor(ctx.app.id), action, `path:${vpath}`, { isPaused: teams.isPaused }).allowed) throw new VaultError('denied', DENIED);
+          },
         });
         const res = r.previous_revision === null ? 'created' : r.previous_revision === r.revision ? 'unchanged' : 'updated';
         results.push({ path: e.path, vault_path: vpath, result: res, revision: r.revision });
       } catch (err) {
         if (err instanceof VaultError && err.code === 'conflict') results.push({ path: e.path, vault_path: vpath, result: 'conflict', current_revision: (err.extra?.current_revision as string | undefined) ?? null, message: 'The file exists or changed; pass its current revision in base_revisions to replace it.' });
+        else if (err instanceof VaultError && err.code === 'denied') results.push({ path: e.path, vault_path: vpath, result: 'denied' });
         else if (err instanceof VaultError) results.push({ path: e.path, vault_path: vpath, result: 'error', message: err.message });
         else throw err;
       }

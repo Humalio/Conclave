@@ -183,6 +183,10 @@ export class Channels {
   private charge(credId: string, bytes: number): void {
     this.db.prepare("INSERT INTO usage_counters(scope,metric,window_start,count) VALUES (?,'channel_bytes',?,?) ON CONFLICT(scope,metric,window_start) DO UPDATE SET count=count+excluded.count").run(`key:${credId}`, Math.floor(Date.now() / 3600_000) * 3600_000, bytes);
   }
+  /** The most a channel may stage: what its destination can commit (a vault file, a share version), else the channel cap. */
+  private stageMax(targetKind: 'agent' | 'vault' | 'share'): number {
+    return Math.min(this.cfg.bridgeMax, targetKind === 'vault' ? MAX_BLOB : targetKind === 'share' ? this.shares.maxShareBytes : Infinity);
+  }
   open(o: OpenSpec): ChannelRow {
     this.sweep();
     const live = (where: string, ...args: string[]) => (this.db.prepare(`SELECT COUNT(*) n FROM data_channels WHERE status IN ('offered','open') ${where}`).get(...args) as { n: number }).n;
@@ -191,7 +195,7 @@ export class Channels {
     if (o.mode === 'inline') {
       if (o.size === undefined || !o.sha256) throw err('invalid_argument', 'Inline mode needs size and sha256 (or give local_path for bridge mode).');
       if (o.size > this.cfg.inlineMax) throw err('too_large', `Inline channels carry at most ${this.cfg.inlineMax} bytes; use local_path (bridge mode) for more.`);
-    } else if (o.size !== undefined && o.size > this.cfg.bridgeMax) throw err('too_large', `This hub allows at most ${this.cfg.bridgeMax} bytes per channel.`);
+    } else if (o.size !== undefined && o.size > this.stageMax(o.targetKind)) throw err('too_large', `This channel can carry at most ${this.stageMax(o.targetKind)} bytes to its destination.`);
     if (this.usedThisHour(o.from.credId) + (o.size ?? 0) > this.cfg.bytesPerHour) throw err('rate_limited', 'This key has used its hourly channel byte quota.');
     const id = newId.channel(), now = Date.now();
     const status = o.targetKind === 'agent' ? 'offered' : 'open';
@@ -237,7 +241,8 @@ export class Channels {
     if (!c || ['done', 'failed', 'closed', 'expired'].includes(c.status)) return c;
     const bytes = c.mode === 'bridge' ? Math.max(c.received_offset, c.confirmed_offset) : c.bytes_moved;
     this.db.prepare('UPDATE data_channels SET status=?, failure_reason=?, result=?, bytes_moved=?, finished_at=? WHERE id=?').run(status, reason, result ? JSON.stringify(result) : null, Math.max(c.bytes_moved, bytes), Date.now(), id);
-    if (status === 'done' && c.mode === 'bridge') this.charge(c.from_credential_id, c.size ?? bytes);
+    // Uploads are charged chunk by chunk as they arrive (see put), so failed transfers count too; downloads on completion.
+    if (status === 'done' && c.mode === 'bridge' && c.direction === 'download') this.charge(c.from_credential_id, c.size ?? bytes);
     this.drop(id);
     for (const a of new Set([c.from_agent_id, c.to_agent_id])) if (a) this.teams.enqueue(a, 'channel_event', `${id}#${status}`, 3, 'L0');
     return this.get(id);
@@ -266,7 +271,7 @@ export class Channels {
   }
   private leak(c: ChannelRow, text: string, field: string): boolean {
     const hit = this.guard.scanString(text, field);
-    if (!hit) return false;
+    if (!hit?.issued) return false; // key-shaped text the hub never issued cannot unlock anything; let the transfer run
     this.audit.alert('critical', 'key_in_payload', c.from_credential_id, { tool: 'channel', channel: c.id, kind: hit.kind, agent: c.from_agent_id });
     try { this.keys.setStatus(c.from_credential_id, 'suspended', 'leak_guard', { kind: 'system', id: null }); } catch { /* already inactive */ }
     this.fail(c.id, 'leak_guard');
@@ -417,9 +422,11 @@ export class Channels {
       const c = this.get(id)!;
       if (c.status !== 'open') return { status: 410, body: { error: 'gone', status: c.status, failure_reason: c.failure_reason } };
       if (!this.bridgeParticipantsActive(c)) { this.fail(id, 'denied'); return { status: 410, body: { error: 'gone', status: 'failed' } }; }
-      if (offset + body.length > this.cfg.bridgeMax) { this.fail(id, 'too_large'); return { status: 413, body: { error: 'too_large' } }; }
+      // Refuse bytes the destination could never commit, instead of staging up to the channel cap first.
+      const max = this.stageMax(c.target_kind);
+      if (offset + body.length > max) { this.fail(id, 'too_large'); return { status: 413, body: { error: 'too_large' } }; }
       if (total !== null) {
-        if (total > this.cfg.bridgeMax) { this.fail(id, 'too_large'); return { status: 413, body: { error: 'too_large' } }; }
+        if (total > max) { this.fail(id, 'too_large'); return { status: 413, body: { error: 'too_large' } }; }
         if (c.size === null) this.db.prepare('UPDATE data_channels SET size=? WHERE id=?').run(total, id);
         else if (c.size !== total) { this.fail(id, 'size_mismatch'); return { status: 410, body: { error: 'gone', status: 'failed' } }; }
       }
@@ -427,6 +434,10 @@ export class Channels {
       if (offset !== c.received_offset) return { status: 409, body: { error: 'offset', expected: c.received_offset } };
       if (size !== null && offset + body.length > size) { this.fail(id, 'size_mismatch'); return { status: 410, body: { error: 'gone', status: 'failed' } }; }
       if (body.length > BRIDGE_CHUNK) return { status: 413, body: { error: 'too_large' } };
+      // A transfer of unknown size is held to the hourly byte quota as it goes: wait for the next hour, then resume.
+      if (c.size === null && this.usedThisHour(c.from_credential_id) + body.length > this.cfg.bytesPerHour) {
+        return { status: 429, body: { error: 'rate_limited', retry_after_ms: 3600_000 - (Date.now() % 3600_000) } };
+      }
       const r = this.relay(id);
       if (c.target_kind === 'agent') {
         const deadline = Date.now() + 20_000;
@@ -446,6 +457,7 @@ export class Channels {
       }
       const next = offset + body.length;
       this.db.prepare('UPDATE data_channels SET received_offset=?, bytes_moved=MAX(bytes_moved, ?) WHERE id=?').run(next, next, id);
+      this.charge(c.from_credential_id, body.length);
       this.wakeRelay(id);
       return { status: 200, body: { received_offset: next } };
     });

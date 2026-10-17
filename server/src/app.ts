@@ -37,12 +37,13 @@ export async function buildApp(config: Config) {
   const vault = new Vault(config.vaultDir, config.vaultAlias);
   const store = new VaultStore(db, vault, audit, config.dataDir);
   store.start({ scanSeconds: config.vaultScanSeconds ?? 60, watch: config.vaultWatch !== false });
-  const guard = new LeakGuard({ knownKeyIds: () => keys.allKeyIds() });
+  const guard = new LeakGuard({ isIssued: (k, id, s) => keys.isIssued(k, id, s) });
   const loginLimit = new RateLimit(db, 10, 10 * 60 * 1000);
   const setup = new Setup(db, config.pepper, audit, keys, config.publicUrl, config.bridgeFile);
   const links = new Links(db, keys, audit);
   const messaging = new Messaging(db, keys, links);
   const teams = new Teams(db, keys, links, messaging, audit);
+  teams.refreshGrants(); // teams created before an added coordinator action get it on start
   const shares = new Shares(db, keys, messaging, teams, store);
   if (config.shareBytesPerHour) shares.bytesPerHour = config.shareBytesPerHour;
   const channels = new Channels(db, keys, teams, setup, store, vault, shares, guard, audit, {
@@ -67,7 +68,7 @@ export async function buildApp(config: Config) {
   }
   bootstrapAdmin(db, audit, config);
 
-  const fastify = Fastify({ logger: config.logLevel === 'silent' ? false : { level: config.logLevel, redact: ['req.headers.authorization', 'req.headers.cookie'] }, bodyLimit: 2 * 1024 * 1024, trustProxy: true });
+  const fastify = Fastify({ logger: config.logLevel === 'silent' ? false : { level: config.logLevel, redact: ['req.headers.authorization', 'req.headers.cookie', 'req.headers["x-agent-hub-session"]'] }, bodyLimit: 2 * 1024 * 1024, trustProxy: config.trustProxy ?? 'loopback,linklocal,uniquelocal' });
   await fastify.register(cookie);
   fastify.addContentTypeParser('application/json', { parseAs: 'string' }, (_req, body, done) => {
     if (body === '') return done(null, undefined);
@@ -113,20 +114,42 @@ export async function buildApp(config: Config) {
     const o = req.headers.origin;
     return o === undefined || config.allowedOrigins.includes(String(o).replace(/[/]+$/, ''));
   };
+  // Failed app-key checks are audited, but at most 20 rows per client address per minute: a client looping on a
+  // wrong key must not grow the audit table without bound. The first rows are enough to see and alert on it.
+  const authNoise = new Map<string, number>();
+  const authFail = (req: import('fastify').FastifyRequest, row: Parameters<typeof audit.auth>[0]) => {
+    const minute = Math.floor(Date.now() / 60_000), k = `${minute}|${req.ip}`;
+    if (authNoise.size > 10_000) for (const key of authNoise.keys()) if (!key.startsWith(`${minute}|`)) authNoise.delete(key);
+    const n = (authNoise.get(k) ?? 0) + 1;
+    authNoise.set(k, n);
+    if (n <= 20) audit.auth(row);
+  };
   fastify.post('/mcp', async (req, reply) => {
     if (!originOk(req)) return reply.code(403).send({ error: 'forbidden_origin', message: 'Origin not allowed.' });
     const h = req.headers.authorization;
     const m = typeof h === 'string' ? /^Bearer\s+(\S+)$/i.exec(h) : null;
     const keyId = m ? /^ah_app_([a-z2-7]{12})_/.exec(m[1]!)?.[1] ?? null : null;
-    if (!m) { audit.auth({ subject: 'app_key', outcome: 'invalid', source: req.ip }); return unauthorized(reply, 'Missing app key.'); }
+    if (!m) { authFail(req, { subject: 'app_key', outcome: 'invalid', source: req.ip }); return unauthorized(reply, 'Missing app key.'); }
     let app;
     try { app = keys.verifyKey(m[1]!, 'app_key'); }
     catch (e) {
       const code = e instanceof KeyError ? e.code : 'invalid';
-      audit.auth({ subject: 'app_key', keyId, outcome: ['invalid', 'unknown', 'suspended', 'expired', 'revoked'].includes(code) ? code : 'invalid', source: req.ip });
+      authFail(req, { subject: 'app_key', keyId, outcome: ['invalid', 'unknown', 'suspended', 'expired', 'revoked'].includes(code) ? code : 'invalid', source: req.ip });
       return unauthorized(reply, 'Invalid app key.');
     }
-    const server = buildMcpServer({ db, keys, audit, guard, vault, store, loginLimit, setup, links, messaging, teams, messagesPerHour: config.messagesPerHour ?? 120, shares, channels, access, lockdown, alerts, graph }, app, req.ip);
+    // Optional: a session token in a header, for clients whose credential helper logs in outside the model. An invalid or
+    // expired one is refused here with 401, so the client re-runs its helper (a fresh login) and retries the call.
+    const sh = req.headers['x-agent-hub-session'];
+    const headerToken = typeof sh === 'string' && sh.trim() ? sh.trim() : null;
+    let headerSession: ReturnType<typeof keys.resolveToken> | null = null;
+    if (headerToken) {
+      try { headerSession = keys.resolveToken(app, headerToken); }
+      catch (e) {
+        const code = e instanceof KeyError ? e.code : 'login_required';
+        return reply.code(401).header('www-authenticate', 'Bearer error="invalid_token"').send({ error: code, message: e instanceof Error ? e.message : 'Session token not accepted.' });
+      }
+    }
+    const server = buildMcpServer({ db, keys, audit, guard, vault, store, loginLimit, setup, links, messaging, teams, messagesPerHour: config.messagesPerHour ?? 120, shares, channels, access, lockdown, alerts, graph }, app, req.ip, headerToken, headerSession);
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
     reply.hijack();
     reply.raw.on('close', () => { void transport.close(); void server.close(); });

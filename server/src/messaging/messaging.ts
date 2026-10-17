@@ -48,6 +48,24 @@ export class Messaging {
     return creds.some((c) => authorize([...this.keys.rulesFor(c.id), ...link], [], action, resource).allowed);
   }
 
+  /**
+   * May this agent read this room: membership plus grants, as message_read decides. `login` gives a live login's
+   * rules and app cap; without it, any usable session key of the agent counts (the receiving side, which has no
+   * login in this request). Work-queue delivery checks this too, so a room member without read rights gets nothing.
+   */
+  mayRead(agentId: string, room: RoomRow, login?: { rules: Rule[]; cap: Rule[] }): boolean {
+    if (!this.isMember(room.id, agentId)) return false;
+    const link = this.linkRules(agentId), other = room.kind === 'direct' ? this.otherOf(room, agentId) : null;
+    const ok = (rules: Rule[], cap: Rule[]) => {
+      const all = [...rules, ...link];
+      if (room.kind === 'direct') return !!other && (authorize(all, cap, 'message.receive', `agent:${other}`).allowed || authorize(all, cap, 'message.send', `agent:${other}`).allowed);
+      return authorize(all, cap, 'room.read_history', `room:${room.id}`).allowed;
+    };
+    if (login) return ok(login.rules, login.cap);
+    return this.keys.credentials({ kind: 'session_key', agentId }).filter((c) => !['revoked', 'expired'].includes(this.keys.effectiveStatus(c)))
+      .some((c) => ok(this.keys.rulesFor(c.id), []));
+  }
+
   // ───── rooms ─────
   room(id: string): RoomRow | null { return (this.db.prepare('SELECT * FROM rooms WHERE id=?').get(id) as unknown as RoomRow) ?? null; }
   isMember(roomId: string, agentId: string): boolean {
@@ -59,6 +77,7 @@ export class Messaging {
   addMember(roomId: string, agentId: string, role: 'owner' | 'member', invitedBy: string | null): boolean {
     if (this.isMember(roomId, agentId)) return false;
     this.db.prepare('INSERT INTO room_memberships(room_id,agent_id,role,joined_at,invited_by) VALUES (?,?,?,?,?)').run(roomId, agentId, role, Date.now(), invitedBy);
+    this.em.emit(`rooms:${agentId}`); // a waiting message_read of this agent also watches its new room
     return true;
   }
   directKey(a: string, b: string): string { return [a, b].sort().join('|'); }
@@ -118,7 +137,7 @@ export class Messaging {
       return this.message(id)!;
     });
     this.onInsert?.(m);
-    this.em.emit('message', m.room_id);
+    this.em.emit(`message:${m.room_id}`);
     return m;
   }
 
@@ -167,11 +186,14 @@ export class Messaging {
 
   // ───── wake-up ─────
   /** Resolves when any message is stored, after `ms`, or when the server shuts down. */
-  wait(ms: number): Promise<void> {
+  /** Wait for a message in one of these rooms or for the agent joining a room (only those waiters wake), or the timeout. */
+  wait(ms: number, roomIds: string[], agentId: string): Promise<void> {
     return new Promise((resolve) => {
-      const done = () => { clearTimeout(t); this.em.off('message', done); this.waiters.delete(done); resolve(); };
+      const evs = [...roomIds.map((r) => `message:${r}`), `rooms:${agentId}`];
+      const done = () => { clearTimeout(t); for (const e of evs) this.em.off(e, done); this.waiters.delete(done); resolve(); };
       const t = setTimeout(done, ms);
-      this.em.on('message', done); this.waiters.add(done);
+      for (const e of evs) this.em.on(e, done);
+      this.waiters.add(done);
     });
   }
   get closed(): boolean { return this._closed; }

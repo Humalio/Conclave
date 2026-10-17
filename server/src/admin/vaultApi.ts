@@ -67,8 +67,9 @@ export function registerVaultApi(api: FastifyInstance, d: VaultApiDeps, actor: (
     const revisionScope = filter('r.path_at_revision', scope?.rel.join('/') ?? null);
     const accessScope = filter('path', scope?.path ?? null);
     const agentArgs = query.agent ? [query.agent] : [];
+    // writes=1: only changes, for the audit trail; the index's first sighting of each file is not one.
     const revs = db.prepare(`SELECT r.*, f.id fid FROM file_revisions r JOIN files f ON f.id=r.file_id
-      WHERE 1=1 ${revisionScope.sql} ${query.agent ? 'AND r.agent_id = ?' : ''}
+      WHERE 1=1 ${revisionScope.sql} ${query.agent ? 'AND r.agent_id = ?' : ''} ${query.writes === '1' ? "AND r.origin <> 'initial_scan'" : ''}
       ORDER BY r.created_at DESC, r.rowid DESC LIMIT ?`).all(...revisionScope.args, ...agentArgs, limit) as never[];
     const access = db.prepare(`SELECT * FROM resource_access_events WHERE action LIKE 'fs.%'
       ${accessScope.sql} ${query.agent ? 'AND agent_id = ?' : ''}

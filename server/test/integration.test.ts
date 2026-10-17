@@ -286,13 +286,19 @@ describe('outbound credential protection', () => {
     try {
       const token = (await login(reader.secret)).token;
       app.keys.notify(reader.agent.id, 'external_fixture', `Unexpected credential ${owner.secret.split('').join('\n')}`);
+      // The notice is redacted on its own; the call itself still answers, so one bad notice cannot lock the agent out.
       const result = await call('session_whoami', { session_token: token });
-      expect(result.structuredContent.error).toBe('content_withheld');
+      expect(result.isError).toBeFalsy();
+      expect(result.structuredContent.notices.find((n: any) => n.kind === 'external_fixture').body).toMatch(/^\[withheld/);
       expect(JSON.stringify(result)).not.toContain(owner.secret);
+      expect(JSON.stringify(result)).not.toContain(owner.secret.split('_').pop()!.split('').join('\\n'));
       app.keys.updateAgent(reader.agent.id, { role: `External metadata ${owner.secret}` }, sys);
+      const live = () => (app.db.prepare('SELECT COUNT(*) n FROM session_tokens WHERE session_credential_id=? AND revoked_at IS NULL').get(reader.credential.id) as { n: number }).n;
+      const before = live();
       const again = await login(reader.secret);
       expect(again.r.structuredContent.error).toBe('content_withheld');
       expect(JSON.stringify(again.r)).not.toContain(owner.secret);
+      expect(live()).toBe(before); // the token minted for the withheld login was ended, not left using up a login slot
       expect(app.keys.credential(reader.credential.id)!.status).toBe('active');
     } finally { await c.close(); }
   });

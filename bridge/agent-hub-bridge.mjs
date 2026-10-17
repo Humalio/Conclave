@@ -64,6 +64,37 @@ export async function checkPath(target, allowed) {
   return false;
 }
 
+/** Is absolute `target` at or below absolute `root`? Case-insensitive on Windows and macOS, whose usual file systems are. */
+export function isInside(target, root, os = platform()) {
+  const p = os === 'win32' ? path.win32 : path.posix;
+  const fold = os === 'win32' || os === 'darwin';
+  const norm = (s) => { const n = p.resolve(s); return fold ? n.normalize('NFC').toLowerCase() : n; };
+  const rel = p.relative(norm(root), norm(target));
+  return rel === '' || (rel !== '..' && !rel.startsWith(`..${p.sep}`) && !p.isAbsolute(rel));
+}
+
+/** Real path of `p`; for a path that does not exist yet, the real path of its deepest existing parent plus the rest. */
+async function realOrParent(p) {
+  let cur = path.resolve(p);
+  const rest = [];
+  for (;;) {
+    try { return path.join(await fs.realpath(cur), ...rest); } catch (e) {
+      const up = path.dirname(cur);
+      if (!['ENOENT', 'ENOTDIR'].includes(e?.code) || up === cur) throw e;
+      rest.unshift(path.basename(cur));
+      cur = up;
+    }
+  }
+}
+
+let configReal; // realpath of CONFIG_DIR, resolved once
+/** Does `target` reach the bridge configuration folder under any spelling (8.3 short name, case variant, link)? */
+export async function inConfigDir(target) {
+  if (isInside(target, CONFIG_DIR)) return true;
+  configReal ??= realOrParent(CONFIG_DIR);
+  return isInside(await realOrParent(target), await configReal);
+}
+
 const log = (...a) => console.log(new Date().toISOString(), ...a);
 const sleep = (ms, signal) => delay(ms, undefined, { signal });
 
@@ -112,6 +143,10 @@ const MAX_HEADER = 4096;
 const MAX_ENTRIES = 100_000;
 const NO_FOLLOW = constants.O_NOFOLLOW ?? 0;
 const THROTTLE_MS = Number(process.env.AGENT_HUB_THROTTLE_MS ?? 0);
+// Floor between long polls. The hub holds empty polls (25 s) and reads (20 s), but an instant answer
+// (a proxy, an older hub, a job this bridge rejects and the hub keeps offering) must not spin.
+const MIN_POLL_MS = 1000;
+const pollFloor = (since) => Math.max(0, MIN_POLL_MS - (Date.now() - since));
 class Fatal extends Error {}   // report to the hub; the channel fails
 class Gone extends Error {}    // the hub says the channel is over; stop quietly
 class Unavailable extends Error {} // key or PC unavailable; preserve resumable state
@@ -160,8 +195,10 @@ export function parseIgnore(text) {
 const ALWAYS_SKIP_DIRS = new Set(['.git', 'node_modules']);
 const isEnvFile = (n) => /^\.env(?:\.|$)/i.test(n);
 
-async function requirePath(target, allowed) {
-  if (isPathAllowed(target, [CONFIG_DIR]) || !(await checkPath(target, allowed()))) {
+export async function requirePath(target, allowed) {
+  // Compare real paths: a lexical check misses C:\Users\X\AGENT-~1 or ~/.AGENT-HUB and would expose the bridge key.
+  // An error while resolving counts as inside (fail closed).
+  if (await inConfigDir(target).catch(() => true) || !(await checkPath(target, allowed()))) {
     throw new Fatal('path outside the allowed folders or inside bridge configuration');
   }
 }
@@ -377,8 +414,9 @@ async function receiveJob(job, ctx) {
     }
     for (;;) {
       await check(part);
+      const asked = Date.now();
       const res = await api('GET', `/bridge/channels/${job.channel_id}/chunk?offset=${offset}&role=receive`, { timeout: 45_000 });
-      if (res.status === 204) { await res.arrayBuffer(); continue; }
+      if (res.status === 204) { await res.arrayBuffer(); await sleep(pollFloor(asked), signal); continue; }
       if ([401, 403, 404, 410].includes(res.status)) { await res.body?.cancel(); checkJobResponse(res); }
       if (res.status === 409) {
         const { available } = await jsonOf(res);
@@ -540,7 +578,7 @@ export async function extract(file, dest, allowed, signal) {
 async function cleanupPart(job, allowed) {
   if (job.kind !== 'receive') return;
   const part = job.framing === 'raw' ? `${job.save_to}.ah-${job.channel_id}.part` : path.join(job.save_to, `.ah-${job.channel_id}.part`);
-  if (await checkPath(part, allowed())) await fs.unlink(part).catch(() => {});
+  try { await requirePath(part, allowed); await fs.unlink(part); } catch { /* unsafe or already removed */ }
 }
 
 /** Run one job to the end, retrying network trouble with backoff; resume comes from the hub's and the disk's state. */
@@ -595,6 +633,7 @@ async function run(signal) {
   try {
     while (!signal.aborted) {
       try {
+        const asked = Date.now();
         const res = await api('POST', '/bridge/poll', {
           headers: JSON_HDR, timeout: 40_000,
           body: JSON.stringify({ version: VERSION, home: homedir(), os: platform(), running: [...running.keys()] }),
@@ -620,7 +659,7 @@ async function run(signal) {
             .finally(() => running.delete(job.id));
           running.set(job.id, work);
         }
-        const wait = Math.min(25_000, Math.max(running.size >= 4 ? 1000 : 0, Number(data.poll_after_ms) || 0));
+        const wait = Math.min(25_000, Math.max(pollFloor(asked), running.size >= 4 ? 1000 : 0, Number(data.poll_after_ms) || 0));
         if (wait) await sleep(wait, signal);
       } catch (e) {
         if (signal.aborted) break;

@@ -1,0 +1,14 @@
+# Only server/ and bridge/ are copied into the image; keep secrets and runtime data out of the build context.
+.git
+.env
+.env.*
+data
+vault
+local-vault
+rehearsal-handoffs.json
+deploy
+demo
+docs
+eval
+**/node_modules
+**/dist

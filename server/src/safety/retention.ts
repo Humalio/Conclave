@@ -9,7 +9,7 @@ const DAY = 86400_000;
 export const BATCH = 5000;
 export interface RetentionConfig { sharesDays: number; channelsDays: number; workItemsDays: number; blobGraceMs: number }
 export const DEFAULT_RETENTION: RetentionConfig = { sharesDays: 90, channelsDays: 90, workItemsDays: 30, blobGraceMs: DAY };
-export interface RetentionResult { shares: number; channels: number; workItems: number; blobs: number }
+export interface RetentionResult { shares: number; channels: number; workItems: number; blobs: number; pruned?: Record<string, number> }
 
 export class Maintenance {
   private timer: NodeJS.Timeout | null = null;
@@ -47,7 +47,37 @@ export class Maintenance {
     out.shares = this.deleteShares(now - this.days('retention.shares_days', this.cfg.sharesDays) * DAY);
     out.channels = this.batched("DELETE FROM data_channels WHERE id IN (SELECT id FROM data_channels WHERE status IN ('done','expired','closed','failed') AND COALESCE(finished_at, created_at)<? LIMIT ?)", now - this.days('retention.channels_days', this.cfg.channelsDays) * DAY);
     out.workItems = this.batched('DELETE FROM work_items WHERE id IN (SELECT id FROM work_items WHERE acked_at IS NOT NULL AND acked_at<? LIMIT ?)', now - this.days('retention.work_items_days', this.cfg.workItemsDays) * DAY);
+    out.pruned = this.prune(now);
     out.blobs = await this.gcBlobs(now - this.cfg.blobGraceMs);
+    return out;
+  }
+
+  /**
+   * Tables that otherwise only grow. Each rule keeps what later logic still reads:
+   * - logins dead (expired or ended) for 30 days, with their read positions, except each agent's newest login,
+   *   which a new login copies its notice and read positions from;
+   * - notices older than 90 days, except each agent's newest (new notices number on from it);
+   * - history of tasks finished more than 180 days ago, impact candidates of old revisions, curator results and
+   *   finished curator jobs after 30 days, and usage counters after 30 days.
+   */
+  prune(now = Date.now()): Record<string, number> {
+    const days = (n: number) => now - n * DAY;
+    const deadTokens = `SELECT t.token_hash FROM session_tokens t JOIN credentials c ON c.id=t.session_credential_id
+      WHERE COALESCE(t.revoked_at, t.expires_at) < ? AND t.expires_at < ${now}
+      AND t.token_hash <> (SELECT t2.token_hash FROM session_tokens t2 JOIN credentials c2 ON c2.id=t2.session_credential_id WHERE c2.agent_id=c.agent_id ORDER BY t2.created_at DESC LIMIT 1)
+      LIMIT ?`;
+    const out: Record<string, number> = {};
+    out.cursors = this.batched(`DELETE FROM message_delivery_cursors WHERE token_hash IN (${deadTokens})`, days(30));
+    out.logins = this.batched(`DELETE FROM session_tokens WHERE token_hash IN (${deadTokens}) AND NOT EXISTS (SELECT 1 FROM message_delivery_cursors m WHERE m.token_hash=session_tokens.token_hash)`, days(30));
+    out.notices = this.batched(`DELETE FROM agent_notices WHERE id IN (SELECT n.id FROM agent_notices n WHERE n.created_at<?
+      AND n.seq < (SELECT MAX(m.seq) FROM agent_notices m WHERE m.agent_id=n.agent_id) LIMIT ?)`, days(90));
+    out.task_events = this.batched(`DELETE FROM task_events WHERE id IN (SELECT e.id FROM task_events e JOIN tasks k ON k.id=e.task_id
+      WHERE k.status IN ('done','cancelled') AND k.updated_at<? LIMIT ?)`, days(180));
+    out.impact = this.batched(`DELETE FROM kg_impact WHERE rowid IN (SELECT i.rowid FROM kg_impact i WHERE i.created_at<?
+      AND NOT EXISTS (SELECT 1 FROM files f WHERE f.id=i.file_id AND f.current_revision=i.revision) LIMIT ?)`, days(90));
+    out.job_results = this.batched('DELETE FROM kg_job_results WHERE rowid IN (SELECT rowid FROM kg_job_results WHERE created_at<? LIMIT ?)', days(30));
+    out.jobs = this.batched("DELETE FROM kg_jobs WHERE id IN (SELECT j.id FROM kg_jobs j WHERE j.state='done' AND j.updated_at<? AND NOT EXISTS (SELECT 1 FROM kg_job_results r WHERE r.job_id=j.id) LIMIT ?)", days(30));
+    out.counters = this.batched('DELETE FROM usage_counters WHERE rowid IN (SELECT rowid FROM usage_counters WHERE window_start<? LIMIT ?)', days(30));
     return out;
   }
 
@@ -77,23 +107,37 @@ export class Maintenance {
     this.db.prepare(`DELETE FROM shares WHERE id IN (${ph})`).run(...ids);
   }
 
-  /** Delete blobs nothing refers to any more (older than the grace period, so in-flight uploads are safe). */
+  /**
+   * Delete blobs nothing refers to any more (older than the grace period, so in-flight uploads are safe).
+   * Mark and sweep, one batch per event-loop turn: the references kept in JSON or text (share manifests, conflicts)
+   * are read once per batch rather than once per blob, and each batch checks and deletes, rows and files, in one
+   * synchronous step, so no write can reuse a blob between the check and the delete.
+   */
   async gcBlobs(cutoff: number): Promise<number> {
-    let total = 0;
+    let total = 0, after = '';
     for (;;) {
-      const rows = this.db.prepare(`SELECT b.hash FROM blobs b WHERE b.created_at<?
-        AND NOT EXISTS (SELECT 1 FROM file_revisions r WHERE r.revision=b.hash OR r.parent_revision=b.hash)
-        AND NOT EXISTS (SELECT 1 FROM files f WHERE f.current_revision=b.hash)
-        AND NOT EXISTS (SELECT 1 FROM write_intents w WHERE w.base_revision=b.hash OR w.new_revision=b.hash)
-        AND NOT EXISTS (SELECT 1 FROM file_conflicts c WHERE instr(c.revisions, b.hash)>0 OR instr(COALESCE(c.resolution,''), b.hash)>0)
-        AND NOT EXISTS (SELECT 1 FROM share_versions v, json_each(v.manifest) j WHERE json_extract(j.value,'$.blob_hash')=b.hash)
-        LIMIT ?`).all(cutoff, BATCH) as { hash: string }[];
-      for (const r of rows) {
-        await this.store.deleteBlob(r.hash);
-        this.db.prepare('DELETE FROM blobs WHERE hash=?').run(r.hash);
-      }
-      total += rows.length;
-      if (rows.length < BATCH) return total;
+      const b = this.gcBatch(cutoff, after);
+      total += b.deleted;
+      if (b.last === null) return total;
+      after = b.last;
+      await new Promise((r) => setImmediate(r));
     }
+  }
+  private gcBatch(cutoff: number, after: string): { deleted: number; last: string | null } {
+    const rows = this.db.prepare(`SELECT b.hash FROM blobs b WHERE b.hash>? AND b.created_at<?
+      AND NOT EXISTS (SELECT 1 FROM file_revisions r WHERE r.revision=b.hash)
+      AND NOT EXISTS (SELECT 1 FROM file_revisions r WHERE r.parent_revision=b.hash)
+      AND NOT EXISTS (SELECT 1 FROM files f WHERE f.current_revision=b.hash)
+      AND NOT EXISTS (SELECT 1 FROM write_intents w WHERE w.base_revision=b.hash)
+      AND NOT EXISTS (SELECT 1 FROM write_intents w WHERE w.new_revision=b.hash)
+      ORDER BY b.hash LIMIT ?`).all(after, cutoff, BATCH) as { hash: string }[];
+    if (rows.length === 0) return { deleted: 0, last: null };
+    const conflicts = (this.db.prepare("SELECT group_concat(revisions || ' ' || COALESCE(resolution,''), ' ') t FROM file_conflicts").get() as { t: string | null }).t ?? '';
+    const shared = new Set((this.db.prepare("SELECT DISTINCT json_extract(j.value,'$.blob_hash') h FROM share_versions v, json_each(v.manifest) j").all() as { h: string | null }[]).map((r) => r.h));
+    const gone = rows.map((r) => r.hash).filter((h) => !shared.has(h) && !conflicts.includes(h));
+    const del = this.db.prepare('DELETE FROM blobs WHERE hash=?');
+    tx(this.db, () => { for (const h of gone) del.run(h); });
+    for (const h of gone) this.store.deleteBlobSync(h);
+    return { deleted: gone.length, last: rows.length < BATCH ? null : rows[rows.length - 1]!.hash };
   }
 }

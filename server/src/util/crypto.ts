@@ -1,4 +1,4 @@
-import { createHash, createHmac, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomBytes, scrypt, scryptSync, timingSafeEqual } from 'node:crypto';
 
 const B32 = 'abcdefghijklmnopqrstuvwxyz234567';
 
@@ -44,6 +44,21 @@ export function hashPassword(password: string): string {
   const salt = randomBytes(16);
   const hash = scryptSync(password, salt, LEN, { N, r: R, p: P });
   return `scrypt$${N}$${R}$${P}$${salt.toString('hex')}$${hash.toString('hex')}`;
+}
+/** verifyPassword off the main thread: scrypt costs about 16 MiB and tens of milliseconds per attempt. */
+export function verifyPasswordAsync(password: string, stored: string): Promise<boolean> {
+  const [alg, n, r, p, salt, hash] = stored.split('$');
+  if (alg !== 'scrypt' || !n || !r || !p || !salt || !hash) return Promise.resolve(false);
+  // A corrupt stored hash (odd length, non-hex) must fail closed, not throw inside the scrypt callback and crash the process.
+  const want = Buffer.from(hash, 'hex');
+  if (want.length === 0 || want.length * 2 !== hash.length) return Promise.resolve(false);
+  return new Promise((ok) => {
+    try {
+      scrypt(password, Buffer.from(salt, 'hex'), want.length, { N: +n, r: +r, p: +p, maxmem: 64 * 1024 * 1024 }, (err, got) => {
+        ok(!err && got.length === want.length && timingSafeEqual(got, want));
+      });
+    } catch { ok(false); }
+  });
 }
 export function verifyPassword(password: string, stored: string): boolean {
   const [alg, n, r, p, salt, hash] = stored.split('$');

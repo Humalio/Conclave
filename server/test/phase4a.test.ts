@@ -305,6 +305,10 @@ describe('admin vault API', () => {
     const u = await W('file_update', { path: '/vault/Exp/Shared/a.md', content: 'a2', base_revision: f.current_revision! });
     const df = await api('GET', `/vault/diff?file=${f.id}&from=${encodeURIComponent(f.current_revision!)}&to=${encodeURIComponent(rev(u))}`);
     expect(df.body.diff).toContain('+a2');
+    // writes=1 lists changes only: the update is there, initial-scan sightings are not
+    const writes = (await api('GET', '/vault/activity?writes=1&limit=200')).body.revisions;
+    expect(writes.some((r: any) => r.path === '/vault/Exp/Shared/a.md' && r.op === 'update')).toBe(true);
+    expect(writes.every((r: any) => r.origin !== 'initial_scan')).toBe(true);
   });
 
   it('acknowledges and closes alerts', async () => {

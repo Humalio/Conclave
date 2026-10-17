@@ -5,7 +5,7 @@
  * (temp file in the same folder, fsync, re-hash, rename). External changes are found by fs.watch and a
  * periodic scan and recorded as `external_observed` revisions.
  */
-import { promises as fs, watch as fsWatch, existsSync, mkdirSync, readFileSync, type FSWatcher, type Stats } from 'node:fs';
+import { promises as fs, watch as fsWatch, existsSync, mkdirSync, readFileSync, rmSync, type FSWatcher, type Stats } from 'node:fs';
 import { dirname, join, basename } from 'node:path';
 import type { Db } from '../db/db.js';
 import { tx } from '../db/db.js';
@@ -109,8 +109,8 @@ export class VaultStore {
   lastScan(): unknown { return this.setting('vault.last_scan') ?? null; }
   /** Lockdown of this vault only (all writes use writesDisabled). */
   vaultDisabled(): boolean { return this.setting(`emergency.vault_disabled.${this.vault.alias}`) === true; }
-  /** Remove a blob's bytes (retention GC; the caller removes the row). */
-  async deleteBlob(hash: string): Promise<void> { await fs.rm(this.blobPath(hash), { force: true }); }
+  /** Remove a blob's bytes (retention GC, after it removed the row in the same synchronous step). */
+  deleteBlobSync(hash: string): void { rmSync(this.blobPath(hash), { force: true }); }
   private assertWritable(): void {
     if (this.writesDisabled() || this.vaultDisabled()) throw new VaultError('lockdown', 'Vault writes are disabled by the administrator (lockdown).');
   }
@@ -122,7 +122,12 @@ export class VaultStore {
   async putBlob(buf: Buffer, limit = MAX_BLOB): Promise<{ hash: string; stored: boolean }> {
     const hash = sha(buf);
     const row = this.db.prepare('SELECT stored FROM blobs WHERE hash=?').get(hash) as { stored: number } | undefined;
-    if (row && (row.stored === 1 || buf.length > limit)) return { hash, stored: row.stored === 1 };
+    if (row && (buf.length > limit || (row.stored === 1 && existsSync(this.blobPath(hash))))) {
+      // Reuse restarts the clean-up grace period (created_at doubles as "last stored"), so the GC cannot delete a
+      // blob between this answer and the caller recording the revision that refers to it.
+      this.db.prepare('UPDATE blobs SET created_at=? WHERE hash=?').run(Date.now(), hash);
+      return { hash, stored: row.stored === 1 };
+    }
     const stored = buf.length <= limit;
     if (stored) {
       const p = this.blobPath(hash);
@@ -133,7 +138,7 @@ export class VaultStore {
         await fs.rename(tmp, p);
       }
     }
-    this.db.prepare('INSERT INTO blobs(hash,size,stored,created_at) VALUES (?,?,?,?) ON CONFLICT(hash) DO UPDATE SET stored=MAX(stored, excluded.stored)').run(hash, buf.length, stored ? 1 : 0, Date.now());
+    this.db.prepare('INSERT INTO blobs(hash,size,stored,created_at) VALUES (?,?,?,?) ON CONFLICT(hash) DO UPDATE SET stored=MAX(stored, excluded.stored), created_at=excluded.created_at').run(hash, buf.length, stored ? 1 : 0, Date.now());
     return { hash, stored };
   }
 

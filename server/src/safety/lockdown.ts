@@ -5,13 +5,19 @@ import { KeyError } from '../keys/keys.js';
 export type LockKind = 'writes' | 'vault' | 'agent' | 'pc' | 'team';
 export const LOCK_KINDS: LockKind[] = ['writes', 'vault', 'agent', 'pc', 'team'];
 
-/** Tools that change state. A lockdown on the agent, its PC or all writes refuses these; reads and work_next stay open. */
-export const WRITE_TOOLS = new Set(['file_create', 'file_update', 'file_patch', 'file_rename', 'file_delete', 'file_restore',
-  'message_send', 'room_create', 'room_join', 'room_leave', 'room_invite',
-  'share_create', 'share_upload', 'share_comment', 'share_suggest', 'share_resolve', 'share_promote', 'share_close',
-  'channel_open', 'channel_accept', 'channel_send', 'channel_close',
-  'task_create', 'task_update', 'task_assign', 'task_claim', 'task_start', 'task_progress', 'task_submit', 'task_review', 'task_complete', 'task_block', 'task_cancel',
-  'team_report', 'team_complete', 'graph_job_submit', 'graph_upsert', 'graph_summary_write']);
+/**
+ * Tools a lockdown leaves open: reads, the session's own housekeeping (login, ack, describe), asking for access,
+ * and the PC setup handshake. Everything else counts as a write, so a tool added later is locked down by default
+ * instead of being forgotten.
+ */
+export const OPEN_TOOLS = new Set(['session_login', 'session_help', 'session_logout', 'session_whoami', 'session_describe', 'session_ack',
+  'setup_pc', 'setup_status', 'access_list', 'access_request', 'access_status', 'access_check',
+  'agent_list', 'message_read', 'message_ack', 'message_history', 'room_list', 'team_info', 'team_plan', 'work_next', 'work_ack', 'task_list',
+  'file_list', 'file_read', 'file_stat', 'file_search', 'file_download', 'file_history', 'file_diff', 'file_conflicts',
+  'share_list', 'share_info', 'share_read', 'share_diff', 'share_feedback', 'share_download', 'channel_list', 'channel_receive', 'channel_status',
+  'graph_related', 'graph_impact', 'graph_query', 'graph_context', 'graph_summary', 'graph_stale', 'graph_health']);
+/** Does this tool change shared state? A lockdown on the agent, its PC or all writes refuses these. */
+export const isWriteTool = (tool: string): boolean => !OPEN_TOOLS.has(tool);
 /** Tools that write into the vault. */
 export const VAULT_WRITE_TOOLS = new Set(['file_create', 'file_update', 'file_patch', 'file_rename', 'file_delete', 'file_restore', 'share_promote']);
 
@@ -45,7 +51,7 @@ export class Lockdown {
 
   /** Why this tool call must be refused for this caller, or null. */
   blocks(tool: string, agentId: string | null, machineId: string | null): string | null {
-    if (WRITE_TOOLS.has(tool)) {
+    if (isWriteTool(tool)) {
       if (this.writes()) return 'All agent writes are disabled by the administrator (lockdown).';
       if (agentId && this.agent(agentId)) return 'This agent is locked down by the administrator.';
       if (this.pc(machineId)) return 'This PC is locked down by the administrator.';

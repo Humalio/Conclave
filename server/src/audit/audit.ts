@@ -41,9 +41,9 @@ export class Audit {
     try { this.onAuth?.({ subject: e.subject, outcome: e.outcome, source: e.source ?? null, keyId: e.keyId ?? null }); } catch { /* alerting must never break a login */ }
   }
 
-  invocation(i: { credentialId: string | null; appCredentialId: string | null; agentId: string | null; machineId: string | null; tool: string; args: unknown; result: string; errorCode: string | null; durationMs: number }): void {
-    this.db.prepare('INSERT INTO tool_invocations(id,credential_id,app_credential_id,agent_id,machine_id,tool,args_summary,result,error_code,duration_ms,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)')
-      .run(newId.invocation(), i.credentialId, i.appCredentialId, i.agentId, i.machineId, i.tool, JSON.stringify(redact(i.args)), i.result, i.errorCode, Math.round(i.durationMs), Date.now());
+  invocation(i: { credentialId: string | null; appCredentialId: string | null; agentId: string | null; machineId: string | null; tool: string; args: unknown; result: string; errorCode: string | null; durationMs: number; resultBytes?: number }): void {
+    this.db.prepare('INSERT INTO tool_invocations(id,credential_id,app_credential_id,agent_id,machine_id,tool,args_summary,result,error_code,duration_ms,result_bytes,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)')
+      .run(newId.invocation(), i.credentialId, i.appCredentialId, i.agentId, i.machineId, i.tool, JSON.stringify(redact(i.args)), i.result, i.errorCode, Math.round(i.durationMs), i.resultBytes ?? null, Date.now());
   }
 
   access(a: { credentialId: string; agentId: string; path: string; action: string; allowed: boolean; ruleId: string | null; revision?: string | null }): void {

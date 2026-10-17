@@ -26,7 +26,7 @@ export interface Rule {
 export type DecisionSource = 'session_key' | 'app_key_cap' | 'default' | 'link' | 'paused';
 
 /** Actions that change state; a paused team's resources refuse them. */
-const PAUSABLE = /^(message.send|room.post|channel.|share.(create|upload|comment|suggest|promote)|fs.(create|update|rename|delete|restore)|task.|team.report|team.complete|graph.(write|review))/;
+const PAUSABLE = /^(message.send|room.post|channel.|share.(create|upload|comment|suggest|promote)|fs.(create|update|rename|delete|restore)|task.|team.(report|complete|recruit|plan)|graph.(write|review))/;
 export interface AuthorizeOpts { isPaused?: (resource: string, rule: Rule) => boolean }
 
 export interface Decision {
@@ -103,6 +103,47 @@ function globAny(pattern: string, value: string): boolean {
   return new RegExp('^' + pattern.split('*').map(escapeRe).join('.*') + '$').test(value);
 }
 
+/**
+ * Does path pattern `outer` match every path that `inner` can match? Conservative: true only when it is provable
+ * (equal patterns, a concrete inner path that outer matches, or an outer of the form <prefix>/** whose prefix the
+ * inner pattern starts with). Anything harder counts as not covered.
+ */
+export function pathCovers(outer: string, inner: string): boolean {
+  if (outer === inner) return true;
+  if (!inner.includes('*')) return pathMatches(outer, inner);
+  const os = segments(outer), is = segments(inner);
+  const k = os.indexOf('**');
+  if (k < 0 || k !== os.length - 1 || is.length < k) return false;
+  for (let i = 0; i < k; i++) {
+    const o = os[i]!, n = is[i]!;
+    if (n === o) continue;
+    if (n.includes('*') || !globSegment(o, n)) return false;
+  }
+  return true;
+}
+/** Resource-pattern version of pathCovers, for every resource kind. */
+export function resourceCovers(outer: string, inner: string): boolean {
+  const a = parseResource(outer), b = parseResource(inner);
+  if (a.kind !== b.kind) return false;
+  if (a.kind === 'path') return pathCovers(a.pattern, b.pattern);
+  if (a.pattern === b.pattern || a.pattern === '*') return true;
+  if (!b.pattern.includes('*')) return globAny(a.pattern, b.pattern);
+  const star = a.pattern.indexOf('*');
+  return star === a.pattern.length - 1 && b.pattern.startsWith(a.pattern.slice(0, -1));
+}
+/** Does action pattern `outer` include every action `inner` names? */
+export function actionCovers(outer: string, inner: string): boolean {
+  if (outer === '*' || outer === inner) return true;
+  return outer.endsWith('.*') && inner !== '*' && inner.startsWith(outer.slice(0, -1));
+}
+/**
+ * Is `action` on everything `resource` can match granted by one standing allow rule? Deny rules are not weighed
+ * here: callers that hand rules on (recruiting) copy the deny rules along, and deny always wins.
+ */
+export function allowsAll(rules: Rule[], action: string, resource: string): boolean {
+  return rules.some((r) => r.effect === 'allow' && r.not_after === undefined && r.actions.some((a) => actionCovers(a, action)) && resourceCovers(r.resource, resource));
+}
+
 export function resourceMatches(rulePattern: string, resource: string): boolean {
   const a = parseResource(rulePattern), b = parseResource(resource);
   if (a.kind !== b.kind) return false;
@@ -153,7 +194,10 @@ export function authorize(sessionRules: Rule[], capRules: Rule[], action: string
  */
 export function canReach(sessionRules: Rule[], capRules: Rule[], action: string, dirPath: string): boolean {
   if (authorize(sessionRules, capRules, action, `path:${dirPath}`).allowed) return true;
-  const reaches = (rules: Rule[]) => rules.some((r) => r.effect === 'allow' && r.actions.some((a) => actionMatches(a, action))
+  // A temporary grant counts only inside its window, as authorize() decides it.
+  const now = Date.now();
+  const live = (r: Rule) => r.not_after === undefined || (now < r.not_after && (r.not_before === undefined || now >= r.not_before));
+  const reaches = (rules: Rule[]) => rules.some((r) => r.effect === 'allow' && live(r) && r.actions.some((a) => actionMatches(a, action))
     && r.resource.startsWith('path:') && pathReachesBelow(r.resource.slice(5), dirPath));
   const subtreeDenied = (rules: Rule[]) => rules.some((r) => r.effect === 'deny' && r.actions.some((a) => actionMatches(a, action))
     && r.resource.startsWith('path:') && pathMatches(r.resource.slice(5), dirPath) && r.resource.endsWith('/**'));

@@ -37,6 +37,11 @@ describe('policy engine', () => {
     expect(d.allowed).toBe(false); expect(d.source).toBe('app_key_cap');
     expect(authorize(rules, [], 'fs.read', 'path:/vault/Private/a.md').allowed).toBe(true);
   });
+  it('canReach counts a temporary grant only inside its window', () => {
+    const later = { ...R('allow', ['fs.list'], 'path:/vault/A/**'), not_before: Date.now() + 3600_000, not_after: Date.now() + 7200_000 };
+    expect(canReach([later], [], 'fs.list', '/vault')).toBe(false);
+    expect(canReach([{ ...later, not_before: Date.now() - 1000 }], [], 'fs.list', '/vault')).toBe(true);
+  });
   it('canReach lists parents of granted folders but not siblings or denied subtrees', () => {
     const rules = [R('allow', ['fs.list'], 'path:/vault/Projects/A/**'), R('deny', ['fs.list'], 'path:/vault/Projects/A/Secret/**')];
     expect(canReach(rules, [], 'fs.list', '/vault')).toBe(true);
@@ -60,34 +65,52 @@ describe('policy engine', () => {
 });
 
 const KEY = 'ah_ses_abcdefghijkl_abcdefghijklmnopqrstuvwxyz234567';
+const TOK = 'ah_tok_abcdefghijklmnopqrstuvwxyz234567abcdefgh';
 describe('leak guard', () => {
-  const g = new LeakGuard({ knownKeyIds: () => ['mnopqrstuvwx'] });
-  const hit = (v: unknown) => g.scan(v) !== null;
-  it('catches a plain key, also nested', () => {
+  // The hub issued exactly KEY and TOK; anything else is at most key-shaped.
+  const g = new LeakGuard({ isIssued: (k, id, s) => (k === 'ses' && id === 'abcdefghijkl' && s === 'abcdefghijklmnopqrstuvwxyz234567') || (k === 'tok' && `ah_tok_${s}` === TOK) });
+  const hit = (v: unknown) => g.scan(v)?.issued === true;
+  it('catches a plain key or token, also nested', () => {
     expect(hit({ text: `here: ${KEY}` })).toBe(true);
     expect(hit({ a: [{ b: KEY }] })).toBe(true);
+    expect(hit(`token ${TOK}.`)).toBe(true);
   });
   it('catches spaced, split, case-changed and zero-width forms', () => {
     expect(hit('ah _ ses _ abcdefghijkl _ abcdefghijklmnopqrstuvwxyz234567')).toBe(true);
     expect(hit('AH_SES_ABCDEFGHIJKL_ABCDEFGHIJKLMNOPQRSTUVWXYZ234567')).toBe(true);
-    expect(hit('ah_ses_abcdef\u200bghijkl_abcdefghijklmnopqrstuvwxyz234567')).toBe(true);
+    expect(hit('ah_ses_abcdef​ghijkl_abcdefghijklmnopqrstuvwxyz234567')).toBe(true);
+    expect(hit(KEY.split('').join('\n'))).toBe(true);
     expect(hit({ part1: 'ah_ses_abcdefghijkl_abcdefghijklmnop', part2: 'qrstuvwxyz234567' })).toBe(true);
   });
-  it('catches base64 and hex encodings', () => {
+  it('catches base64 and hex encodings, also misaligned or next to binary bytes', () => {
     expect(hit(Buffer.from(KEY).toString('base64'))).toBe(true);
     expect(hit(Buffer.from(KEY).toString('base64url'))).toBe(true);
     expect(hit(Buffer.from(KEY).toString('hex'))).toBe(true);
+    expect(hit(`id${Buffer.from(`x${KEY}`).toString('base64')}`)).toBe(true);
+    expect(hit(Buffer.concat([Buffer.from([0xff, 0xfe, 0x00]), Buffer.from(KEY), Buffer.from([0xc3, 0xa9])]).toString('base64'))).toBe(true);
   });
-  it('catches a known key id on its own', () => { expect(hit('please use mnopqrstuvwx for that')).toBe(true); });
-  it('ignores the skipped top-level fields', () => {
+  it('reports a key-shaped string the hub never issued as not issued', () => {
+    expect(g.scan({ text: 'ah_ses_zzzzzzzzzzzz_zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz' })).toMatchObject({ issued: false });
+  });
+  it('ignores the skipped top-level fields and exempt values', () => {
     expect(g.scan({ session_key: KEY, q: 'hello' }, new Set(['session_key']))).toBeNull();
+    expect(g.scan({ text: `your token: ${TOK}` }, undefined, [TOK])).toBeNull();
+  });
+  it('a key id alone (the masked key) is not a leak', () => {
+    expect(g.scan('my key is ah_ses_abcdefghijkl_… on this PC, and the reviewers agreed on everything')).toBeNull();
   });
   it('has no false positives on normal text or documentation mentions', () => {
-    expect(hit('Meeting notes about the Q3 roadmap. Call session_login with your key, then session_describe.')).toBe(false);
-    expect(hit('keys look like ah_ses_… and ah_app_… in the docs')).toBe(false);
-    expect(hit('ah_ses_<keyid>_<secret> is the format')).toBe(false);
-    expect(hit('The path /vault/Projects/Alpha/notes.md and https://example.com/a/b?c=d')).toBe(false);
-    expect(hit('Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor.')).toBe(false);
+    for (const t of [
+      'Meeting notes about the Q3 roadmap. Call session_login with your key, then session_describe.',
+      'keys look like ah_ses_… and ah_app_… in the docs',
+      'ah_ses_<keyid>_<secret> is the format',
+      'The path /vault/Projects/Alpha/notes.md and https://example.com/a/b?c=d',
+      'Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor.',
+      // Prose that glues into "ah" + "set"/"app"/"tok" + 40 letters once separators are removed.
+      'Yeah, settings for the deployment pipeline are documented in the runbook we share with the team',
+      'Utah application deadlines are tight, so the reviewers will check every requirement carefully',
+      'Noah tok the train; Sarah apparently prefers the bus, according to her travel plans this week',
+    ]) expect(g.scan(t)).toBeNull();
   });
 });
 

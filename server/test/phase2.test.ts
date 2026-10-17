@@ -222,6 +222,21 @@ describe('links, whoami, sessions, topology, metrics, archive', () => {
     expect(insp.accesses.length).toBeGreaterThan(0);
     expect((await api('GET', '/sessions/agent-nope')).status).toBe(404);
 
+    // The administrator sends a directive and a message: both reach the agent as notices; acknowledging is visible.
+    expect((await api('POST', `/agents/${A.agent.id}/notices`, { kind: 'directive', body: '' })).status).toBe(400);
+    expect((await api('POST', `/agents/${A.agent.id}/notices`, { kind: 'order', body: 'x' })).status).toBe(400);
+    const dir = (await api('POST', `/agents/${A.agent.id}/notices`, { kind: 'directive', body: 'Cite the source file for every claim.' })).body.notice;
+    expect(dir).toMatchObject({ kind: 'directive' });
+    await api('POST', `/agents/${A.agent.id}/notices`, { kind: 'message', body: 'Ping me when the draft is ready.' });
+    const got = (await call('session_whoami', { session_token: tokA })).structuredContent.notices as { seq: number; kind: string; body: string }[];
+    expect(got.filter((x) => ['directive', 'message'].includes(x.kind)).map((x) => x.body)).toEqual(['Cite the source file for every claim.', 'Ping me when the draft is ready.']);
+    await call('session_ack', { session_token: tokA, notice_seq: dir.seq });
+    const insp2 = (await api('GET', `/sessions/${A.agent.id}`)).body;
+    expect(insp2.notices_acked_seq).toBe(dir.seq);
+    expect(insp2.notices[0].kind).toBe('message');
+    expect(insp2).toHaveProperty('playbooks');
+    expect(app.db.prepare("SELECT COUNT(*) n FROM audit_events WHERE action='agent.notice' AND target_id=?").get(A.agent.id)).toMatchObject({ n: 2 });
+
     const topo = (await api('GET', '/topology')).body;
     const pcT = topo.pcs.find((x: any) => x.id === pcId);
     expect(pcT.app_keys[0].app).toBe('claude-code');

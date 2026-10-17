@@ -301,7 +301,7 @@ describe('inline channels', () => {
     const c4 = (await A.call('channel_open', { to: `agent:${R.id}`, purpose: 'x', size: 1, sha256: sha('y') })).structuredContent.channel_id;
     await R.call('channel_accept', { channel_id: c4 });
     const { Channels } = await import('../src/channels/channels.js');
-    new Channels(app.db, app.keys, app.teams, app.setup, app.store, app.vault, app.shares, new LeakGuard({ knownKeyIds: () => app.keys.allKeyIds() }), app.audit, app.channels.cfg);
+    new Channels(app.db, app.keys, app.teams, app.setup, app.store, app.vault, app.shares, new LeakGuard({ isIssued: (k, id, s) => app.keys.isIssued(k, id, s) }), app.audit, app.channels.cfg);
     expect((await A.call('channel_status', { channel_id: c4 })).structuredContent).toMatchObject({ status: 'failed', failure_reason: 'restart' });
   });
 

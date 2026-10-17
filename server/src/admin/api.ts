@@ -11,7 +11,7 @@ import type { Config } from '../config.js';
 import { authorize, canReach, validateRules, parseResource } from '../policy/engine.js';
 import type { Rule } from '../policy/engine.js';
 import { BASE_TOOLS, GRANTED_TOOLS } from '../policy/catalogue.js';
-import { hashPassword, randomToken, safeEqualHex, sha256Hex, verifyPassword, verifyTotp } from '../util/crypto.js';
+import { hashPassword, randomToken, safeEqualHex, sha256Hex, verifyPasswordAsync, verifyTotp } from '../util/crypto.js';
 import { newId } from '../util/ids.js';
 import type { Setup } from '../setup/setup.js';
 import type { Links } from '../links/links.js';
@@ -21,6 +21,8 @@ import type { Messaging } from '../messaging/messaging.js';
 import type { Teams } from '../teams/teams.js';
 import { registerTeams } from './teams.js';
 import { registerVaultApi } from './vaultApi.js';
+import { registerResetApi } from './resetApi.js';
+import { registerTelemetryApi } from './telemetryApi.js';
 import type { VaultStore } from '../vault/store.js';
 import { registerPhase5 } from './phase5.js';
 import { registerGraphAdmin } from './graphApi.js';
@@ -35,6 +37,9 @@ interface AdminCtx { id: string; username: string; csrf: string; totp: boolean }
 declare module 'fastify' { interface FastifyRequest { admin?: AdminCtx } }
 
 const DUMMY_HASH = hashPassword('not-a-real-password');
+/** Password checks running at once; more sign-ins wait their turn with a 429 instead of queueing scrypt work. */
+const MAX_VERIFYING = 2;
+let verifying = 0;
 
 export function bootstrapAdmin(db: Db, audit: Audit, config: Config): void {
   const n = (db.prepare('SELECT COUNT(*) n FROM admin_users').get() as { n: number }).n;
@@ -86,13 +91,17 @@ export function registerAdminApi(f: FastifyInstance, d: AdminDeps): void {
     api.post('/api/login', async (req, reply) => {
       const b = body(z.object({ username: z.string(), password: z.string(), totp: z.string().optional() }), req);
       const now = Date.now();
-      if (loginLimit.blocked(b.username, 'admin_login_fail', now).blocked) {
+      // Per username and per client address: a stream of attempts with changing usernames is limited too.
+      if (loginLimit.blocked(b.username, 'admin_login_fail', now).blocked || loginLimit.blocked(`ip:${req.ip}`, 'admin_login_fail_ip', now).blocked) {
         audit.auth({ subject: 'admin', outcome: 'rate_limited', source: req.ip });
         return reply.code(429).send({ error: 'rate_limited', message: 'Too many failed sign-ins. Try again later.' });
       }
       const u = db.prepare('SELECT * FROM admin_users WHERE username=?').get(b.username) as { id: string; password_hash: string; totp_secret: string | null; status: string } | undefined;
-      const okPw = verifyPassword(b.password, u?.password_hash ?? DUMMY_HASH) && !!u && u.status === 'active';
-      if (!okPw) { loginLimit.fail(b.username, 'admin_login_fail', now); audit.auth({ subject: 'admin', adminId: u?.id ?? null, outcome: 'invalid', source: req.ip }); return reply.code(401).send({ error: 'invalid_credentials', message: 'Wrong username or password.' }); }
+      if (verifying >= MAX_VERIFYING) return reply.code(429).send({ error: 'rate_limited', message: 'Sign-in is busy. Try again in a moment.' });
+      verifying++;
+      let okPw = false;
+      try { okPw = (await verifyPasswordAsync(b.password, u?.password_hash ?? DUMMY_HASH)) && !!u && u.status === 'active'; } finally { verifying--; }
+      if (!okPw) { loginLimit.fail(b.username, 'admin_login_fail', now); loginLimit.fail(`ip:${req.ip}`, 'admin_login_fail_ip', now); audit.auth({ subject: 'admin', adminId: u?.id ?? null, outcome: 'invalid', source: req.ip }); return reply.code(401).send({ error: 'invalid_credentials', message: 'Wrong username or password.' }); }
       if (u!.totp_secret) {
         if (!b.totp) return reply.code(401).send({ error: 'mfa_required', message: 'Enter the 6-digit code from your authenticator.' });
         if (!verifyTotp(u!.totp_secret, b.totp, now)) { loginLimit.fail(b.username, 'admin_login_fail', now); audit.auth({ subject: 'admin', adminId: u!.id, outcome: 'mfa_failed', source: req.ip }); return reply.code(401).send({ error: 'mfa_failed', message: 'Wrong code.' }); }
@@ -257,12 +266,14 @@ export function registerAdminApi(f: FastifyInstance, d: AdminDeps): void {
       return { decision: authorize(keys.rules(c.policy_id), app ? keys.rules(app.policy_id) : [], b.action, resource) };
     });
 
-    registerPhase2(api, { db, keys, setup: d.setup, links: d.links, config }, actor);
+    registerPhase2(api, { db, keys, setup: d.setup, links: d.links, config, audit }, actor);
     registerPhase3(api, { db, keys, messaging: d.messaging }, actor);
     registerTeams(api, { db, keys, teams: d.teams }, actor);
     registerPhase5(api, { db, keys, audit, ...d.phase5 }, actor);
     registerGraphAdmin(api, { db, audit, graph: d.graph }, actor);
     registerVaultApi(api, { db, keys, audit, vault, store: d.store }, actor);
+    registerResetApi(api, { db, audit, config, loginLimit, maintenance: d.phase5.maintenance }, actor);
+    registerTelemetryApi(api, { db, audit }, actor);
 
     // ───── templates ─────
     api.get('/api/templates', async () => ({ templates: keys.templates() }));
@@ -272,16 +283,19 @@ export function registerAdminApi(f: FastifyInstance, d: AdminDeps): void {
     });
 
     // ───── audit ─────
-    const limit = (req: FastifyRequest) => Math.min(200, Math.max(1, Number((req.query as { limit?: string }).limit ?? 200) || 200));
+    const limit = (req: FastifyRequest, max = 200) => Math.min(max, Math.max(1, Number((req.query as { limit?: string }).limit ?? 200) || 200));
     api.get('/api/audit', async (req) => {
       const t = (req.query as { target?: string }).target;
       const rows = t ? db.prepare('SELECT * FROM audit_events WHERE target_id=? ORDER BY id DESC LIMIT ?').all(t, limit(req)) : db.prepare('SELECT * FROM audit_events ORDER BY id DESC LIMIT ?').all(limit(req));
       return { events: rows };
     });
+    /** since (epoch ms) bounds the window, so "calls in the last hour" counts more than the latest 200 rows (up to 2000). */
     api.get('/api/invocations', async (req) => {
-      const c = (req.query as { credential?: string }).credential;
-      const rows = c ? db.prepare('SELECT * FROM tool_invocations WHERE credential_id=? OR app_credential_id=? ORDER BY created_at DESC LIMIT ?').all(c, c, limit(req))
-        : db.prepare('SELECT * FROM tool_invocations ORDER BY created_at DESC LIMIT ?').all(limit(req));
+      const q = req.query as { credential?: string; since?: string };
+      const since = Number(q.since ?? 0) || 0, n = limit(req, 2000);
+      const rows = q.credential
+        ? db.prepare('SELECT * FROM tool_invocations WHERE credential_id=? AND created_at>=? UNION SELECT * FROM tool_invocations WHERE app_credential_id=? AND created_at>=? ORDER BY created_at DESC LIMIT ?').all(q.credential, since, q.credential, since, n)
+        : db.prepare('SELECT * FROM tool_invocations WHERE created_at>=? ORDER BY created_at DESC LIMIT ?').all(since, n);
       return { invocations: rows };
     });
     api.get('/api/alerts', async (req) => {
