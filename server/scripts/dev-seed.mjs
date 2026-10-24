@@ -84,9 +84,77 @@ const CAST = [
 ];
 const TEAM_NAME = 'The Last Playback';
 
+
+// ── agent feedback: a few reports in every state, filed by the agents through the real tools (docs/feedback.md) ──
+async function seedFeedback() {
+  await step('feedback', async () => {
+    if ((await get('/api/feedback')).reports.length) return;
+    mcp ??= await mcpClient(state.appKey);
+    for (const who of ['Chair', 'Withdrawal', 'Witness', 'Reviewer', 'Archivist']) {
+      if (tokens[who]) continue;
+      const r = await call(null, 'session_login', { session_key: state.sessions[`${who} session`] });
+      tokens[who] = data(r).session_token;
+    }
+    const file = async (who, a) => data(await call(who, 'feedback_file', a)).report_id;
+    // Calls the hub records, so the report has hub evidence next to the agent's account.
+    for (let i = 0; i < 3; i++) await call('Withdrawal', 'file_stat', { path: '/vault/Sealed/exhibit-7.md' }, { allowError: true });
+    const stat = { kind: 'bug', tool: 'file_stat', error_code: 'denied', title: 'file_stat says denied for a note that file_list shows', severity: 'costly',
+      tried: 'Listed /vault/Evidence, then called file_stat on a note under Sealed to read its date.', happened: 'file_stat answered denied three times, although the folder listing had shown the parent.', expected: 'A clear message that Sealed is outside my grants.',
+      workaround: 'Asked the Chair for the date instead.', cost: { extra_calls: 6, extra_tokens: 4200, minutes_lost: 5 } };
+    const statId = await file('Withdrawal', stat);
+    await file('Witness', stat); // same problem: merged as a +1
+    await call('Reviewer', 'feedback_add', { report_id: statId, kind: 'plus_one' });
+    const review = await file('Chair', { kind: 'limitation', tool: 'task_create', title: 'A task cannot have more than one reviewer', severity: 'blocking',
+      tried: 'Created the intake task with two reviewers so both briefs could be checked at once.', happened: 'Only one reviewer is accepted.', expected: 'A list of reviewers, or a second review round without a new task.', workaround: 'Created a copy of the task per reviewer.', cost: { extra_calls: 9, minutes_lost: 12 } });
+    for (const who of ['Witness', 'Reviewer', 'Withdrawal']) await call(who, 'feedback_add', { report_id: review, kind: 'plus_one' });
+    await file('Archivist', { kind: 'wish', tool: 'file_search', title: 'file_search could return the matching line number', severity: 'minor', tried: 'Searched the vault for a phrase and opened every hit to find the line.' });
+    const guided = await file('Reviewer', { kind: 'bug', tool: 'share_comment', error_code: 'invalid_argument', title: 'share_comment rejects a line number that exists in the file', severity: 'costly',
+      tried: 'Commented on line 7 of witness-brief.md in version 2.', happened: 'invalid_argument: the line is outside the file. Version 1 had the line; version 2 is one line shorter.', workaround: 'Commented without a line number.' });
+    await post(`/api/feedback/${guided}/status`, { status: 'accepted', note: 'Reproduced.', guidance: 'Comment on the version the line belongs to, or leave the line out.' });
+    const ask = await file('Withdrawal', { kind: 'limitation', area: 'limits', title: 'The hourly message limit is too small for a review round', severity: 'costly', tried: 'Sent one message per finding to the Chair during a review round.', happened: 'rate_limited after the 120th message.' });
+    await post(`/api/feedback/${ask}/status`, { status: 'needs_info', note: 'How many messages did the round need, and could the findings go in one message?' });
+    const fixed = await file('Witness', { kind: 'bug', tool: 'file_read', title: 'file_read stops at 90 000 bytes without saying where to continue', severity: 'costly', happened: 'The answer ends mid-sentence.', tried: 'Read the long glossary note in one call.' });
+    await post(`/api/feedback/${fixed}/status`, { status: 'fixed', note: 'The answer now carries the offset to continue at.', fixed_in: '0.1.0' });
+    await call('Reviewer', 'feedback_add', { report_id: fixed, kind: 'still_happening', text: 'Still no offset on the second page.' }); // reopens it: New, with a Reopened pill
+    const gone = await file('Archivist', { kind: 'wish', area: 'other', title: 'A shortcut to list my own reports', severity: 'minor', tried: 'Looked for a way to see what I had reported.' });
+    await call('Archivist', 'feedback_add', { report_id: gone, kind: 'withdraw', text: 'feedback_find with no filter does this.' });
+    log('Feedback: reports filed in every state.');
+  });
+}
+
+// ── decisions: questions the agents ask the operator, open and answered (docs/decisions.md) ──
+async function seedDecisions() {
+  await step('decisions', async () => {
+    const team = (await get('/api/teams')).teams.find((t) => t.name === TEAM_NAME);
+    if (!team || (await get(`/api/decisions?team=${team.id}`)).decisions.length) return;
+    mcp ??= await mcpClient(state.appKey);
+    for (const who of ['Chair', 'Witness', 'Withdrawal']) {
+      if (tokens[who]) continue;
+      tokens[who] = data(await call(null, 'session_login', { session_key: state.sessions[`${who} session`] })).session_token;
+    }
+    const board = (await get(`/api/teams/${team.id}`)).team.board;
+    const timeline = board.find((k) => /timeline/i.test(k.title) && !['done', 'cancelled'].includes(k.status));
+    const ask = async (who, a) => data(await call(who, 'team_ask', { team_id: team.id, ...a })).decision_id;
+    // Open, blocking the timeline task: the operator answers on the card or the question screen.
+    await ask('Witness', { question: 'Use the venue log or the recording timestamps as the timeline of record?', context: 'The two disagree by 4 minutes around the correction (00:18). The brief needs one source; the other can be a footnote.',
+      options: [{ key: 'a', label: 'Venue log', effect: 'Matches the charter wording; the 4 minutes become a footnote.' }, { key: 'b', label: 'Recording timestamps', effect: 'Precise to the second, but the clock was never verified.' }],
+      recommended: 'a', ...(timeline ? { task_id: timeline.id } : {}) }).catch(() => ask('Witness', { question: 'Use the venue log or the recording timestamps as the timeline of record?', options: [{ key: 'a', label: 'Venue log' }, { key: 'b', label: 'Recording timestamps' }], recommended: 'a' }));
+    // Open, free answer, from the coordinator.
+    await ask('Chair', { question: 'Should the hearing allow a third round of briefs?', context: 'Both advocates asked for one more round. The decision record is due Friday.' });
+    // Answered and declined ones, for the log.
+    const a = await ask('Withdrawal', { question: 'Cite the 2019 precedent even though it was overturned in part?', options: [{ key: 'a', label: 'Cite it, with the caveat' }, { key: 'b', label: 'Leave it out' }], recommended: 'a' });
+    await post(`/api/decisions/${a}/answer`, { option: 'a', text: 'Say in one line which part still stands.' });
+    const b = await ask('Chair', { question: 'May the reviewer see the sealed contact sheet?' });
+    await post(`/api/decisions/${b}/decline`, { note: 'That is an access request: ask with access_request.' });
+    log('Decisions: two open questions, one answered, one declined.');
+  });
+}
+
 // ── already done? ──
 if (state.done && (await get('/api/teams')).teams.some((t) => t.name === TEAM_NAME)) {
   log('Already seeded (state in .dev/seed-state.json). Use `npm run dev:hub -- --reset` for a clean start.');
+  await seedFeedback();
+  await seedDecisions();
   await sleep(100); process.exit(0);
 }
 
@@ -366,6 +434,8 @@ for (let i = 0; i < 24 && !overdue; i++) {
 }
 if (!overdue) failures.push('overdue alert did not appear within 72 s');
 state.done = failures.length === 0; save();
+await seedFeedback();
+await seedDecisions();
 
 // ── summary ──
 const n = async (p, k) => ((await get(p))[k] ?? []).length;

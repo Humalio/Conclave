@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Local design-review hub: Agent Hub on 127.0.0.1:8099 (HUB_PORT overrides the port) with data under <repo>/.dev/ and a copy of demo/vault.
+// Local design-review hub: Conclave on 127.0.0.1:8099 (HUB_PORT overrides the port) with data under <repo>/.dev/ and a copy of demo/vault.
 // First run generates an admin password and pepper into .dev/hub.env (never printed). `--reset` wipes .dev/ first.
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
@@ -36,7 +36,7 @@ const env = {
 };
 const tsx = join(serverDir, 'node_modules', 'tsx', 'dist', 'cli.mjs');
 const child = spawn(process.execPath, [tsx, 'src/main.ts'], { cwd: serverDir, env, stdio: 'inherit' });
-console.log(`Agent Hub (local design review) at http://${HOST}:${PORT}/`);
+console.log(`Conclave (local design review) at http://${HOST}:${PORT}/`);
 console.log(`Credentials: ${envFile}`);
 for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => child.kill(sig));
 child.on('exit', (code) => process.exit(code ?? 0));

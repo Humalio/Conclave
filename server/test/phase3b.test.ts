@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -849,5 +849,193 @@ describe('code review fixes, second batch (11 Nov)', () => {
     app.db.prepare('UPDATE session_tokens SET expires_at=1, revoked_at=1 WHERE session_credential_id=?').run(a.cred.id);
     app.maintenance.prune(Date.now());
     expect(rows().map((r) => r.token_hash)).toEqual([all.at(-1)!.token_hash]);
+  });
+});
+
+describe('decisions: agents ask the operator', () => {
+  const notices = async (call: Call) => ((await call('session_whoami')).structuredContent.notices ?? []) as { seq: number; kind: string; body: string }[];
+  const opts = [{ key: 'a', label: 'Run 23e', effect: 'about 6 h on h200' }, { key: 'b', label: 'Drop g0 from the equality rule', effect: 'no rerun' }];
+
+  it('a worker asks with a task: the task waits, the operator answers, the task goes back and the log keeps it', async () => {
+    const X = await team({}, true);
+    await Promise.all([X.C, X.W1].map(drain));
+    const t = await mkTask(X);
+    await X.C('task_assign', { task_id: t.id, agent_id: X.w1.id });
+    await X.W1('task_start', { task_id: t.id });
+    await api('PUT', `/teams/${X.tid}/decision-log`, { path: '/vault/Decisions log.md' });
+    const asked = (await X.W1('team_ask', { team_id: X.tid, question: 'Run 23e or drop g0?', context: 'ET-B11 stopped at 23d.', options: opts, recommended: 'a', task_id: t.id })).structuredContent;
+    expect(asked).toMatchObject({ status: 'open', task_id: t.id, recommended: 'a' });
+    expect(app.teams.task(t.id)).toMatchObject({ status: 'blocked' });
+    expect(app.teams.task(t.id)!.blocked_reason).toContain('Run 23e or drop g0?');
+    expect((await notices(X.C)).some((n) => n.kind === 'decision_asked' && n.body.includes(asked.decision_id))).toBe(true);
+    // the console: open questions, counts, and the answer
+    expect((await api('GET', '/decisions/counts')).body.by_team[X.tid]).toBe(1);
+    const open = (await api('GET', `/decisions?team=${X.tid}&status=open`)).body.decisions;
+    expect(open.map((d: any) => d.id)).toEqual([asked.decision_id]);
+    const ans = await api('POST', `/decisions/${asked.decision_id}/answer`, { option: 'a', text: 'Keep g0; the claim needs it.' });
+    expect(ans.status).toBe(200);
+    expect(ans.body.decision).toMatchObject({ status: 'answered', answer_option: 'a', answer_label: 'Run 23e' });
+    expect(app.teams.task(t.id)).toMatchObject({ status: 'assigned', assignee_agent_id: X.w1.id, blocked_reason: null });
+    const n = await notices(X.W1);
+    expect(n.some((x) => x.kind === 'decision' && x.body.includes('Run 23e') && x.body.includes('task_start'))).toBe(true);
+    const log = (await X.W1('team_decisions', { team_id: X.tid })).structuredContent.decisions;
+    expect(log[0]).toMatchObject({ decision_id: asked.decision_id, status: 'answered', answer: 'Run 23e', answer_text: 'Keep g0; the claim needs it.' });
+    // the vault note got the entry
+    const note = readFileSync(join(app.config.vaultDir, 'Decisions log.md'), 'utf8');
+    expect(note).toContain('Run 23e or drop g0?');
+    expect(note).toContain('**Decision:** Run 23e — Keep g0; the claim needs it.');
+    expect((await api('POST', `/decisions/${asked.decision_id}/answer`, { option: 'b' })).status).toBe(409);
+  });
+
+  it('more information, decline and withdraw; the limits hold', async () => {
+    const X = await team({}, true);
+    const t = await mkTask(X);
+    await X.C('task_assign', { task_id: t.id, agent_id: X.w1.id });
+    // only the assignee (or a coordinator) may block a task with a question
+    expect((await X.W2('team_ask', { team_id: X.tid, question: 'Not mine?', task_id: t.id })).structuredContent.error).toBe('denied');
+    expect((await X.W1('team_ask', { team_id: X.tid, question: 'One option?', options: [opts[0]] })).structuredContent.error).toBe('invalid_argument');
+    expect((await X.W1('team_ask', { team_id: X.tid, question: 'Bad pick?', options: opts, recommended: 'z' })).structuredContent.error).toBe('invalid_argument');
+    const q = (await X.W1('team_ask', { team_id: X.tid, question: 'Which dataset?', task_id: t.id })).structuredContent;
+    expect((await X.W1('team_ask', { team_id: X.tid, question: 'Again?', task_id: t.id })).structuredContent.error).toBe('invalid_state');
+    await api('POST', `/decisions/${q.decision_id}/more-info`, { note: 'Which sizes are in each?' });
+    expect((await notices(X.W1)).some((x) => x.kind === 'decision_needs_info' && x.body.includes('Which sizes'))).toBe(true);
+    const upd = (await X.W1('team_ask_update', { decision_id: q.decision_id, context: 'A: 10 GB, B: 2 GB.' })).structuredContent;
+    expect(upd.status).toBe('open');
+    expect((await api('GET', `/decisions/${q.decision_id}`)).body.decision.context).toContain('A: 10 GB');
+    await api('POST', `/decisions/${q.decision_id}/decline`, { note: 'Your call.' });
+    expect(app.teams.task(t.id)!.status).toBe('assigned');
+    // withdraw gives the task back too
+    const w = (await X.W1('team_ask', { team_id: X.tid, question: 'Start over?', task_id: t.id })).structuredContent;
+    expect((await X.W2('team_ask_update', { decision_id: w.decision_id, withdraw: true })).structuredContent.error).toBe('denied');
+    expect((await X.W1('team_ask_update', { decision_id: w.decision_id, withdraw: true })).structuredContent.status).toBe('withdrawn');
+    expect(app.teams.task(t.id)!.status).toBe('assigned');
+    // at most five open questions per agent
+    for (let i = 0; i < 5; i++) expect((await X.S('team_ask', { team_id: X.tid, question: `Q${i}?` })).structuredContent.status).toBe('open');
+    expect((await X.S('team_ask', { team_id: X.tid, question: 'Sixth?' })).structuredContent.error).toBe('rate_limited');
+    // a lockdown stops asking but not reading the log
+    app.lockdown.set('writes', undefined, true, null);
+    try {
+      expect((await X.R('team_ask', { team_id: X.tid, question: 'Locked?' })).structuredContent.error).toBe('lockdown');
+      expect((await X.R('team_decisions', { team_id: X.tid, status: 'open' })).structuredContent.decisions.length).toBe(5);
+    } finally { app.lockdown.set('writes', undefined, false, null); }
+    // agents outside the team cannot read its log
+    const out = mk('outsider-dec'); const O = await out.login();
+    expect((await O('team_decisions', { team_id: X.tid })).isError).toBeTruthy();
+  });
+});
+
+describe('permission changes are explained', () => {
+  it('a notice says what changed (none when nothing did), and a denied call is marked allowed once access is granted', async () => {
+    const a = mk('perm-diff');
+    const base = [{ effect: 'allow' as const, actions: ['tool.invoke'], resource: 'tool:file_*' }, { effect: 'allow' as const, actions: ['fs.list', 'fs.read'], resource: 'path:/vault/A/**' }];
+    app.keys.setRules(a.cred.policy_id, base, 'start', sys);
+    const A = await a.login();
+    await A('session_ack', { notice_seq: 1e6 });
+    expect((await A('file_read', { path: '/vault/B/x.md' })).structuredContent.error).toBe('denied');
+    const denied = () => api('GET', `/invocations?credential=${a.cred.id}`).then((r) => r.body.invocations.find((i: any) => i.tool === 'file_read'));
+    expect(await denied()).toMatchObject({ result: 'denied', now_allowed: false, denied_action: 'fs.read', denied_path: '/vault/B/x.md' });
+    app.keys.setRules(a.cred.policy_id, [...base, { effect: 'allow', actions: ['fs.read'], resource: 'path:/vault/B/**' }], 'let it read B', sys);
+    const n = ((await A('session_whoami')).structuredContent.notices ?? []) as { kind: string; body: string }[];
+    const msg = n.find((x) => x.kind === 'permissions_changed')!.body;
+    expect(msg).toContain('added fs.read on path:/vault/B/**');
+    expect(msg).toContain('let it read B');
+    expect(await denied()).toMatchObject({ result: 'denied', now_allowed: true });
+    // the same rules again: no notice
+    const count = () => (app.db.prepare("SELECT COUNT(*) n FROM agent_notices WHERE agent_id=? AND kind='permissions_changed'").get(a.id) as { n: number }).n;
+    const before = count();
+    app.keys.setRules(a.cred.policy_id, [...base, { effect: 'allow', actions: ['fs.read'], resource: 'path:/vault/B/**' }], 'same again', sys);
+    expect(count()).toBe(before);
+  });
+});
+
+describe('decisions asked by the coordinator for a worker\'s task', () => {
+  it('the worker also gets the answer, and the coordinator is told whose task it is', async () => {
+    const X = await team({}, true);
+    const t = await mkTask(X);
+    await X.C('task_assign', { task_id: t.id, agent_id: X.w1.id });
+    await Promise.all([X.C, X.W1].map((c) => c('session_ack', { notice_seq: 1e6 })));
+    const q = (await X.C('team_ask', { team_id: X.tid, question: 'Rerun or park?', options: [{ key: 'a', label: 'Rerun' }, { key: 'b', label: 'Park' }], recommended: 'a', task_id: t.id })).structuredContent;
+    await api('POST', `/decisions/${q.decision_id}/answer`, { option: 'a' });
+    const w = ((await X.W1('session_whoami')).structuredContent.notices ?? []) as { kind: string; body: string }[];
+    expect(w.some((n) => n.kind === 'decision' && n.body.includes('about your task') && n.body.includes('task_start'))).toBe(true);
+    const c = ((await X.C('session_whoami')).structuredContent.notices ?? []) as { kind: string; body: string }[];
+    expect(c.find((n) => n.kind === 'decision')!.body).toContain('assigned to w1 again');
+  });
+});
+
+describe('directives: standing rules with scope, versions and read tracking', () => {
+  it('agents see the directives in force, confirm the version they read, and the console sees who is behind', async () => {
+    const X = await team();
+    app.keys.updateAgent(X.w1.id, { project: 'Dir' }, sys);
+    await Promise.all([X.C, X.W1, X.W2].map((c) => c('session_ack', { notice_seq: 1e6 })));
+    const mk_ = (b: Record<string, unknown>) => api('POST', '/directives', b).then((r) => { expect(r.status).toBe(200); return r.body.directive; });
+    const project = await mk_({ title: 'Token rules', body: 'Save as many tokens as possible.', scope: { kind: 'project', ref: 'Dir' } });
+    const teamD = await mk_({ title: 'Report daily', body: 'Post a status every day.', scope: { kind: 'team', ref: X.tid } });
+    const role = await mk_({ title: 'Workers cite sources', body: 'Cite the vault note for each claim.', scope: { kind: 'role', ref: `${X.tid}|worker` } });
+    // w1 is in project Dir and a worker: three directives, most specific first; w2 only the team and role ones; the coordinator only the team one
+    const l1 = (await X.W1('directives_list')).structuredContent.directives;
+    expect(l1.map((d: any) => d.id)).toEqual([role.id, teamD.id, project.id]);
+    expect(l1.every((d: any) => d.read === 'unread')).toBe(true);
+    expect((await X.W2('directives_list')).structuredContent.directives.map((d: any) => d.id)).toEqual([role.id, teamD.id]);
+    expect((await X.C('directives_list')).structuredContent.directives.map((d: any) => d.id)).toEqual([teamD.id]);
+    // a new directive arrives once as a notice; whoami lists titles only
+    const n = ((await X.W1('session_whoami')).structuredContent.notices ?? []) as { kind: string; body: string }[];
+    expect(n.filter((x) => x.kind === 'directive_changed').length).toBe(3);
+    expect((await X.W1('session_whoami')).content[0]!.text).toContain('Directives in force');
+    // read and confirm; a stale version is refused
+    expect((await X.W1('directives_read', { id: project.id })).structuredContent.directives[0].text).toBe('Save as many tokens as possible.');
+    expect((await X.W1('directive_ack', { id: project.id, version: 2 })).structuredContent.error).toBe('invalid_argument');
+    await X.W1('directive_ack', { id: project.id, version: 1 });
+    let cov = (await api('GET', `/directives/${project.id}`)).body.coverage;
+    expect(cov).toEqual([expect.objectContaining({ agent_id: X.w1.id, read: 'current' })]);
+    // an edit bumps the version: w1 is now out of date and is told
+    await api('PATCH', `/directives/${project.id}`, { body: 'Save tokens; slow down near the limit.', note: 'rule 10' });
+    cov = (await api('GET', `/directives/${project.id}`)).body.coverage;
+    expect(cov[0]).toMatchObject({ read: 'outdated', version: 1 });
+    expect((await X.W1('directives_list')).structuredContent.directives.find((d: any) => d.id === project.id)).toMatchObject({ version: 2, read: 'outdated' });
+    const list = (await api('GET', '/directives')).body.directives.find((d: any) => d.id === project.id);
+    expect(list).toMatchObject({ agents: 1, outdated: 1, current: 0 });
+    // retire: agents are told to stop, and it is no longer in force
+    await api('POST', `/directives/${role.id}/retire`, { note: 'merged into the team rule' });
+    expect((await X.W2('directives_list')).structuredContent.directives.map((d: any) => d.id)).toEqual([teamD.id]);
+    const n2 = ((await X.W2('session_whoami')).structuredContent.notices ?? []) as { kind: string; body: string }[];
+    expect(n2.some((x) => x.body.includes('retired') && x.body.includes('Stop following'))).toBe(true);
+  });
+
+  it('rules agents report are in force at once; the operator keeps, merges or edits them', async () => {
+    const X = await team();
+    await Promise.all([X.W1, X.W2].map((c) => c('session_ack', { notice_seq: 1e6 })));
+    // registered at once, in force for the reporter and counted as read by it
+    const r1 = (await X.W1('directives_report', { title: 'TOKEN-RULES.md', source: '/mnt/share/BIRAZ/AgentsRoom/TOKEN-RULES.md', summary: '10 rules on saving tokens.', text: '1. Save as many tokens as possible.' })).structuredContent;
+    expect(r1).toMatchObject({ version: 1 });
+    const l1 = (await X.W1('directives_list')).structuredContent.directives;
+    expect(l1).toEqual([expect.objectContaining({ id: r1.directive_id, title: 'TOKEN-RULES.md', read: 'current' })]);
+    // the same title again updates the agent's own directive (new text, new version, still read)
+    const again = (await X.W1('directives_report', { title: 'token rules', summary: 'Updated.', text: '1. Save tokens.\n10. Slow down near the limit.' })).structuredContent;
+    expect(again).toMatchObject({ directive_id: r1.directive_id, version: 2 });
+    // the same rule from another agent: a second unreviewed directive, shown together
+    const r2 = (await X.W2('directives_report', { title: 'Token rules', summary: 'Save tokens.', text: 'Save tokens.' })).structuredContent;
+    const list = (await api('GET', '/directives')).body;
+    const mine = list.unreviewed.filter((d: any) => [r1.directive_id, r2.directive_id].includes(d.id));
+    expect(mine.map((d: any) => d.key)).toEqual(['token rules', 'token rules']);
+    expect((await api('GET', '/directives/unreviewed-count')).body.count).toBeGreaterThanOrEqual(2);
+    // merge into one team directive: both reporters follow it, the two retire
+    const merged = (await api('POST', '/directives/merge', { ids: [r1.directive_id, r2.directive_id], title: 'Token rules', body: 'Save tokens; slow down near the limit.', scope: { kind: 'team', ref: X.tid } })).body.directive;
+    expect(merged).toMatchObject({ scope_kind: 'team', status: 'active' });
+    expect((await api('GET', `/directives/${merged.id}`)).body.directive.reviewed_at).toBeTruthy();
+    expect((await X.W1('directives_list')).structuredContent.directives.map((d: any) => d.id)).toEqual([merged.id]);
+    const n = ((await X.W2('session_whoami')).structuredContent.notices ?? []) as { body: string }[];
+    expect(n.some((x) => x.body.includes('is merged into'))).toBe(true);
+    // keep as is: a single report marked reviewed; review all
+    const r3 = (await X.W1('directives_report', { title: 'Cite sources', summary: 'Cite the vault note.' })).structuredContent;
+    expect((await api('GET', `/directives/${r3.directive_id}`)).body.directive).toMatchObject({ reviewed_at: null, reported_by: X.w1.id, body: 'Cite the vault note.' });
+    await api('POST', `/directives/${r3.directive_id}/review`);
+    expect((await api('GET', `/directives/${r3.directive_id}`)).body.directive.reviewed_at).toBeTruthy();
+    await X.W2('directives_report', { title: 'Old habit', summary: 'Re-read every file.' });
+    expect((await api('POST', '/directives/review-all', {})).body.reviewed).toBeGreaterThanOrEqual(1);
+    expect((await api('GET', '/directives/unreviewed-count')).body.count).toBe(0);
+    // an edit by the operator counts as a review and reaches the agent as a change
+    await api('PATCH', `/directives/${r3.directive_id}`, { scope: { kind: 'team', ref: X.tid }, note: 'for the whole team' });
+    expect((await X.W2('directives_list')).structuredContent.directives.some((d: any) => d.id === r3.directive_id)).toBe(true);
   });
 });

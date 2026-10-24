@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="color-scheme" content="dark light">
-<title>Agent Hub</title>
+<title>Conclave</title>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -52,12 +52,15 @@
 <symbol id="i-up" viewBox="0 0 24 24"><path d="M12 19V6M6 11l6-6 6 6"/></symbol>
 <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8v.01"/></symbol>
 <symbol id="i-more" viewBox="0 0 24 24"><path d="M5 12h.01M12 12h.01M19 12h.01"/></symbol>
+<symbol id="i-bug" viewBox="0 0 24 24"><rect x="8" y="8" width="8" height="12" rx="4"/><path d="M9 8a3 3 0 0 1 6 0M4 12h4M16 12h4M5 19l3-2M19 19l-3-2M5 6l3 2M19 6l-3 2"/></symbol>
+<symbol id="i-limit" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 15h18M8 5v6"/></symbol>
+<symbol id="i-wish" viewBox="0 0 24 24"><path d="M12 3l2.4 5.6L20 11l-5.6 2.4L12 19l-2.4-5.6L4 11l5.6-2.4z"/></symbol>
 <symbol id="i-sl" viewBox="0 0 24 24"><path d="M4 7h10M18 7h2M4 17h2M10 17h10"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/></symbol>
 </defs></svg>
 
 <div class="login" id="login" hidden>
   <form id="lf" autocomplete="on">
-    <div class="logo"><svg class="i"><use href="#i-hub"/></svg></div>
+    <div class="logo" role="img" aria-label="Conclave" title="Conclave"><svg class="i" aria-hidden="true"><use href="#i-hub"/></svg></div>
     <input class="inp" id="lu" name="username" autocomplete="username" aria-label="User" placeholder="User" required>
     <input class="inp" id="lp" name="password" type="password" autocomplete="current-password" aria-label="Password" placeholder="Password" required>
     <input class="inp mono" id="lt" name="totp" inputmode="numeric" autocomplete="one-time-code" aria-label="Code" placeholder="000000" maxlength="6" hidden>
@@ -67,9 +70,9 @@
 </div>
 
 <aside class="side" aria-label="Navigation">
-  <div class="logo"><svg class="i"><use href="#i-hub"/></svg></div>
+  <div class="logo" role="img" aria-label="Conclave" title="Conclave"><svg class="i" aria-hidden="true"><use href="#i-hub"/></svg></div>
   <button class="nav on" data-go="home" data-tip="Overview" aria-label="Overview"><svg class="i"><use href="#i-home"/></svg></button>
-  <button class="nav" data-go="agents" data-tip="Work  G" aria-label="Work"><svg class="i"><use href="#i-ses"/></svg></button>
+  <button class="nav" data-go="agents" data-tip="Work  G" aria-label="Work"><svg class="i"><use href="#i-ses"/></svg><i class="bdg" data-work-badge hidden></i></button>
   <button class="nav" data-go="security" data-tip="Security  K" aria-label="Security"><svg class="i"><use href="#i-shield"/></svg><i class="bdg" data-request-badge hidden></i></button>
   <button class="nav" data-go="vault" data-tip="Vault  V" aria-label="Vault"><svg class="i"><use href="#i-vault"/></svg></button>
   <button class="nav" data-go="log" data-tip="Auditing  L" aria-label="Auditing"><svg class="i"><use href="#i-log"/></svg></button>
@@ -100,6 +103,8 @@
       <button data-go="topology"><svg class="i"><use href="#i-pulse"/></svg>Activity</button>
       <button data-go="sessions"><svg class="i"><use href="#i-user"/></svg>Sessions</button>
       <button data-go="chats"><svg class="i"><use href="#i-chat"/></svg>Chats</button>
+      <button data-go="feedback"><svg class="i"><use href="#i-wish"/></svg>Feedback<i class="bdg" data-feedback-badge hidden></i></button>
+      <button data-go="directives"><svg class="i"><use href="#i-sl"/></svg>Directives<i class="bdg" data-dir-badge hidden></i></button>
     </nav>
   </section>
   <section class="workspace-bar" id="securityBar" aria-labelledby="securityTitle" hidden>
@@ -191,7 +196,7 @@
 
 <nav class="bnav" aria-label="Navigation">
   <button class="on" data-go="home"><svg class="i"><use href="#i-home"/></svg>Home</button>
-  <button data-go="agents"><svg class="i"><use href="#i-ses"/></svg>Work</button>
+  <button data-go="agents"><svg class="i"><use href="#i-ses"/></svg>Work<i class="bdg" data-work-badge hidden></i></button>
   <button data-go="vault"><svg class="i"><use href="#i-vault"/></svg>Vault</button>
   <button data-go="security"><svg class="i"><use href="#i-shield"/></svg>Security<i class="bdg" data-request-badge hidden></i></button>
   <button data-go="log"><svg class="i"><use href="#i-log"/></svg>Audit</button>

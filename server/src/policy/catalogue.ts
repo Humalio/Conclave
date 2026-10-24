@@ -3,6 +3,12 @@
 /** Tools every logged-in session may use; they only reveal the session's own state. */
 export const BASE_TOOLS = ['session_logout', 'session_whoami', 'session_describe', 'session_ack', 'access_list', 'access_check', 'access_request', 'access_status', 'team_info', 'work_next', 'work_ack'] as const;
 
+/**
+ * Default tools: allowed for every logged-in session without a `tool.invoke` grant, but an explicit deny rule on the
+ * session key or the app key (for example `tool:feedback_*`) refuses them. Base tools cannot be denied.
+ */
+export const DEFAULT_TOOLS = ['feedback_find', 'feedback_file', 'feedback_read', 'feedback_add', 'directives_list', 'directives_read', 'directive_ack', 'directives_report'] as const;
+
 /** Tools that need an explicit `tool.invoke` grant on `tool:<name>`. */
 export const GRANTED_TOOLS = ['file_list', 'file_read', 'file_search', 'file_stat',
   'file_create', 'file_update', 'file_patch', 'file_rename', 'file_delete', 'file_history', 'file_diff', 'file_restore', 'file_conflicts',
@@ -16,7 +22,7 @@ export const ALL_ACTIONS = [
   'fs.list', 'fs.read', 'fs.search', 'fs.create', 'fs.update', 'fs.rename', 'fs.delete', 'fs.download', 'fs.history', 'fs.restore', 'fs.conflicts',
   'message.send', 'message.receive', 'channel.open', 'channel.accept', 'share.with',
   'room.join', 'room.post', 'room.read_history', 'room.invite', 'room.create',
-  'team.member', 'task.create', 'task.assign', 'task.claim', 'task.review', 'task.complete', 'task.block', 'team.report', 'team.complete', 'team.recruit', 'team.plan',
+  'team.member', 'task.create', 'task.assign', 'task.claim', 'task.review', 'task.complete', 'task.block', 'team.report', 'team.complete', 'team.recruit', 'team.plan', 'team.ask',
   'share.create', 'share.upload', 'share.read', 'share.comment', 'share.suggest', 'share.promote',
   'channel.use',
   'graph.read', 'graph.write', 'graph.review',

@@ -12,7 +12,7 @@ const fx = (x, d = 3) => (x == null ? 'n/a' : typeof x === 'number' ? String(Mat
 const table = (head, rows) => `| ${head.join(' | ')} |\n|${head.map(() => '---').join('|')}|\n${rows.map((r) => `| ${r.map((c) => fx(c)).join(' | ')} |`).join('\n')}\n`;
 const L = [];
 const h = (t) => L.push(`\n## ${t}\n`);
-L.push(`# Agent Hub eval results, ${date}\n`);
+L.push(`# Conclave eval results, ${date}\n`);
 
 h('Run status');
 const led = ledger();

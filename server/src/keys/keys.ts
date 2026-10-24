@@ -10,7 +10,7 @@ import { tx } from '../db/db.js';
 import { hmacHex, randomToken, safeEqualHex, sha256Hex } from '../util/crypto.js';
 import { newId } from '../util/ids.js';
 import type { Rule } from '../policy/engine.js';
-import { validateRules } from '../policy/engine.js';
+import { describeRuleChanges, validateRules } from '../policy/engine.js';
 import type { Audit, Actor } from '../audit/audit.js';
 
 export type KeyKind = 'app_key' | 'session_key';
@@ -33,7 +33,8 @@ export interface Notice { id: string; agent_id: string; seq: number; kind: strin
 const CRED_COLS = 'id,kind,agent_id,machine_id,app_name,label,key_id,status,status_reason,expires_at,replaces_credential_id,policy_id,max_live_sessions,created_at,first_used_at,last_used_at,revoked_at';
 export const TOKEN_IDLE_MS = 60 * 60 * 1000;
 /** SQL condition on agent_notices n: not a task notice, or its task is still in the state the notice describes. */
-const CURRENT_NOTICE = '(n.ref_task_id IS NULL OR EXISTS (SELECT 1 FROM tasks k WHERE k.id=n.ref_task_id AND k.status=n.ref_state))';
+const CURRENT_NOTICE = `((n.ref_task_id IS NULL OR EXISTS (SELECT 1 FROM tasks k WHERE k.id=n.ref_task_id AND k.status=n.ref_state))
+  AND (n.ref_feedback_id IS NULL OR EXISTS (SELECT 1 FROM feedback_reports f WHERE f.id=n.ref_feedback_id AND CAST(f.status_rev AS TEXT)=n.ref_state)))`;
 const KEY_RE = /^ah_(app|ses)_([a-z2-7]{12})_([a-z2-7]{32})$/;
 const TOKEN_RE = /^ah_tok_([a-z2-7]{40})$/;
 
@@ -286,6 +287,7 @@ export class Keys {
     rules = rules.filter((r) => !r.team_id); // team-generated rules are managed by the team only
     validateRules(rules);
     return tx(this.db, () => {
+      const before = this.rules(policyId, false);
       this.db.prepare('DELETE FROM permission_rules WHERE policy_id=? AND team_id IS NULL').run(policyId);
       const now = Date.now();
       const stored: Rule[] = rules.map((r, i) => {
@@ -300,7 +302,9 @@ export class Keys {
         .run(policyId, v, JSON.stringify(stored), actor.kind === 'admin' ? actor.id : null, note, now);
       this.audit.event(actor, 'policy.update', { kind: 'policy', id: policyId }, { version: v, rules: rules.length, note });
       const cred = this.db.prepare('SELECT agent_id FROM credentials WHERE policy_id=?').get(policyId) as { agent_id: string | null } | undefined;
-      if (cred?.agent_id) this.notify(cred.agent_id, 'permissions_changed', 'Your permissions changed. Call access_list to see them.');
+      // Say what changed, so the agent need not diff its grants; nothing changed means no notice.
+      const changes = describeRuleChanges(before, stored);
+      if (cred?.agent_id && changes.length) this.notify(cred.agent_id, 'permissions_changed', `The administrator changed your permissions: ${changes.join('; ')}.${note ? ` Note: ${note}` : ''} Call access_list for the full list.`);
       return v;
     });
   }
@@ -391,11 +395,12 @@ export class Keys {
 
   // ───────────── Notices ─────────────
   /** ref: a task notice names its task and the state it describes, so it stops being delivered once the task moves on. */
-  notify(agentId: string, kind: string, body: string, ref?: { task: string; state: string }): void {
+  notify(agentId: string, kind: string, body: string, ref?: { task: string; state: string } | { feedback: string; rev: number }): void {
     tx(this.db, () => {
       const seq = (this.db.prepare('SELECT COALESCE(MAX(seq),0)+1 s FROM agent_notices WHERE agent_id=?').get(agentId) as { s: number }).s;
-      this.db.prepare('INSERT INTO agent_notices(id,agent_id,seq,kind,body,created_at,ref_task_id,ref_state) VALUES (?,?,?,?,?,?,?,?)')
-        .run(newId.notice(), agentId, seq, kind, body, Date.now(), ref?.task ?? null, ref?.state ?? null);
+      const task = ref && 'task' in ref ? ref : null, fb = ref && 'feedback' in ref ? ref : null;
+      this.db.prepare('INSERT INTO agent_notices(id,agent_id,seq,kind,body,created_at,ref_task_id,ref_state,ref_feedback_id) VALUES (?,?,?,?,?,?,?,?,?)')
+        .run(newId.notice(), agentId, seq, kind, body, Date.now(), task?.task ?? null, task?.state ?? (fb ? String(fb.rev) : null), fb?.feedback ?? null);
     });
   }
   /** Notices after this login's cursor, without task notices whose task has left the state they describe.

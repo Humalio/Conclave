@@ -2,13 +2,14 @@
 import { z } from 'zod';
 import { KeyError } from '../keys/keys.js';
 import type { Teams, Who, TaskRow, TeamPlan } from '../teams/teams.js';
+import type { Decisions, DecisionView } from '../teams/decisions.js';
 
 type Out = { text: string; data: Record<string, unknown>; authorizedSecrets?: string[] };
 type Reg = (name: string, description: string, shape: z.ZodRawShape, needsToken: boolean, fn: (ctx: any, a: any) => Promise<Out>) => void;
 type ToolErrorCtor = new (code: string, message: string, extra?: Record<string, unknown>) => Error;
 
 /** messageBudget: charges one message to the sender's hourly limit and throws when it is spent (team_report and team_complete post into the team room). */
-export function registerTeamTools(reg: Reg, teams: Teams, ToolError: ToolErrorCtor, opts: { messageBudget?: (credId: string) => void } = {}): void {
+export function registerTeamTools(reg: Reg, teams: Teams, ToolError: ToolErrorCtor, opts: { messageBudget?: (credId: string) => void; decisions?: Decisions } = {}): void {
   const who = (ctx: any): Who => { const s = ctx.session; return { agentId: s.agent.id, credId: s.cred.id, tokenHash: s.tokenHash, rules: s.rules, cap: s.cap }; };
   /** Run a team operation, turning hub errors into tool errors. */
   const run = async <T>(fn: () => T | Promise<T>): Promise<T> => {
@@ -125,4 +126,31 @@ ${r.handoff}`, data: { status: 'created', agent_id: r.agent_id, handoff: r.hando
     true, async (ctx, a) => one('Blocked', await run(() => teams.stopTask(who(ctx), a, 'blocked'))));
   reg('task_cancel', 'Coordinator: any open task -> cancelled with a reason.', { task_id: taskId, reason: z.string().min(1).max(2000) },
     true, async (ctx, a) => one('Cancelled', await run(() => teams.stopTask(who(ctx), a, 'cancelled'))));
+
+  // ───── decisions: ask the operator (docs/decisions.md) ─────
+  const dec = opts.decisions;
+  if (dec) {
+    const decLine = (d: DecisionView) => `${d.id} [${d.status}] ${d.question}${d.status === 'answered' ? ` -> ${[d.answer_label, d.answer_text].filter(Boolean).join(' — ')}` : ''}${d.status === 'needs_info' && d.info_note ? ` (operator asks: ${d.info_note})` : ''}`;
+    const decData = (d: DecisionView) => ({ trust: 'L0', decision_id: d.id, team_id: d.team_id, task_id: d.task_id, status: d.status, question: d.question, options: d.options, recommended: d.recommended,
+      refs: d.refs, asked_by: d.agent_id, asked_at: d.created_at, info_note: d.info_note, answer_option: d.answer_option, answer: d.answer_label, answer_text: d.answer_text, answered_at: d.answered_at });
+    const option = z.object({ key: z.string().min(1).max(8), label: z.string().min(1).max(160), effect: z.string().max(400).optional().describe('What choosing it means: cost, risk, what happens next') });
+    reg('team_ask', 'Ask the operator for a decision you cannot make yourself. Give the question, short context, two or more options with their effect, and your recommendation. With task_id the task waits (blocked) until the answer, which comes back as a notice. Ask once per decision; never only write a question into a block reason or a note.', {
+      team_id: teamId, question: z.string().min(1).max(300), context: z.string().max(4000).optional().describe('Why it matters and what you know; plain text, links to vault notes or shares welcome'),
+      options: z.array(option).max(6).optional().describe('0 for a free answer, else 2 to 6'), recommended: z.string().max(8).optional().describe('The key of the option you recommend'),
+      task_id: taskId.optional().describe('A task of yours (or any, for a coordinator) that waits for this answer'), refs: z.array(z.string().max(16)).max(10).optional().describe('Team plan keys (R1, M2)'),
+      needed_by: z.number().int().optional().describe('When you need the answer (ms)'),
+    }, true, async (ctx, a) => {
+      const d = await run(() => dec.ask(who(ctx), a));
+      return { text: `Asked (${d.id}). The operator answers in the console; the answer comes back as a notice.${d.task_id ? ` Task ${d.task_id} waits until then.` : ''}`, data: decData(d) };
+    });
+    reg('team_ask_update', 'Your own open question: add information (also the reply when the operator needs more) or withdraw it. Withdrawing gives a blocked task back to its assignee.', {
+      decision_id: z.string().max(100), context: z.string().max(4000).optional(), withdraw: z.boolean().optional(),
+    }, true, async (ctx, a) => { const d = await run(() => dec.update(who(ctx), a)); return { text: decLine(d), data: decData(d) }; });
+    reg('team_decisions', 'The team\'s decision log: questions asked to the operator and the answers (L0: the operator\'s decisions). status open, closed or all (default).', {
+      team_id: teamId, status: z.enum(['open', 'closed', 'all']).optional(), limit: z.number().int().min(1).max(100).optional(),
+    }, true, async (ctx, a) => {
+      const L = await run(() => dec.forAgent(who(ctx), a.team_id, a.status ?? 'all', a.limit ?? 30));
+      return { text: L.length ? L.map(decLine).join('\n') : 'No decisions yet.', data: { decisions: L.map(decData) } };
+    });
+  }
 }

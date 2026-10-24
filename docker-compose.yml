@@ -1,4 +1,4 @@
-# Agent Hub. Run `deploy/setup.sh` to create .env, or copy .env.example and fill it in.
+# Conclave. Run `deploy/setup.sh` to create .env, or copy .env.example and fill it in.
 # With HTTPS enabled, .env sets COMPOSE_FILE so deploy/docker-compose.https.yml is layered on top.
 services:
   agent-hub:

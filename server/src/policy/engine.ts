@@ -26,7 +26,7 @@ export interface Rule {
 export type DecisionSource = 'session_key' | 'app_key_cap' | 'default' | 'link' | 'paused';
 
 /** Actions that change state; a paused team's resources refuse them. */
-const PAUSABLE = /^(message.send|room.post|channel.|share.(create|upload|comment|suggest|promote)|fs.(create|update|rename|delete|restore)|task.|team.(report|complete|recruit|plan)|graph.(write|review))/;
+const PAUSABLE = /^(message.send|room.post|channel.|share.(create|upload|comment|suggest|promote)|fs.(create|update|rename|delete|restore)|task.|team.(report|complete|recruit|plan|ask)|graph.(write|review))/;
 export interface AuthorizeOpts { isPaused?: (resource: string, rule: Rule) => boolean }
 
 export interface Decision {
@@ -144,6 +144,32 @@ export function allowsAll(rules: Rule[], action: string, resource: string): bool
   return rules.some((r) => r.effect === 'allow' && r.not_after === undefined && r.actions.some((a) => actionCovers(a, action)) && resourceCovers(r.resource, resource));
 }
 
+/**
+ * What changed between two rule lists, in words an agent can act on: "added fs.create, fs.update on
+ * path:/vault/X/**", "removed message.send on agent:…", "new deny fs.read on …". Temporary grants are not
+ * compared here. An empty list means the effective rules are the same (no notice is needed).
+ */
+export function describeRuleChanges(before: Pick<Rule, 'effect' | 'actions' | 'resource'>[], after: Pick<Rule, 'effect' | 'actions' | 'resource'>[], max = 4): string[] {
+  const index = (L: Pick<Rule, 'effect' | 'actions' | 'resource'>[]) => {
+    const m = new Map<string, Set<string>>();
+    for (const r of L) { const k = `${r.effect}\u0000${r.resource}`; const s = m.get(k) ?? new Set<string>(); for (const a of r.actions) s.add(a); m.set(k, s); }
+    return m;
+  };
+  const B = index(before), A = index(after), out: string[] = [];
+  const say = (verb: string, effect: string, acts: string[], resource: string) => out.push(`${verb} ${effect === 'deny' ? 'deny ' : ''}${acts.sort().join(', ')} on ${resource}`);
+  for (const [k, acts] of A) {
+    const [effect, resource] = k.split('\u0000') as [string, string], had = B.get(k) ?? new Set<string>();
+    const add = [...acts].filter((a) => !had.has(a));
+    if (add.length) say('added', effect, add, resource);
+  }
+  for (const [k, acts] of B) {
+    const [effect, resource] = k.split('\u0000') as [string, string], has = A.get(k) ?? new Set<string>();
+    const gone = [...acts].filter((a) => !has.has(a));
+    if (gone.length) say('removed', effect, gone, resource);
+  }
+  return out.length > max ? [...out.slice(0, max), `and ${out.length - max} more`] : out;
+}
+
 export function resourceMatches(rulePattern: string, resource: string): boolean {
   const a = parseResource(rulePattern), b = parseResource(resource);
   if (a.kind !== b.kind) return false;
@@ -185,6 +211,12 @@ export function authorize(sessionRules: Rule[], capRules: Rule[], action: string
   }
   if (opts?.isPaused && PAUSABLE.test(action) && opts.isPaused(resource, s.rule!)) return { allowed: false, action, resource, rule: s.rule, source: 'paused', reason: 'the team is paused' };
   return { allowed: true, action, resource, rule: s.rule, source: s.rule!.id.startsWith('link:') ? 'link' : 'session_key', reason: `allowed by rule ${s.rule!.id}` };
+}
+
+/** Does an explicit deny rule of the session key or the app key match this action and resource? (Default tools only.) */
+export function explicitlyDenied(sessionRules: Rule[], capRules: Rule[], action: string, resource: string): boolean {
+  parseResource(resource);
+  return evalList(sessionRules, action, resource).effect === 'deny' || evalList(capRules, action, resource).effect === 'deny';
 }
 
 /**

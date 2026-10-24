@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Agent Hub bridge. Single file, no dependencies, Node 24+.
+// Conclave bridge. Single file, no dependencies, Node 24+.
 //   node agent-hub-bridge.mjs pair <hub-url> <pairing-code>   one-time pairing
 //   node agent-hub-bridge.mjs run                              heartbeat / job loop
 // Config: ~/.agent-hub/bridge.json {"hub": "...", "bridge_key": "ah_brg_..."}  (key file is mode 600; AGENT_HUB_HOME overrides the folder)

@@ -397,7 +397,7 @@ describe('basics', () => {
   it('serves /health and the console', async () => {
     expect(((await (await fetch(`${base}/health`)).json()) as any).ok).toBe(true);
     const r = await fetch(`${base}/`);
-    expect(r.status).toBe(200); expect(await r.text()).toContain('Agent Hub');
+    expect(r.status).toBe(200); expect(await r.text()).toContain('Conclave');
   });
   it('seeds the built-in templates once', () => {
     expect(app.keys.templates().map((t) => t.name)).toEqual(expect.arrayContaining(['Reader', 'Writer', 'Reviewer', 'Coordinator']));

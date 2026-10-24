@@ -26,6 +26,9 @@ import { Lockdown } from './safety/lockdown.js';
 import { Alerts, DEFAULT_ALERT_OPTS } from './safety/alerts.js';
 import { Maintenance, DEFAULT_RETENTION } from './safety/retention.js';
 import { Graph } from './graph/graph.js';
+import { Feedback } from './feedback/feedback.js';
+import { Decisions } from './teams/decisions.js';
+import { Directives } from './directives/directives.js';
 import { bootstrapAdmin, registerAdminApi } from './admin/api.js';
 
 const STATUS: Record<string, number> = { not_found: 404, conflict: 409, lockdown: 423, too_large: 413, binary: 400, patch_failed: 409, invalid_state: 409, paused: 409, invalid_argument: 400, invalid_path: 400, denied: 404 };
@@ -52,6 +55,10 @@ export async function buildApp(config: Config) {
   });
   const access = new Access(db, keys, audit);
   const lockdown = new Lockdown(db, vault.alias);
+  const feedback = new Feedback(db, keys, audit, teams);
+  const decisions = new Decisions(db, keys, teams, audit, store, vault);
+  const directives = new Directives(db, keys, teams, audit);
+  directives.registerOpenReports(); // reports filed before rules were registered automatically
   channels.lockdown = lockdown;
   const graph = new Graph(db, store, vault, teams, keys, config.graph, audit);
   const alerts = new Alerts(db, audit, keys, vault, config.alerts ? { ...DEFAULT_ALERT_OPTS, ...config.alerts } : DEFAULT_ALERT_OPTS);
@@ -104,7 +111,7 @@ export async function buildApp(config: Config) {
   asset('fonts/geist.woff2', 'font/woff2');
   asset('fonts/geist-mono.woff2', 'font/woff2');
 
-  registerAdminApi(fastify, { db, keys, audit, vault, store, config, loginLimit, setup, links, messaging, teams, phase5: { access, lockdown, alerts, shares, channels, maintenance }, graph });
+  registerAdminApi(fastify, { db, keys, audit, vault, store, config, loginLimit, setup, links, messaging, teams, phase5: { access, lockdown, alerts, shares, channels, maintenance }, graph, feedback, decisions, directives });
   const bridge = registerBridge(fastify, setup, pairLimit, channels);
   fastify.addHook('preClose', async () => { bridge.releaseAll(); messaging.releaseAll(); teams.releaseAll(); clearInterval(upkeep); maintenance.stop(); });
 
@@ -149,7 +156,7 @@ export async function buildApp(config: Config) {
         return reply.code(401).header('www-authenticate', 'Bearer error="invalid_token"').send({ error: code, message: e instanceof Error ? e.message : 'Session token not accepted.' });
       }
     }
-    const server = buildMcpServer({ db, keys, audit, guard, vault, store, loginLimit, setup, links, messaging, teams, messagesPerHour: config.messagesPerHour ?? 120, shares, channels, access, lockdown, alerts, graph }, app, req.ip, headerToken, headerSession);
+    const server = buildMcpServer({ db, keys, audit, guard, vault, store, loginLimit, setup, links, messaging, teams, messagesPerHour: config.messagesPerHour ?? 120, shares, channels, access, lockdown, alerts, graph, feedback, decisions, directives }, app, req.ip, headerToken, headerSession);
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
     reply.hijack();
     reply.raw.on('close', () => { void transport.close(); void server.close(); });
@@ -160,6 +167,6 @@ export async function buildApp(config: Config) {
   fastify.get('/mcp', notAllowed);
   fastify.delete('/mcp', notAllowed);
 
-  return { fastify, db, keys, audit, vault, store, config, setup, links, messaging, teams, shares, channels, access, lockdown, alerts, maintenance, graph, close: async () => { await fastify.close(); await store.stop(); db.close(); } };
+  return { fastify, db, keys, audit, vault, store, config, setup, links, messaging, teams, shares, channels, access, lockdown, alerts, maintenance, graph, feedback, decisions, directives, close: async () => { await fastify.close(); await store.stop(); db.close(); } };
 }
 export type App = Awaited<ReturnType<typeof buildApp>>;

@@ -1,4 +1,4 @@
-# Agent Hub — instructions for coding agents
+# Conclave — instructions for coding agents
 
 - Read [docs/README.md](docs/README.md) first; it maps the design baseline.
 - **Any change to the operator console (`server/public/`) follows [docs/design-guidelines.md](docs/design-guidelines.md).** Use its tokens, components and alignment rules, and run its review checklist before you call the change done. [docs/dashboard-ux.md](docs/dashboard-ux.md) says what each view must answer.

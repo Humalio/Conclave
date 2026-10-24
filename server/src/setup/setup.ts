@@ -131,7 +131,7 @@ export class Setup {
       service = { title: 'Register the bridge with launchd (substitute absolute paths, XML-escaped, before writing the file)', file: { path: p, content: plist },
         commands: [`plutil -lint "${p}"`, `launchctl bootout "gui/$(id -u)/com.agenthub.bridge" 2>/dev/null || true`, `launchctl bootstrap "gui/$(id -u)" "${p}"`] };
     } else {
-      const unit = `[Unit]\nDescription=Agent Hub bridge\n\n[Service]\nExecStart="NODE_PATH" "%h/.agent-hub/agent-hub-bridge.mjs" run\nRestart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy=default.target\n`;
+      const unit = `[Unit]\nDescription=Conclave bridge\n\n[Service]\nExecStart="NODE_PATH" "%h/.agent-hub/agent-hub-bridge.mjs" run\nRestart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy=default.target\n`;
       const p = '$HOME/.config/systemd/user/agent-hub-bridge.service';
       service = { title: 'Register the bridge as a systemd user service (substitute the absolute Node executable for NODE_PATH)', file: { path: p, content: unit },
         commands: ['systemctl --user daemon-reload', 'systemctl --user enable agent-hub-bridge', 'systemctl --user restart agent-hub-bridge'] };

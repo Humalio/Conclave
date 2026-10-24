@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Set up and start Agent Hub with Docker: choose a vault, choose how it is reached, get an admin login.
+# Set up and start Conclave with Docker: choose a vault, choose how it is reached, get an admin login.
 #
 #   deploy/setup.sh                                   # asks for anything not given
 #   deploy/setup.sh --vault ~/Notes --mode local
@@ -169,7 +169,7 @@ if [[ $mode == lan ]]; then
 else mcp_line="$public_url/mcp"; fi
 cat <<EOF
 
-Agent Hub is running.
+Conclave is running.
   Console    $console
   User       $admin
   Password   $pw_line

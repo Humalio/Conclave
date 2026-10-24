@@ -300,7 +300,7 @@ export class Channels {
     if (buf.length > INLINE_CHUNK) throw err('too_large', `A chunk is at most ${INLINE_CHUNK} bytes.`);
     if (c.target_kind === 'agent' && r.queue.length >= WINDOW) return { ok: false, wait: true, retry_after_ms: 250, next_seq: r.nextSeq };
     if (r.sent + buf.length > c.size!) { this.fail(id, 'size_mismatch'); throw err('size_mismatch', 'More data than the declared size. The channel failed.'); }
-    if (this.scan(c, r, buf)) throw err('contains_key', 'What you sent contains an Agent Hub key. The channel failed and the session key was suspended.');
+    if (this.scan(c, r, buf)) throw err('contains_key', 'What you sent contains a Conclave key. The channel failed and the session key was suspended.');
     r.hash.update(buf); r.sent += buf.length; r.nextSeq++;
     if (c.target_kind === 'agent') r.queue.push({ seq, buf }); else r.acc.push(buf);
     this.db.prepare('UPDATE data_channels SET bytes_moved=? WHERE id=?').run(r.sent, id);

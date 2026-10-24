@@ -49,7 +49,7 @@ afterEach(async () => { await app.close(); });
 describe('reset', () => {
   it('lists the parts', async () => {
     const r = await api('GET', '/reset/parts');
-    expect(r.body.parts.map((p: { key: string }) => p.key)).toEqual(['activity', 'conversations', 'teams', 'agents', 'devices', 'shares', 'vault', 'lockdown']);
+    expect(r.body.parts.map((p: { key: string }) => p.key)).toEqual(['activity', 'conversations', 'teams', 'agents', 'devices', 'shares', 'vault', 'feedback', 'lockdown']);
   });
 
   it('plans without changing anything, and shows rows pulled in from other parts', async () => {

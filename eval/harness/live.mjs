@@ -16,7 +16,7 @@ const mean = (a) => (a.length ? a.reduce((s, x) => s + x, 0) / a.length : null);
 const phaseSpent = (p) => ledger().filter((e) => e.label?.startsWith(`${p}/`)).reduce((s, e) => s + (e.cost ?? 0), 0);
 const out = (name) => join(RESULTS, `live-${name}.json`);
 
-const pre = (key, role, model) => `You are a "${role}" agent on Agent Hub (MCP server agent_hub). Your session key is ${key}. First call session_login with it, then session_describe with role "${role}" and model_label "${model}". Pass the session_token on every later call. Never repeat the key.\n\n`;
+const pre = (key, role, model) => `You are a "${role}" agent on Conclave (MCP server agent_hub). Your session key is ${key}. First call session_login with it, then session_describe with role "${role}" and model_label "${model}". Pass the session_token on every later call. Never repeat the key.\n\n`;
 export const CURATOR = 'Curator loop: call work_next (wait_seconds 0). For each item follow its instructions: a knowledge_job is answered with graph_job_submit (job_id and payload as the item describes; for index_note batches submit each member job), then work_ack the item; ack notices and other items. Handle every job type you are offered. Stop when work_next reports idle twice in a row, or after 60 items. Final answer: jobs done per type, rejected items.';
 
 async function pool(items, n, fn) {

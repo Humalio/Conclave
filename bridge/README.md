@@ -1,4 +1,4 @@
-# Agent Hub bridge
+# Conclave bridge
 
 The bridge runs under the PC user's account and moves files for that PC's authorized jobs. It requires Node.js 24 or later and has no package dependencies. Use the bridge program delivered by your hub so both ends use the same protocol. See [transfer design](../docs/transfers.md).
 

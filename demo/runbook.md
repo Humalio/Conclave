@@ -12,7 +12,7 @@ The deployment keeps the local MCP app key and individual session handoffs in `~
 
 Use these steps for a fresh installation that has no rehearsal roster.
 
-1. Copy `demo/vault/` to a disposable location. Start Agent Hub with that copy as `VAULT_DIR` and use the default alias `vault`. Keep the watcher enabled. Open the same copy in Obsidian. See the [hub quickstart](../docs/getting-started.md).
+1. Copy `demo/vault/` to a disposable location. Start Conclave with that copy as `VAULT_DIR` and use the default alias `vault`. Keep the watcher enabled. Open the same copy in Obsidian. See the [hub quickstart](../docs/getting-started.md).
 2. Make four independent sessions named **Chair**, **Withdrawal**, **Witness**, and **Reviewer**. Connect from configured desktop apps. Keep all key issuance, handoff, and token screens out of capture. Tell each session to log in, read `/vault/Hearing/Roles at the Hearing.md` and `/vault/Hearing/Hearing Brief.md`, and act only in the assigned seat.
 3. Create and start **The Last Playback**. Set Chair as coordinator, both advocates as workers, and Reviewer as reviewer. Enable team messaging. Enable the `done` checkpoint if you want the operator to make the closing approval on camera. Keep the four participants on the board, even if two share a PC.
 4. Scope grants explicitly. A full-vault Reader template would expose the sealed exhibit. Remove any broad allow before issuing a handoff. Use the same bounded policy for each advocate so neither starts with privileged evidence.

@@ -1,4 +1,4 @@
-/* Agent Hub dashboard — vanilla ES module, no build. */
+/* Conclave dashboard — vanilla ES module, no build. */
 const $ = (s, r = document) => r.querySelector(s), $$ = (s, r = document) => [...r.querySelectorAll(s)];
 const RM = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
 const ic = (n, c = '') => `<svg class="i ${c}"><use href="#i-${n}"/></svg>`;
@@ -193,7 +193,7 @@ function detailBack() {
   if (DR.type === 'vault') { const v = vaultState(DR.arg); if (v.file) return openD('vault', { ...v, file: false, tab: 'contents', path: v.path.split('/').slice(0, -1).join('/') || vaultRoot() }, true); }
   const from = DR.from; DR.from = null;
   if (from && !(from[0] === DR.type && from[1] === DR.arg)) return from[0] === 'home' ? go('home') : openD(from[0], from[1], false, true);
-  const [t, a] = { task: ['team', String(DR.arg).split('|')[0]], plan: ['team', String(DR.arg).split('|')[0]], tasks: ['team', String(DR.arg).split('|')[0]], members: ['team', DR.arg], tsettings: ['team', DR.arg], tstatus: ['team', DR.arg], team: ['teams'], tbuild: ['teams'], room: ['chats'], ses: ['sessions'], key: ['keys'], new: ['keys'], app: ['keys'], share: ['shares'], lock: ['home'] }[DR.type] || ['home'];
+  const [t, a] = { task: ['team', String(DR.arg).split('|')[0]], plan: ['team', String(DR.arg).split('|')[0]], tasks: ['team', String(DR.arg).split('|')[0]], members: ['team', DR.arg], tsettings: ['team', DR.arg], tstatus: ['team', DR.arg], decisions: ['team', String(DR.arg).split('|')[0]], dec: ['teams'], directive: ['directives'], directives: ['teams'], team: ['teams'], tbuild: ['teams'], room: ['chats'], fbr: ['feedback'], ses: ['sessions'], key: ['keys'], new: ['keys'], app: ['keys'], share: ['shares'], lock: ['home'] }[DR.type] || ['home'];
   go(t, a);
 }
 /* Tabs scroll sideways; show a 24 px fade on whichever edge is clipped. */
@@ -374,12 +374,13 @@ let busy = false;
 async function refresh() {
   if (busy || !S.me) return; busy = true;
   try {
-    const [k, p, a, al, iv, tp, mt, ss, tm, rq, lk, cf, ln] = await Promise.all([api('/keys'), api('/pcs').catch(() => null), api('/agents'), api('/alerts?status=open'), api('/invocations'), api('/topology').catch(() => null), api('/metrics').catch(() => null), api('/sessions?all=1').catch(() => null), api('/teams').catch(() => null), api('/requests?status=pending').catch(() => null), api('/lockdown').catch(() => null), api('/vault/conflicts').catch(() => null), api('/links').catch(() => null)]);
+    const [k, p, a, al, iv, tp, mt, ss, tm, rq, lk, cf, ln, fc, dc, drp] = await Promise.all([api('/keys'), api('/pcs').catch(() => null), api('/agents'), api('/alerts?status=open'), api('/invocations'), api('/topology').catch(() => null), api('/metrics').catch(() => null), api('/sessions?all=1').catch(() => null), api('/teams').catch(() => null), api('/requests?status=pending').catch(() => null), api('/lockdown').catch(() => null), api('/vault/conflicts').catch(() => null), api('/links').catch(() => null), api('/feedback/counts').catch(() => null), api('/decisions?status=open').catch(() => null), api('/directives/unreviewed-count').catch(() => null)]);
     if (!S.tpl.length) S.tpl = (await api('/templates')).templates;
     S.keys = k.keys; S.pcs = p ? p.pcs : [...new Map(k.keys.filter((x) => x.pc).map((x) => [x.pc.id, x.pc])).values()]; S.agents = a.agents; S.alerts = al.alerts; S.inv = iv.invocations;
-    S.top = tp; S.met = mt; S.ses = ss ? ss.sessions : []; S.teams = tm ? tm.teams : []; S.reqs = rq ? rq.requests : []; S.lock = lk; S.conf = cf ? cf.conflicts : []; S.links = ln ? ln.links : S.links;
+    S.top = tp; S.met = mt; S.ses = ss ? ss.sessions : []; S.teams = tm ? tm.teams : []; S.reqs = rq ? rq.requests : []; S.lock = lk; S.conf = cf ? cf.conflicts : []; S.links = ln ? ln.links : S.links; S.fbc = fc || S.fbc; S.dec = dc ? dc.decisions : S.dec || []; S.dirU = drp ? drp.count : S.dirU || 0;
     renderAll(); $('#liveDot').classList.add('pulse'); $('#liveDot').classList.remove('bad');
-    if (!viewLoading && ['team', 'teams', 'sessions', 'plan', 'tasks', 'members'].includes(DR.type) && !viewInUse()) {
+    // Not while a sheet is open: the redraw would close it under the operator's hands.
+    if (!viewLoading && !SHEET && ['team', 'teams', 'sessions', 'plan', 'tasks', 'members', 'feedback', 'decisions', 'directives'].includes(DR.type) && !viewInUse()) {
       const f = focusSel(); await openD(DR.type, DR.arg, true); if (f) $(f)?.focus({ preventScroll: true });
     }
   } catch (e) { if (e.status !== 401) { $('#liveDot').classList.remove('pulse'); $('#liveDot').classList.add('bad'); } } finally { busy = false; }
@@ -461,6 +462,9 @@ const ROUTE_OK = {
   tasks: (a) => { const [i, f = ''] = a.split('|'); return RID.test(i) && /^[a-z]*$/.test(f); }, members: (a) => RID.test(a), tsettings: (a) => RID.test(a),
   plan: (a) => { const [i, k = 'req', f = ''] = a.split('|'); return RID.test(i) && ['req', 'ms'].includes(k) && /^[a-z]*$/.test(f); }, room: (a) => RID.test(a), share: (a) => RID.test(a), app: (a) => !a || RID.test(a),
   task: (a) => { const p = a.split('|'); return p.length === 2 && p.every((x) => RID.test(x)); },
+  feedback: (a) => ['', 'new', 'open', 'closed'].includes(a), fbr: (a) => RID.test(a),
+  directive: (a) => RID.test(a), directives: (a) => ['', 'retired'].includes(a),
+  dec: (a) => RID.test(a), decisions: (a) => { const [i, f = ''] = a.split('|'); return RID.test(i) && ['', 'open', 'answered', 'all'].includes(f); },
   diff: (a) => { const [f, from = '', to] = a.split('|'); return RID.test(f) && (from === 'absent' || RID.test(from)) && (!to || RID.test(to)); },
 };
 const cleanVault = (s) => ({
@@ -498,12 +502,12 @@ function closeD() {
   lastFocus = null;
 }
 function back() { const p = DR.stack.pop(); if (p) { openD(p[0], p[1], true); window.scrollTo(0, 0); } }
-const TAB_BAR = { keys: '#securityBar', pcs: '#securityBar', req: '#securityBar', shares: '#securityBar', grant: '#securityBar', reset: '#securityBar', topology: '#agentsBar', sessions: '#agentsBar', teams: '#agentsBar', chats: '#agentsBar', log: '#auditBar' };
+const TAB_BAR = { keys: '#securityBar', pcs: '#securityBar', req: '#securityBar', shares: '#securityBar', grant: '#securityBar', reset: '#securityBar', topology: '#agentsBar', sessions: '#agentsBar', teams: '#agentsBar', chats: '#agentsBar', feedback: '#agentsBar', log: '#auditBar' };
 const clearBarActions = () => $$('.ws-act').forEach((x) => x.remove());
 /* The area a screen belongs to; the rail, the bottom nav and the bar titles all follow it (detail screens included). */
 const AREA = {
   security: ['security', 'keys', 'key', 'new', 'app', 'pcs', 'req', 'shares', 'share', 'grant', 'reset', 'lock'],
-  agents: ['agents', 'teams', 'topology', 'sessions', 'chats', 'team', 'task', 'tstatus', 'plan', 'tasks', 'members', 'tsettings', 'tbuild', 'room', 'ses'],
+  agents: ['agents', 'teams', 'topology', 'sessions', 'chats', 'team', 'task', 'tstatus', 'plan', 'tasks', 'members', 'tsettings', 'tbuild', 'room', 'ses', 'feedback', 'fbr', 'dec', 'decisions', 'directives', 'directive'],
   vault: ['vault', 'diff'],
   log: ['log'],
   home: ['home', 'monitoring'],
@@ -512,7 +516,7 @@ const areaOf = (t) => Object.keys(AREA).find((a) => AREA[a].includes(t)) || null
 const AREA_TITLE = { home: 'Overview', agents: 'Work', vault: 'Vault', security: 'Security', log: 'Audit' };
 function navOn(t, arg, ctx = false) {
   const securityTab = { keys: 'keys', key: 'keys', pcs: 'pcs', req: 'req', shares: 'shares', share: 'shares', grant: 'grant', new: 'grant', app: 'grant', reset: 'reset' }[t];
-  const agentTab = { topology: 'topology', sessions: 'sessions', ses: 'sessions', teams: 'teams', team: 'teams', plan: 'teams', tasks: 'teams', members: 'teams', tsettings: 'teams', tbuild: 'teams', chats: 'chats', room: 'chats' }[t];
+  const agentTab = { topology: 'topology', sessions: 'sessions', ses: 'sessions', teams: 'teams', team: 'teams', plan: 'teams', tasks: 'teams', members: 'teams', tsettings: 'teams', tbuild: 'teams', chats: 'chats', room: 'chats', feedback: 'feedback', fbr: 'feedback', dec: 'teams', decisions: 'teams', directives: 'directives', directive: 'directives' }[t];
   const area = t ? areaOf(t) : 'home';
   const highlight = (button, active) => {
     button.classList.toggle('on', active);
@@ -1030,6 +1034,8 @@ function bindGraphHover(svg) {
   svg.onmouseleave = () => focus(null);
   if (TG_S.hover && svg.querySelector(`[data-n="${CSS.escape(TG_S.hover)}"]`)) focus(TG_S.hover);
 }
+/* What a denied call was aimed at (a path or resource), never the content it carried. */
+const denTarget = (i) => { try { const a = JSON.parse(i.args_summary || '{}') || {}; return [a.path, a.resource, a.to, a.room_id, a.team_id].find((v) => typeof v === 'string') || ''; } catch { return ''; } };
 /* Projects level: one card per project instead of a graph. Who is in it (live or not), its teams and their
    progress, recent activity and denials, and which other projects it talks to. A click opens the project's agents. */
 function renderProjectCards(graph, M) {
@@ -1050,7 +1056,12 @@ function renderProjectCards(graph, M) {
     const ids = new Set(agents.map((a) => a.id));
     const st = agents.map((a) => M.act.get(a.id));
     const last = Math.max(0, ...st.map((s) => Math.max(s.last, s.teamLast)));
-    const live = agents.filter((a) => M.live.has(a.id)).length, denied = st.reduce((n, s) => n + s.denied, 0);
+    const live = agents.filter((a) => M.live.has(a.id)).length;
+    // Denied calls of this project in the last hour, newest first: the pill names the latest and opens them in Audit.
+    const den = S.inv.filter((i) => i.result === 'denied' && !i.now_allowed && now - i.created_at < 3600_000 && ids.has(i.agent_id || keyAgentOf(i.credential_id))).sort((a, b) => b.created_at - a.created_at);
+    const denWho = [...new Set(den.map((i) => i.agent_id || keyAgentOf(i.credential_id)))];
+    const denTip = den.length ? `${den.length} denied in the last hour. Latest: ${agLabel(denWho[0])}, ${den[0].tool}${denTarget(den[0]) ? ' on ' + denTarget(den[0]) : ''}, ${ago(den[0].created_at)} ago. Open them in Audit.` : '';
+    const denPill = den.length ? `<button type="button" class="pill bad pill-btn" data-go="log" data-arg="calls|${denWho.length === 1 ? 'agent:' + esc(denWho[0]) : ''}|denied" title="${esc(denTip)}" aria-label="${esc(denTip)}">${den.length} denied</button>` : '';
     const teams = S.teams.filter((t) => (t.agent_ids || []).some((id) => ids.has(id)));
     const calls = S.inv.filter((i) => now - i.created_at < 3600_000 && ids.has(K(i.credential_id)?.agent_id)).length;
     // Other projects this one exchanged messages with in the selected window.
@@ -1066,7 +1077,7 @@ function renderProjectCards(graph, M) {
     // One meta line instead of a grid of big numbers: who is in it, who is live, how busy, and when. Task progress lives on the team rows.
     const facts = [`${agents.length} agent${agents.length === 1 ? '' : 's'}`, live ? `${live} live` : '', calls ? `${calls} calls/h` : '', when.charAt(0).toLowerCase() + when.slice(1)].filter(Boolean).join(' · ');
     const head = row({ lead: `<span class="av lg">${ic(name === NO_PROJECT ? 'ses' : 'vault')}</span>`, title: name, meta: facts,
-      trail: `${denied ? pill(`${denied} denied`, 'bad') : ''}<button type="button" class="btn sm only-d" data-go="topology" data-arg="project:${esc(name)}" title="Who talks to whom in this project">${ic('pulse')}Activity</button>` });
+      trail: `${denPill}<button type="button" class="btn sm only-d" data-go="topology" data-arg="project:${esc(name)}" title="Who talks to whom in this project">${ic('pulse')}Activity</button>` });
     const chips = `<div class="pj-chips">${agents.slice(0, 10).map((a) => `<span class="av" title="${esc(a.label)}${a.role ? ' · ' + esc(a.role) : ''} · ${M.live.has(a.id) ? 'live' : 'offline'}">${esc(initials(a.label))}${M.live.has(a.id) ? '<i class="st on"></i>' : ''}</span>`).join('')}${agents.length > 10 ? `<span class="meta">+${agents.length - 10}</span>` : ''}</div>`;
     const teamRows = teams.map((t) => { const pct = t.progress?.pct || 0, tot = t.progress?.total || 0;
       return row({ lead: ic('team'), title: t.name, cls: 'pj-team', chev: true, trail: pill(cap(t.status), TONE[t.status] || 'idle'), attrs: { 'data-team': t.id, title: 'Open the team dashboard' },
@@ -1301,7 +1312,7 @@ const SES_TABS = [['overview', 'Overview', 'user'], ['keys', 'Keys', 'key'], ['t
 VIEWS.ses = async (arg) => {
   const [id, tab0] = String(arg).split('|'), tab = SES_TABS.some(([k]) => k === tab0) ? tab0 : 'overview';
   const u = encodeURIComponent(id);
-  const [d, lkr, conversations, teams] = await Promise.all([api('/sessions/' + u), api('/links?agent=' + u), api('/conversations'), api('/teams')]);
+  const [d, lkr, conversations, teams, dv] = await Promise.all([api('/sessions/' + u), api('/links?agent=' + u), api('/conversations'), api('/teams'), api('/agents/' + u + '/directives').catch(() => ({ directives: [], reports: [] }))]);
   const a = d.agent, LK = lkr.links, others = S.agents.filter((x) => x.id !== id && x.status !== 'archived');
   const chats = conversations.conversations.filter(room => room.members.some(member => member.agent_id === id));
   const groups = teams.teams.filter(team => team.agent_ids.includes(id));
@@ -1353,10 +1364,14 @@ VIEWS.ses = async (arg) => {
               <div class="pb-form" hidden><p class="meta">Applies to every <b>${esc(p.role)}</b> in ${esc(p.team_name)}. Members read it with team_info.</p><textarea class="inp mono" rows="8" maxlength="8000">${esc(p.playbook || '')}</textarea>
                 <div class="row"><button class="btn ok sm" data-pb-save="${esc(p.team_id)}|${esc(p.role)}">${ic('check')}Save playbook</button><button class="btn sm" data-pb-cancel>Cancel</button></div></div>
             </div>`).join('') : '<p class="faint">Not in a team. Team members get a playbook for their role.</p>') +
+          card('sl', 'Directives', (dv.directives.length ? dv.directives.map((x) => row({ title: x.title, meta: `${cap(x.scope_label)} · v${x.version}${x.reported_by === id ? ' · registered by it' : ''}${x.reviewed ? '' : ' · not reviewed'}`, trail: dirRead(x.acked_version === null ? 'unread' : x.acked_version >= x.version ? 'current' : 'outdated', x.acked_version), chev: true, attrs: { 'data-dir': x.id } })).join('') : '<p class="faint">No directives reach this agent.</p>')
+            ,
+            info('Standing rules from Work → Directives that reach this agent, and whether it confirmed the current version. Rules it registered itself are in force at once; you review them in Work → Directives.')) +
           `</div><div class="ag-col">` +
           card('chat', 'Tell the agent', `<div class="ag-send">
               <div class="seg" id="sNoteKind" role="group" aria-label="Kind"><button data-nk="directive" class="on">${ic('sl')}Directive</button><button data-nk="message">${ic('chat')}Message</button></div>
               <textarea class="inp" id="sNoteBody" rows="3" maxlength="4000" placeholder='A standing instruction, e.g. "Cite the source file for every claim."'></textarea>
+              <label class="chk-row" id="sNoteKeepR"><input type="checkbox" id="sNoteKeep" checked> Keep as a standing directive for this agent</label>
               <div class="row"><button class="btn ok sm" id="sNoteGo" disabled>${ic('up')}Send</button>${info('Arrives with its next hub call, or at its next login if it is offline; it confirms with session_ack.')}</div>
             </div>
             ${mine.length ? `<ul class="nts">${mine.map(noteRow).join('')}</ul>` : ''}
@@ -1412,10 +1427,16 @@ VIEWS.ses = async (arg) => {
       on('#sRoleCancel', () => { $('#sRoleView').hidden = false; $('#sRoleForm').hidden = true; });
       let nk = 'directive';
       const nb = $('#sNoteKind');
-      if (nb) nb.onclick = (e) => { const b = e.target.closest('[data-nk]'); if (!b) return; nk = b.dataset.nk; $$('#sNoteKind button').forEach((x) => x.classList.toggle('on', x === b)); $('#sNoteBody').placeholder = nk === 'directive' ? 'A standing instruction, e.g. "Cite the source file for every claim."' : 'A message, e.g. "Pause after the next step and report."'; };
+      if (nb) nb.onclick = (e) => { const b = e.target.closest('[data-nk]'); if (!b) return; nk = b.dataset.nk; $$('#sNoteKind button').forEach((x) => x.classList.toggle('on', x === b)); $('#sNoteKeepR').hidden = nk !== 'directive'; $('#sNoteBody').placeholder = nk === 'directive' ? 'A standing instruction, e.g. "Cite the source file for every claim."' : 'A message, e.g. "Pause after the next step and report."'; };
       const nbody = $('#sNoteBody');
       if (nbody) nbody.oninput = () => { $('#sNoteGo').disabled = !nbody.value.trim(); };
-      on('#sNoteGo', () => run(async () => { await post('/agents/' + u + '/notices', { kind: nk, body: nbody.value.trim() }); toast(nk === 'directive' ? 'Directive sent' : 'Message sent'); re(); }));
+      on('#sNoteGo', () => run(async () => {
+        const txt = nbody.value.trim();
+        // A kept directive is a hub record (scope: this agent) with a version the agent confirms; otherwise a one-off notice.
+        if (nk === 'directive' && $('#sNoteKeep')?.checked) { await post('/directives', { title: trunc(txt.split('\n')[0], 80), body: txt, scope: { kind: 'agent', ref: id } }); toast('Directive kept; the agent is told'); }
+        else { await post('/agents/' + u + '/notices', { kind: nk, body: txt }); toast(nk === 'directive' ? 'Directive sent' : 'Message sent'); }
+        await refresh(); re();
+      }));
       $$('[data-pb-edit]').forEach((b) => (b.onclick = () => { const box = b.closest('.pbk'); box.querySelector('.pb-view').hidden = true; box.querySelector('.pb-form').hidden = false; b.hidden = true; }));
       $$('[data-pb-cancel]').forEach((b) => (b.onclick = () => re()));
       $$('[data-pb-save]').forEach((b) => (b.onclick = () => run(async () => { const [tid, role] = b.dataset.pbSave.split('|'), txt = b.closest('.pbk').querySelector('textarea').value.trim(); if (!txt) return toast('A playbook cannot be empty', true); await api(`/teams/${tid}/roles/${role}`, 'PUT', { playbook: txt }); toast('Playbook saved for every ' + role + ' in the team'); re(); })));
@@ -1555,7 +1576,8 @@ function teamGoalPlan(t, id, nm) {
   const report = t.status_requested_at ? `<span class="warn-t">Update requested ${ago(t.status_requested_at)} ago</span>` : t.status_report ? `${esc(nm(t.status_report.agent_id))}, ${ago(t.status_report.created_at)} ago` : 'No report yet';
   const doors = (R.length ? row({ one: true, title: 'Requirements', trail: `<span>${R.length}</span>`, chev: true, attrs: door('req') }) : '')
     + (M.length ? row({ one: true, title: 'Milestones', trail: `<span>${M.length} · ${reached} reached</span>`, chev: true, attrs: door('ms') }) : '')
-    + row({ one: true, title: 'Status report', trail: `<span>${report}</span>`, chev: true, attrs: { 'data-tstatus': id } });
+    + row({ one: true, title: 'Status report', trail: `<span>${report}</span>`, chev: true, attrs: { 'data-tstatus': id } })
+    + row({ one: true, title: 'Decisions', trail: `<span>${decDoor(t)}</span>`, chev: true, attrs: { 'data-decs': id } });
   const when = [p.updated_at ? `Plan updated ${ago(p.updated_at)} ago` : '', p.requested_at ? `<span class="w">Review asked ${ago(p.requested_at)} ago</span>` : ''].filter(Boolean).join(' · ');
   const foot = `<div class="pl-foot"><span class="pl-when">${when}</span><button class="btn" id="planAsk">${ic('note')}Ask the coordinator to review</button></div>`;
   const stats = R.length || M.length ? `<div class="stats">${stat(`${met}<small>/${live.length}</small>`, 'Met')}${stat(mustOpen, 'Must open')}${stat(unclear, 'Unclear')}</div>` : none('note', 'No plan yet');
@@ -1582,6 +1604,242 @@ VIEWS.plan = async (arg) => {
     a: `<button class="btn sm" data-team="${esc(teamId)}">${ic('team')}Team</button>`,
     dbar: { title, meta: `${t.name} · ${meta}`, menu: [{ label: 'Open ' + t.name, icon: 'team', fn: () => openD('team', teamId) }] },
     b: body,
+  };
+};
+/* ---------- decisions: questions agents ask the operator (docs/decisions.md) ---------- */
+/* Questions and context are written by agents: every piece goes through esc() or row()'s escaping. */
+const DEC_ST = { open: ['Open', 'warn'], needs_info: ['Needs info', 'info'], answered: ['Answered', 'ok'], declined: ['Declined', 'idle'], withdrawn: ['Withdrawn', 'idle'] };
+const DEC_OPEN = ['open', 'needs_info'];
+const decStatus = (s) => pill((DEC_ST[s] || [s])[0], (DEC_ST[s] || [0, 'idle'])[1]);
+/* The status glyph: a ring for open, a question mark shape for needs info, a check, a ban, an x; never colour only. */
+const decGlyph = (d) => d.status === 'answered' ? planGlyph('met', ic('check'), 'Answered') : d.status === 'declined' ? planGlyph('', ic('ban'), 'Declined')
+  : d.status === 'withdrawn' ? planGlyph('', ic('x'), 'Withdrawn') : d.status === 'needs_info' ? planGlyph('open', '', 'Needs info') : planGlyph('unclear', ic('chat'), 'Question for you');
+const decAnswer = (d) => [d.answer_label, d.answer_text].filter(Boolean).join(' — ');
+/* A question as a list row: open ones say who asks and since when; settled ones show the answer. */
+function decRow(d, nm = (id, l) => l || agLabel(id)) {
+  const who = nm(d.agent_id, d.agent_label);
+  const meta = DEC_OPEN.includes(d.status)
+    ? `${who} asks${d.task_title ? ' · blocks a task' : ''}${d.status === 'needs_info' ? ' · waiting for the agent' : ''} · ${ago(d.created_at)} ago`
+    : d.status === 'answered' ? `${decAnswer(d)} · ${ago(d.answered_at)} ago` : `${(DEC_ST[d.status] || [d.status])[0]} · ${ago(d.updated_at)} ago`;
+  return row({ lead: decGlyph(d), title: d.question, meta, chev: true, attrs: { 'data-dec': d.id } });
+}
+/* Attach the team's questions to a fetched team: t.dec (all, newest settled last) and t.decTask (open question per blocked task). */
+async function withDecisions(t) {
+  try { t.dec = (await api('/decisions?team=' + encodeURIComponent(t.id) + '&limit=200')).decisions; } catch { t.dec = []; }
+  t.decTask = Object.fromEntries(t.dec.filter((d) => DEC_OPEN.includes(d.status) && d.blocks_task && d.task_id).map((d) => [d.task_id, d]));
+  return t;
+}
+
+/* One question (docs/decisions.md), laid out to be decided in one pass: the question as the screen's heading with who
+   asked and when; what it affects (the blocked task and its worker, the plan items by name); the agent's context,
+   shortened; the options in full with the recommended one first and chosen; one button that names the answer.
+   Settled: the decision first, then the same question and context for the record. */
+VIEWS.dec = async (id) => {
+  const dp = '/decisions/' + encodeURIComponent(id), d = (await api(dp)).decision, open = DEC_OPEN.includes(d.status);
+  let t = null; try { t = (await api('/teams/' + encodeURIComponent(d.team_id))).team; } catch { /* the team may be gone; the question still shows */ }
+  const nm = t ? teamNm(t) : (aid) => agLabel(aid), asker = d.agent_label || nm(d.agent_id);
+  const task = d.task_id ? t?.board.find((k) => k.id === d.task_id) : null, worker = task?.assignee ? nm(task.assignee) : null;
+  const re = async (msg) => { toast(msg); await refresh(); openD('dec', id, true); };
+  const more = (anchor) => fbSheet({ title: 'Ask for more information', anchor, label: 'Ask', fields: fbArea('dcN', 'What do you need to know?', 2000),
+    onGo: (sh) => { const note = fbVal(sh, 'dcN'); if (!note) return 'Say what you need to know.'; run(async () => { await post(dp + '/more-info', { note }); await re('Asked'); }); } });
+  const decline = () => fbSheet({ title: 'Decline to decide', label: 'Decline', tone: 'bad', fields: fbArea('dcN', 'Note for the agent (optional)', 2000),
+    onGo: (sh) => { run(async () => { await post(dp + '/decline', { note: fbVal(sh, 'dcN') || null }); await re('Declined'); }); } });
+  // Plan items by name: "R4 · Must · <title>", the full title on hover.
+  const R = Object.fromEntries((t?.plan?.requirements || []).map((r) => [r.key, r])), M = Object.fromEntries((t?.plan?.milestones || []).map((m) => [m.key, m]));
+  const refChip = (key) => { const r = R[key], m = M[key], title = r?.title || m?.title || '', head = [key, r ? PRI[r.priority] : m ? 'Milestone' : ''].filter(Boolean).join(' · ');
+    return `<span class="dc-ref" title="${esc(title ? `${head}: ${title}` : key)}">${esc(head)}${title ? ` · ${esc(title)}` : ''}</span>`; };
+  const affects = (task || d.task_id ? row({ lead: planGlyph(d.blocks_task ? 'bad' : '', ic(d.blocks_task ? 'ban' : 'note'), d.blocks_task ? 'Blocked by this question' : 'Linked task'),
+      title: d.task_title || d.task_id, meta: `${worker ? worker + ' · ' : ''}${d.blocks_task ? 'blocked until you answer' : 'linked task'}`, chev: true, attrs: { 'data-task': `${d.team_id}|${d.task_id}` } }) : '')
+    + (d.refs.length ? `<div class="dc-refs">${d.refs.map(refChip).join('')}</div>` : '');
+  const long = (d.context || '').length > 320;
+  const context = d.context ? `${overline(`Context from ${asker}`)}<p class="fb-text dc-ctx${long ? ' clamp' : ''}" id="dcCtx">${esc(d.context)}</p>${long ? '<button type="button" class="btn ghost sm dc-more" id="dcCtxMore">Show more</button>' : ''}` : '';
+  // Options: the recommended one first and chosen, labelled by letter (the agent's keys are ids, not names).
+  const opts = [...d.options].sort((a, b) => (b.key === d.recommended) - (a.key === d.recommended));
+  const optRow = (o, i) => `<button type="button" class="lrow dc-opt" role="radio" aria-checked="${o.key === d.recommended}" data-dc-opt="${esc(o.key)}" data-dc-label="${esc(o.label)}">
+      <span class="lrow-lead"><span class="pl-lead dc-key" aria-hidden="true">${'ABCDEF'[i]}</span></span>
+      <span class="lrow-main"><span class="dc-opt-t">${esc(o.label)}${o.key === d.recommended ? ' ' + pill(`${asker} recommends`, 'acc') : ''}</span>${o.effect ? `<span class="dc-opt-e">${esc(o.effect)}</span>` : ''}</span></button>`;
+  const recLabel = d.options.find((o) => o.key === d.recommended)?.label;
+  const who = [...new Set([asker, worker].filter(Boolean))].join(' and ');
+  const after = `${who} ${who.includes(' and ') ? 'get' : 'gets'} it with the next hub call${task && d.blocks_task ? `; the task goes back to ${worker || 'its assignee'} as assigned` : ''}.`;
+  const noteOpen = !d.options.length;
+  const form = open ? `<section class="sec">${d.options.length ? `${overline('Choose one')}<div role="radiogroup" aria-label="Options" class="dc-opts">${opts.map(optRow).join('')}</div>` : ''}
+      <button type="button" class="btn ghost sm" id="dcNoteT"${noteOpen ? ' hidden' : ''}>${ic('plus')}Add a note or write another answer</button>
+      <label class="fld" id="dcNoteF"${noteOpen ? '' : ' hidden'}><span class="vlabel">${d.options.length ? 'Note (optional)' : 'Your answer'}</span><textarea class="inp" id="dcText" rows="3" maxlength="4000"></textarea></label>
+      <span class="err" id="dcErr" role="alert"></span></section>
+    <div class="actionbar dc-bar"><span class="dc-after">${esc(after)}</span><button type="button" class="btn" id="dcMore">${ic('chat')}Ask for more</button><button type="button" class="btn pri lg" id="dcGo">${ic('check')}<span id="dcGoL">${esc(recLabel ? `Answer: ${recLabel}` : 'Answer')}</span></button></div>` : '';
+  const settled = open ? '' : sec(d.status === 'answered' ? 'Decision' : (DEC_ST[d.status] || [d.status])[0],
+    `${d.status === 'answered' ? `<p class="dc-answer">${esc(decAnswer(d))}</p>` : d.answer_text ? `<p class="fb-text">${esc(d.answer_text)}</p>` : ''}<p class="meta">${esc([d.answered_at ? `${d.status === 'answered' ? 'Answered' : 'Closed'} by ${d.answered_by_name || 'the operator'}, ${dt(d.answered_at)}` : '', d.log_revision ? 'copied to the vault note' : ''].filter(Boolean).join(' · '))}</p>`);
+  const metaLine = [d.team_name, `question from ${asker}`, `${ago(d.created_at)} ago`, d.needed_by ? `needed by ${dt(d.needed_by)}` : ''].filter(Boolean).join(' · ');
+  return {
+    t: `${decGlyph(d)}<span class="ellip">Question from ${esc(asker)}</span>${decStatus(d.status)}`,
+    a: moreBtn(),
+    dbar: { title: 'Question', meta: `${d.team_name || ''} · ${asker} · ${ago(d.created_at)} ago`,
+      menu: [open ? { label: 'Ask for more information', icon: 'chat', fn: () => more() } : null, open ? { label: 'Decline to decide', icon: 'ban', bad: true, fn: decline } : null,
+        { label: 'Decision log', icon: 'log', fn: () => openD('decisions', d.team_id) }] },
+    b: settled
+      + `<section class="sec dc-head"><p class="meta">${esc(metaLine)}</p><h3 class="dc-q">${esc(d.question)}</h3>${d.status === 'needs_info' && d.info_note ? `<p class="dc-wait">${ic('chat')}You asked: ${esc(d.info_note)} · waiting for ${esc(asker)}</p>` : ''}</section>`
+      + (affects || context ? `<section class="sec">${affects ? overline('Affects') + affects : ''}${context}</section>` : '')
+      + form,
+    after() {
+      const m = $('#dcCtxMore'), cx = $('#dcCtx');
+      // Only offer Show more when the clamp actually cuts the text at this width.
+      if (m && cx.scrollHeight <= cx.clientHeight + 1) { cx.classList.remove('clamp'); m.hidden = true; }
+      if (m) m.onclick = () => { const more_ = cx.classList.toggle('clamp'); m.textContent = more_ ? 'Show more' : 'Show less'; };
+      if (!open) return;
+      let pick = d.recommended || null;
+      const label = $('#dcGoL'), text = $('#dcText'), err = $('#dcErr');
+      const sync = () => { const o = d.options.find((x) => x.key === pick); label.textContent = o ? `Answer: ${o.label}` : 'Answer'; err.textContent = ''; };
+      $$('[data-dc-opt]').forEach((b) => (b.onclick = () => { pick = pick === b.dataset.dcOpt ? null : b.dataset.dcOpt; $$('[data-dc-opt]').forEach((x) => x.setAttribute('aria-checked', String(x.dataset.dcOpt === pick))); sync(); }));
+      $('#dcNoteT').onclick = () => { $('#dcNoteT').hidden = true; $('#dcNoteF').hidden = false; text.focus(); };
+      text.oninput = () => { err.textContent = ''; };
+      $('#dcGo').onclick = () => {
+        if (!pick && !text.value.trim()) { err.textContent = d.options.length ? 'Choose an option or write an answer.' : 'Write an answer.'; return; }
+        run(async () => { $('#dcGo').disabled = true; await post(dp + '/answer', { option: pick, text: text.value.trim() || null }); await re('Answered'); });
+      };
+      $('#dcMore').onclick = (e) => more(e.currentTarget);
+    },
+  };
+};
+
+/* A team's decision log: #decisions/<team id>|open|all. Open questions first, then the decisions, newest first. */
+VIEWS.decisions = async (arg) => {
+  const [teamId, fl = ''] = String(arg).split('|');
+  const t = await withDecisions((await api('/teams/' + encodeURIComponent(teamId))).team), nm = teamNm(t);
+  const O = t.dec.filter((d) => DEC_OPEN.includes(d.status)), A = t.dec.filter((d) => d.status === 'answered');
+  const F = [['open', 'Open', O], ['answered', 'Decided', A], ['all', 'All', t.dec]];
+  const cur = F.find(([k]) => k === fl) || (O.length ? F[0] : F[1]);
+  const logPath = t.decision_log_path;
+  const setLog = (anchor) => fbSheet({ title: 'Copy decisions to the vault', anchor, label: 'Save', fields: `<label class="fld"><span class="vlabel">Note in the vault (empty: no copy)</span><input class="inp mono" id="dcLog" maxlength="1024" value="${esc(logPath || '')}" placeholder="/${esc(S.me?.vault_alias || 'vault')}/Project/Decisions log.md" autocomplete="off"></label>`,
+    onGo: (sh) => { run(async () => { await api(`/teams/${encodeURIComponent(teamId)}/decision-log`, 'PUT', { path: fbVal(sh, 'dcLog') || null }); toast('Saved'); openD('decisions', arg, true); }); } });
+  return {
+    t: `${ic('team')}<span class="ellip">${esc(t.name)} · Decisions</span>`,
+    a: `<button class="btn sm" data-team="${esc(teamId)}">${ic('team')}Team</button>`,
+    dbar: { title: 'Decisions', meta: `${t.name} · ${O.length} open · ${A.length} decided`, menu: [{ label: 'Copy to a vault note', icon: 'note', fn: () => setLog() }, { label: 'Open ' + t.name, icon: 'team', fn: () => openD('team', teamId) }] },
+    b: `<nav class="seg eq" role="group" aria-label="Filter">${F.map(([k, l, L]) => `<button type="button" class="${k === cur[0] ? 'on' : ''}" aria-pressed="${k === cur[0]}" data-decs="${esc(teamId)}|${k}">${l} ${L.length}</button>`).join('')}</nav>`
+      + `<section class="sec"><div>${cur[2].map((d) => decRow(d, (id, l) => nm(id) || l)).join('') || none('chat', cur[0] === 'open' ? 'No open questions' : 'No decisions yet')}</div></section>`
+      + `<section class="sec"><div>${row({ title: 'Vault copy', meta: 'Each decision is also added to this note', trail: logPath ? `<span class="mono" title="${esc(logPath)}">${esc(midTrunc(logPath, 36))}</span>` : '<span>Off</span>', chev: true, attrs: { 'data-dclog': '' } })}</div></section>`,
+    after() { const b = $('[data-dclog]'); if (b) b.onclick = (e) => { e.preventDefault(); setLog(b); }; },
+  };
+};
+/* ---------- directives: standing rules with scope, version and who has read them (docs/directives.md) ---------- */
+const DIR_READ = { current: ['Read', 'ok'], outdated: ['Out of date', 'warn'], unread: ['Not read', 'bad'] };
+const dirRead = (r, v) => pill(r === 'outdated' && v ? `Read v${v}, out of date` : DIR_READ[r][0], DIR_READ[r][1]);
+/* Coverage in a few words: "4 of 4 read" (muted) or "2 of 4 read · 1 out of date" (warn). */
+const dirCov = (d) => { if (!d.agents) return 'Applies to no agent'; const behind = d.agents - d.current; return `${d.current} of ${d.agents} read${d.outdated ? ` · ${d.outdated} out of date` : ''}${behind && !d.outdated ? ` · ${behind} not read` : ''}`; };
+/* Scope choices for a directive: what it reaches, then which one. */
+function dirScopeFields(cur = { kind: 'hub', ref: null }) {
+  const projects = [...new Set(S.agents.map((a) => a.project).filter(Boolean))].sort();
+  const teams = S.teams.filter((t) => t.status !== 'done' && t.status !== 'stopped');
+  const opts = {
+    project: projects.map((p) => [p, p]),
+    team: teams.map((t) => [t.id, t.name]),
+    role: teams.flatMap((t) => ['coordinator', 'worker', 'reviewer', 'stakeholder'].map((r) => [`${t.id}|${r}`, `${cap(r)}s of ${t.name}`])),
+    agent: S.agents.filter((a) => a.status !== 'archived').map((a) => [a.id, a.label + (a.project ? ` · ${a.project}` : '')]),
+  };
+  const kinds = [['hub', 'All agents'], ['project', 'One project'], ['team', 'One team'], ['role', 'One role in a team'], ['agent', 'One agent']];
+  return { html: `<label class="fld"><span class="vlabel">Applies to</span><select class="sel fill" id="dsK">${kinds.map(([k, l]) => `<option value="${k}"${k === cur.kind ? ' selected' : ''}>${l}</option>`).join('')}</select></label>
+      <label class="fld" id="dsRF"${cur.kind === 'hub' ? ' hidden' : ''}><span class="vlabel">Which</span><select class="sel fill" id="dsR"></select></label>`,
+    bind(sh) {
+      const k = $('#dsK', sh), r = $('#dsR', sh), f = $('#dsRF', sh);
+      const fill = () => { const L = opts[k.value] || []; f.hidden = k.value === 'hub'; r.innerHTML = L.map(([v, l]) => `<option value="${esc(v)}"${v === cur.ref ? ' selected' : ''}>${esc(l)}</option>`).join(''); };
+      k.onchange = fill; fill();
+      return () => ({ kind: k.value, ref: k.value === 'hub' ? null : r.value || null });
+    } };
+}
+/* New or edited directive, in a sheet: title, text, scope, and for an edit a change note. */
+function dirSheet({ title = 'New directive', d = null, anchor, onDone }) {
+  const sc = dirScopeFields(d ? { kind: d.scope_kind, ref: d.scope_ref } : undefined);
+  const sh = fbSheet({ title, anchor, label: d ? 'Save new version' : 'Create', fields: `<label class="fld"><span class="vlabel">Title</span><input class="inp" id="dsT" maxlength="120" value="${esc(d?.title || '')}" autocomplete="off"></label>
+      <label class="fld"><span class="vlabel">Text (what agents must do)</span><textarea class="inp" id="dsB" rows="6" maxlength="20000">${esc(d?.body || '')}</textarea></label>${sc.html}
+      ${d ? fbArea('dsN', 'What changed (optional, agents see it)', 500, 2) : ''}`,
+    onGo: (s) => {
+      const t = fbVal(s, 'dsT'), b = fbVal(s, 'dsB'), scope = get();
+      if (!t || !b) return 'Give a title and the text.';
+      if (scope.kind !== 'hub' && !scope.ref) return 'Choose what it applies to.';
+      run(async () => {
+        const r = d ? await api('/directives/' + encodeURIComponent(d.id), 'PATCH', { title: t, body: b, scope, note: fbVal(s, 'dsN') || null }) : await post('/directives', { title: t, body: b, scope });
+        toast(d ? 'Saved; agents are told' : 'Created; agents are told'); onDone?.(r.directive);
+      });
+    } });
+  const get = sc.bind(sh);
+}
+/* Merge: the same rule registered by several agents becomes one directive with the scope you choose. The default scope
+   reaches every reporter: their common team, else their common project, else all agents. */
+function dirMergeSheet(group, anchor, onDone) {
+  const ag = group.map((d) => AG(d.reported_by)).filter(Boolean), proj = [...new Set(ag.map((a) => a.project).filter(Boolean))];
+  const teams = S.teams.filter((t) => t.status !== 'done' && t.status !== 'stopped' && ag.every((a) => (t.agent_ids || []).includes(a.id)));
+  const cur = teams.length ? { kind: 'team', ref: teams[0].id } : proj.length === 1 ? { kind: 'project', ref: proj[0] } : { kind: 'hub', ref: null };
+  const sc = dirScopeFields(cur), first = group.slice().sort((a, b) => b.body.length - a.body.length)[0];
+  const sh = fbSheet({ title: `Merge ${group.length} into one`, anchor, label: 'Merge', fields: `<p class="meta">Reported by ${esc(group.map((d) => d.reported_by_label || '?').join(', '))}. Each gets a notice to follow the merged one.</p>
+      <label class="fld"><span class="vlabel">Title</span><input class="inp" id="dsT" maxlength="120" value="${esc(first.title)}" autocomplete="off"></label>
+      <label class="fld"><span class="vlabel">Text</span><textarea class="inp" id="dsB" rows="6" maxlength="20000">${esc(first.body)}</textarea></label>${sc.html}`,
+    onGo: (s) => { const t = fbVal(s, 'dsT'), b = fbVal(s, 'dsB'), scope = get(); if (!t || !b) return 'Give a title and the text.';
+      run(async () => { const x = await post('/directives/merge', { ids: group.map((d) => d.id), title: t, body: b, scope }); toast('Merged; agents are told'); onDone?.(x.directive); }); } });
+  const get = sc.bind(sh);
+}
+/* A rule an agent registered: in force for that agent, waiting for your review. Groups of the same rule show as one row. */
+const dirUnreviewedRows = (U) => {
+  const groups = new Map(); for (const d of U) { if (!groups.has(d.key)) groups.set(d.key, []); groups.get(d.key).push(d); }
+  return [...groups.values()].map((g) => g.length > 1
+    ? row({ lead: planGlyph('unclear', ic('link'), 'Same rule from several agents'), title: g[0].title, meta: `${g.length} agents · ${g.map((d) => d.reported_by_label).join(', ')}`, trail: '<span class="pill acc">Merge</span>', chev: true, attrs: { 'data-dmerge': g[0].key } })
+    : row({ lead: planGlyph('', ic('sl'), 'Not reviewed'), title: g[0].title, meta: `${g[0].reported_by_label || 'Agent'}${g[0].source ? ' · ' + g[0].source : ''} · ${ago(g[0].created_at)} ago`, chev: true, attrs: { 'data-dir': g[0].id } })).join('');
+};
+
+/* Work → Directives: what agents must follow, at which scope, and who has read the current version. Rules agents
+   registered themselves are in force at once; the ones you have not reviewed come first, the same rule from several
+   agents as one row to merge. #directives or #directives/retired. */
+VIEWS.directives = async (arg = '') => {
+  const st = arg === 'retired' ? 'retired' : 'active', D = await api('/directives?status=' + st), U = st === 'active' ? D.unreviewed : [];
+  const behind = D.directives.filter((d) => d.current < d.agents).length;
+  const reviewed = D.directives.filter((d) => d.status !== 'active' || d.reviewed_at);
+  const queue = U.length ? sec(`Not reviewed · ${U.length}`, dirUnreviewedRows(U) + '<div class="row dir-revall"><button type="button" class="btn sm" id="dirRevAll">Mark all as reviewed</button></div>',
+    info('Rules agents registered as they follow them. They are in force already. Open one to keep it, edit it, widen its scope or retire it; merge the same rule from several agents into one.')) : '';
+  const list = reviewed.length ? reviewed.map((d) => row({ lead: planGlyph(d.status === 'retired' ? '' : d.current < d.agents ? 'unclear' : 'met', ic(d.status === 'retired' ? 'x' : 'sl'), d.status === 'retired' ? 'Retired' : 'In force'),
+      title: d.title, meta: `${cap(d.scope_label)} · v${d.version}${d.status === 'active' ? ' · ' + dirCov(d) : ''}`, chev: true, attrs: { 'data-dir': d.id } })).join('')
+    : none('sl', st === 'retired' ? 'No retired directives' : U.length ? 'Nothing reviewed yet' : 'No directives yet');
+  return {
+    t: `${ic('sl')}Directives <span class="n">${D.directives.length}</span>`,
+    a: `<button class="btn sm pri" id="dirNew">${ic('plus')}New directive</button>`,
+    b: vtools(subTabs('data-dirs', [['', 'In force'], ['retired', 'Retired']], st === 'retired' ? 'retired' : '') + (behind && st === 'active' ? `<span class="meta warn-t">${behind} not read by everyone</span>` : ''))
+      + queue + sec(st === 'retired' ? 'Retired' : 'Reviewed', list),
+    after() {
+      $('#dirNew').onclick = (e) => dirSheet({ anchor: e.currentTarget, onDone: (d) => openD('directive', d.id) });
+      $$('[data-dmerge]').forEach((b) => (b.onclick = (e) => { e.preventDefault(); dirMergeSheet(U.filter((d) => d.key === b.dataset.dmerge), b, (d) => openD('directive', d.id)); }));
+      const all = $('#dirRevAll'); if (all) arm(all, () => run(async () => { const r = await post('/directives/review-all', {}); toast(`${r.reviewed} marked as reviewed`); await refresh(); reopen(); }));
+    },
+  };
+};
+/* One directive: its text, scope and version, who it reaches and whether each agent read the current version, and its
+   history. A rule an agent registered shows who and where from, with Keep as is; the same rule from others offers Merge. */
+VIEWS.directive = async (id) => {
+  const dp = '/directives/' + encodeURIComponent(id), x = await api(dp), d = x.directive, active = d.status === 'active';
+  const C = x.coverage.slice().sort((a, b) => ({ unread: 0, outdated: 1, current: 2 }[a.read] - { unread: 0, outdated: 1, current: 2 }[b.read]) || a.label.localeCompare(b.label));
+  const retire = () => fbSheet({ title: 'Retire directive', label: 'Retire', tone: 'bad', fields: fbArea('dsN', 'Why (optional, agents see it)', 500, 2),
+    onGo: (s) => { run(async () => { await post(dp + '/retire', { note: fbVal(s, 'dsN') || null }); toast('Retired; agents are told'); await refresh(); reopen(); }); } });
+  const keep = () => run(async () => { await post(dp + '/review', {}); toast('Kept as it is'); await refresh(); reopen(); });
+  const read = C.filter((c) => c.read === 'current').length, pending = active && !d.reviewed_at;
+  const group = [{ ...d, reported_by_label: d.reported_by_label }, ...x.same];
+  const review = pending ? `<div class="pcard dir-review">${overline('Not reviewed')}<p class="fb-text">${esc(d.reported_by_label || 'An agent')} registered this rule${d.source ? ` from ${esc(d.source)}` : ''}. It is in force for ${esc(d.scope_label)}.</p>
+      ${x.same.length ? `<p class="meta">Also registered by ${esc(x.same.map((s) => s.reported_by_label || '?').join(', '))}.</p>` : ''}
+      <div class="row">${x.same.length ? `<button class="btn" id="dirMerge">${ic('link')}Merge the ${x.same.length + 1} into one</button>` : ''}<button class="btn" id="dirEditR">${ic('edit')}Edit or widen</button><button class="btn pri" id="dirKeep">${ic('check')}Keep as is</button></div></div>` : '';
+  return {
+    t: `${ic('sl')}<span class="ellip">${esc(d.title)}</span>${active ? (pending ? pill('Not reviewed', 'idle') : '') : pill('Retired', 'idle')}`,
+    a: (active ? `<button class="btn sm" id="dirEdit">${ic('edit')}Edit</button>` : '') + moreBtn(),
+    dbar: { title: d.title, meta: `${cap(d.scope_label)} · v${d.version}${active ? ` · ${read} of ${C.length} read` : ' · retired'}`,
+      menu: [pending ? { label: 'Keep as is', icon: 'check', fn: keep } : null, active ? { label: 'Edit', icon: 'edit', fn: () => dirSheet({ title: 'Edit directive', d, onDone: async () => { await refresh(); reopen(); } }) } : null, active ? { label: 'Retire', icon: 'ban', bad: true, fn: retire } : null] },
+    b: review + sec('Text', `<p class="fb-text">${esc(d.body)}</p>`)
+      + `<div class="pcard kvc">${kv('Applies to', esc(cap(d.scope_label)))}${kv('Version', esc(`v${d.version} · ${dt(d.updated_at)}`))}${d.source ? kv('Source', esc(d.source)) : ''}${d.reported_by_label ? kv('Registered by', esc(d.reported_by_label)) : ''}</div>`
+      + (active ? sec(`Agents · ${read} of ${C.length} read`, C.map((c) => row({ lead: `<span class="av lg">${esc(initials(c.label))}</span>`, title: c.label,
+          meta: c.acked_at ? `Confirmed v${c.version} ${ago(c.acked_at)} ago` : 'Has not confirmed it', trail: dirRead(c.read, c.version), chev: true, attrs: { 'data-ses': c.agent_id } })).join('') || none('user', 'It reaches no agent right now'),
+          info('Agents confirm a version with directive_ack after reading it. Out of date: they read an older version.')) : '')
+      + sec('History', x.versions.map((v) => row({ title: `v${v.version} · ${v.title}`, meta: v.change_note || (v.version === 1 ? 'Created' : 'Edited'), trail: `<span>${ago(v.created_at)} ago</span>` })).join(''))
+      + (pending ? `<div class="actionbar only-m"><button class="btn" id="dirEditM">${ic('edit')}Edit</button><button class="btn pri" id="dirKeepM">${ic('check')}Keep as is</button></div>` : active ? `<div class="actionbar only-m"><button class="btn pri" id="dirEditM">${ic('edit')}Edit</button></div>` : ''),
+    after() {
+      const e = () => dirSheet({ title: 'Edit directive', d, onDone: async () => { await refresh(); reopen(); } });
+      for (const sel of ['#dirEdit', '#dirEditM', '#dirEditR']) { const b = $(sel); if (b) b.onclick = e; }
+      for (const sel of ['#dirKeep', '#dirKeepM']) { const b = $(sel); if (b) b.onclick = keep; }
+      const m = $('#dirMerge'); if (m) m.onclick = () => dirMergeSheet(group.map((g) => ({ ...g, body: g.body ?? d.body })), m, (nd) => openD('directive', nd.id, true));
+    },
   };
 };
 /* One settings row: label with an info button for the explanation, control on the right. Shared by the team page and the new-team form. */
@@ -1622,8 +1880,12 @@ const progressBar = (t) => {
   const parts = Object.entries(t.counts).filter(([k, v]) => v && k !== 'cancelled');
   return `<div class="tprog" title="${esc(tasksLabel(t.progress))}"><b>${t.progress.pct}%</b><div class="sbar">${parts.map(([k, v]) => `<i class="${TCOL[k]}" style="flex:${v}" title="${esc(k.replace('_', ' '))}: ${v}"></i>`).join('') || '<i class="rest"></i>'}</div></div>`;
 };
+/* The decision log door's count: "2 open · 5 decided", or "None yet". */
+const decDoor = (t) => { const L = t.dec || [], o = L.filter((d) => DEC_OPEN.includes(d.status)).length, a = L.filter((d) => d.status === 'answered').length; return L.length ? [o ? `<span class="warn-t">${o} open</span>` : '', a ? `${a} decided` : ''].filter(Boolean).join(' · ') || `${L.length}` : 'None yet'; };
 /* The state line of a task: what to look at, in one line (overdue, waiting for you, check-in time, the blocking reason). */
 function cardState(k, t) {
+  const q = t.decTask?.[k.id];
+  if (q) return { ico: 'chat', text: q.status === 'needs_info' ? 'Question · waiting for the agent' : `Question for you: ${q.question}`, tone: 'warn', clamp: true, tip: q.question };
   if (k.awaiting_approval) return { ico: 'check', text: 'Approved · waits for you', tone: 'warn', tip: 'The reviewer approved it; it waits for you' };
   if (k.blocked_reason) return { ico: 'warn', text: k.blocked_reason, tone: 'bad', clamp: true };
   const ts = tkText(k, t); if (!ts) return null;
@@ -1647,7 +1909,7 @@ function taskCard(k, main, t, id, nm) {
   const who = `${k.assignee ? esc(nm(k.assignee)) : 'Unassigned'}${status ? ' · ' + esc(status) : ''}${k.review_rounds ? ` · round ${k.review_rounds}` : ''}`;
   return `<article class="kc${k.awaiting_approval ? ' aw' : ''}"><button type="button" class="kc-t" data-task="${esc(id)}|${esc(k.id)}" title="${esc(k.title)}">${esc(k.title)}</button><div class="kc-m"><span class="who">${who}</span>${refChips(k, t)}</div>`
     + (st ? `<div class="kc-s ${st.tone}${st.clamp ? ' clamp' : ''}"${st.tip ? ` title="${esc(st.tip)}"` : ''}>${ic(st.ico)}<span>${esc(st.text)}</span></div>` : '')
-    + (k.awaiting_approval ? `<button type="button" class="btn sm ok" data-appr="${esc(k.id)}">${ic('check')}Approve</button>` : '') + '</article>';
+    + (k.awaiting_approval ? `<button type="button" class="btn sm ok" data-appr="${esc(k.id)}">${ic('check')}Approve</button>` : t.decTask?.[k.id] ? `<button type="button" class="btn sm" data-dec="${esc(t.decTask[k.id].id)}">${ic('chat')}Answer</button>` : '') + '</article>';
 }
 function boardHtml(t, id, nm) {
   if (!t.board.length) return none('note', 'No tasks yet');
@@ -1660,7 +1922,8 @@ function taskRow(k, main, t, id, nm) {
   return row({ title: k.title, chev: true, cls: k.awaiting_approval ? 'aw' : '', attrs: { 'data-task': `${id}|${k.id}` },
     meta: raw(`${esc(k.assignee ? nm(k.assignee) : 'Unassigned')}${st ? ' · ' + esc(st) : ''}${k.review_rounds ? ` · round ${k.review_rounds}` : ''}${ts ? ` · <span class="${ts.cls}">${esc(ts.text)}</span>` : ''}`) })
     + (k.awaiting_approval ? `<div class="tk-act"><span>Waiting for your approval</span><button type="button" class="btn sm ok" data-appr="${esc(k.id)}">${ic('check')}Approve</button></div>` : '')
-    + (k.blocked_reason ? `<div class="tk-block">${ic('warn')}${esc(k.blocked_reason)}</div>` : '');
+    + (t.decTask?.[k.id] ? `<div class="tk-act"><span>Question for you</span><button type="button" class="btn sm" data-dec="${esc(t.decTask[k.id].id)}">${ic('chat')}Answer</button></div>`
+      : k.blocked_reason ? `<div class="tk-block">${ic('warn')}${esc(k.blocked_reason)}</div>` : '');
 }
 const memberRow = (m, nm) => row({ lead: `<span class="av lg">${esc(initials(m.label || m.agent_id || '?'))}<i class="st ${m.stalled ? 'warn' : 'on'}"></i></span>`,
   title: raw(`<button type="button" class="mem-name" data-ses="${esc(m.agent_id)}">${esc(m.label || m.agent_id)}</button>`),
@@ -1671,11 +1934,12 @@ function teamAttention(t, id, nm) {
   const who = (k) => esc(k.assignee ? nm(k.assignee) : 'Unassigned');
   const task = (k, glyph, meta) => row({ lead: glyph, title: planTitle(k.title), meta: raw(meta), chev: true, attrs: { 'data-task': `${id}|${k.id}` } });
   const items = [
+    ...(t.dec || []).filter((d) => DEC_OPEN.includes(d.status)).map((d) => decRow(d, (aid) => nm(aid))),
     ...t.board.filter((k) => k.awaiting_approval).map((k) => task(k, planGlyph('acc', ic('check'), 'Needs your approval'), `${who(k)} · in review`)
       + `<div class="tk-act"><span>Waiting for your approval</span><button type="button" class="btn sm ok" data-appr="${esc(k.id)}">${ic('check')}Approve</button></div>`),
     ...(t.paused_reason ? [row({ lead: planGlyph('unclear', ic('pause'), 'Paused'), title: 'Team paused', meta: t.paused_reason })] : []),
     ...(t.warnings || []).map((w) => row({ lead: planGlyph('unclear', ic('warn'), 'Warning'), title: w.label, meta: w.app_name })),
-    ...t.board.filter((k) => k.status === 'blocked').map((k) => task(k, planGlyph('bad', ic('ban'), 'Blocked'), `${who(k)} · <span class="bad-t">Blocked</span>`)),
+    ...t.board.filter((k) => k.status === 'blocked' && !t.decTask?.[k.id]).map((k) => task(k, planGlyph('bad', ic('ban'), 'Blocked'), `${who(k)} · <span class="bad-t">Blocked</span>`)),
     ...t.board.filter((k) => k.overdue_at).map((k) => task(k, planGlyph('bad', ic('clock'), 'Overdue'), `${who(k)}${k.review_rounds ? ` · round ${k.review_rounds}` : ''} · <span class="bad-t">${esc(tkText(k, t)?.text || 'Overdue')}</span>`)),
     ...t.members.filter((m) => m.stalled).map((m) => row({ lead: planGlyph('unclear', ic('clock'), 'Stalled'), title: `${m.label || m.agent_id} is stalled`, meta: `${m.pending_items ? m.pending_items + ' pending · ' : ''}active ${ago(m.last_activity_at)} ago`, chev: true, attrs: { 'data-ses': m.agent_id } })),
     ...(t.status_requested_at ? [row({ lead: planGlyph('unclear', ic('note'), 'Waiting'), title: 'Status update requested', meta: `Asked ${ago(t.status_requested_at)} ago; no report yet`, chev: true, attrs: { 'data-tstatus': id } })] : []),
@@ -1686,7 +1950,7 @@ function teamAttention(t, id, nm) {
   return sec(`Needs attention · ${items.length}`, items.slice(0, SHOW).join('') + (items.length > SHOW ? row({ one: true, title: `${items.length - SHOW} more`, chev: true, attrs: { 'data-tasks': `${id}|all` } }) : ''));
 }
 VIEWS.team = async (id) => {
-  const tp = '/teams/' + encodeURIComponent(id), t = (await api(tp)).team, nm = teamNm(t);
+  const tp = '/teams/' + encodeURIComponent(id), [t, tdir] = await Promise.all([api(tp).then((r) => withDecisions(r.team)), api(tp + '/directives').catch(() => null)]), nm = teamNm(t);
   const stalled = t.members.filter((m) => m.stalled).length, pendingRec = (t.recruits || []).filter((q) => q.status === 'pending');
   const onDemand = t.delivery_mode === 'on_demand', nMem = t.members.length;
   const stopTeam = () => run(async () => { await post(`${tp}/stop`); await refresh(); openD('team', id, true); });
@@ -1700,7 +1964,8 @@ VIEWS.team = async (id) => {
     .map((g) => row({ one: true, lead: `<span class="dot ${g.tone}"></span>`, dot: true, title: g.label, trail: `<span>${g.L.length}</span>`, chev: true, attrs: { 'data-tasks': `${id}|${g.key}` } })).join('')}</div>` : none('note', 'No tasks yet');
   const avs = `<span class="t-avs">${t.members.slice(0, 4).map((m) => `<span class="av">${esc(initials(m.label || m.agent_id || '?'))}</span>`).join('')}${nMem > 4 ? `<span class="av more">+${nMem - 4}</span>` : ''}</span>`;
   const teamCard = sec('Team', row({ title: 'Members', meta: raw(`${nMem}${stalled ? ` · <span class="warn-t">${stalled} stalled</span>` : ''}`), trail: avs, chev: true, attrs: { 'data-members': id } })
-    + row({ title: 'Settings', meta: settings.join(' · '), chev: true, attrs: { 'data-tsettings': id } }));
+    + row({ title: 'Settings', meta: settings.join(' · '), chev: true, attrs: { 'data-tsettings': id } })
+    + (tdir ? row({ title: 'Directives', meta: raw(tdir.count ? `${tdir.count} in force${tdir.behind ? ` · <span class="warn-t">${tdir.behind} not read</span>` : ' · all read'}${tdir.open_reports ? ` · ${tdir.open_reports} not reviewed` : ''}` : 'None yet'), chev: true, attrs: { 'data-go': 'directives' } }) : ''));
   const recruits = (HANDOFF[id]?.length ? sec('Approved recruits', `<div class="rq-list">${HANDOFF[id].map((h, i) => `<div class="rq"><div class="rq-out">${vnote('Start a session for <b>' + esc(h.label) + '</b> with this handoff. The hub shows it only once: copy it before you dismiss it.') + codeBox(h.text, true)}</div><div class="row"><button class="btn sm" data-hand-x="${i}">${ic('x')}Dismiss</button></div></div>`).join('')}</div>`) : '')
     + (pendingRec.length ? sec('Recruit requests', `<div class="rq-list">${pendingRec.map((q) => `<div class="rq" data-rq="${esc(q.id)}"><div><b>${esc(q.label)}</b> <span class="tag">${esc(q.role)}</span><small>${esc(q.purpose)} · asked by ${esc(nm(q.requested_by))}, ${ago(q.created_at)} ago</small></div><div class="row"><button class="btn ok sm" data-rq-ok="${esc(q.id)}">${ic('check')}Approve</button><button class="btn sm" data-rq-no="${esc(q.id)}">${ic('x')}Deny</button></div><div class="rq-out"></div></div>`).join('')}</div>`) : '');
   return {
@@ -1734,7 +1999,7 @@ VIEWS.team = async (id) => {
 /* Tasks of a team, one status at a time: #tasks/<team>|doing|review|blocked|open|done|all. */
 VIEWS.tasks = async (arg) => {
   const [teamId, fl = ''] = String(arg).split('|'), tp = '/teams/' + encodeURIComponent(teamId);
-  const t = (await api(tp)).team, nm = teamNm(t), G = taskGroups(t, teamId);
+  const t = await withDecisions((await api(tp)).team), nm = teamNm(t), G = taskGroups(t, teamId);
   const order = ['doing', 'review', 'blocked', 'open', 'done'].map((k) => G.find((g) => g.key === k)).filter((g) => g.L.length || g.hiddenN);
   const cur = fl === 'all' ? 'all' : order.find((g) => g.key === fl)?.key || order[0]?.key || 'all';
   const list = (g) => g.shown.map((k) => taskRow(k, g.sts[0], t, teamId, nm)).join('')
@@ -2124,6 +2389,7 @@ const RS_TABLE = {
   shares: ['Shares', 'shares'], share_versions: ['Share versions', 'shares'], share_recipients: ['Share recipients', 'shares'], share_feedback: ['Share feedback', 'shares'], share_promotions: ['Share promotions', 'shares'], data_channels: ['Transfer channels', 'shares'],
   files: ['Vault file index', 'vault'], file_revisions: ['File revisions', 'log', 'files'], file_conflicts: ['File conflicts', 'vault', 'conf'], write_intents: ['Pending writes'],
   system_settings: ['Settings (vault state or lockdown switches)', 'lock'],
+  feedback_reports: ['Agent feedback reports', 'feedback'], feedback_entries: ['Feedback entries'], feedback_links: ['Feedback links'], feedback_calls: ['Feedback evidence'], feedback_history: ['Feedback history'], feedback_requests: ['Feedback retries'], feedback_hints: ['Feedback hints'],
 };
 VIEWS.reset = async () => {
   const [{ parts }, { plan: full }] = await Promise.all([api('/reset/parts'), api('/reset/plan?parts=all')]);
@@ -2276,6 +2542,9 @@ function urgent() {
     return { id: a.id, s, r: s === 'crit' ? 0 : s === 'warn' ? 2 : 4, ts: a.created_at, ico: t[1], ttl: cap(t[0]), tag: tm ? tm.name : k ? keyName(k) : ag ? ag.label : '', msg: String(d.message || d.task || d.tool || d.metric || a.type).replace(/_/g, ' '), btns: open + approve + (a.status === 'open' ? bt('Close', `data-act="close|${esc(a.id)}"`) : '') };
   });
   for (const q of S.reqs) L.push({ id: q.id, s: 'warn', r: 1, ts: q.created_at, ico: 'key', ttl: 'Access request', tag: q.agent_label || trunc(q.agent_id, 12), msg: `Asks to ${q.actions.join(', ')} on ${q.resource}`, btns: bt('Open', 'data-go="req"', 'pri') + bt('Approve', `data-act="rqok|${esc(q.id)}"`) + bt('Deny', `data-act="rqno|${esc(q.id)}"`) });
+  for (const d of S.dec || []) L.push({ id: d.id, s: 'warn', r: 1, ts: d.created_at, ico: 'chat', ttl: d.status === 'needs_info' ? 'Question · waiting for the agent' : 'Question for you', tag: d.team_name || '', msg: `${d.agent_label || agLabel(d.agent_id)}: ${d.question}`, btns: bt('Answer', `data-dec="${esc(d.id)}"`, 'pri') });
+  if (S.dirU) L.push({ id: 'dirU', s: 'info', r: 4, ts: 0, ico: 'sl', ttl: 'Directives to review', tag: '', msg: `${fbPlural(S.dirU, 'rule', 'rules')} agents registered are in force and wait for your review.`, btns: bt('Review', 'data-go="directives"', 'pri') });
+  for (const u of S.fbc?.urgent || []) L.push({ id: u.id, s: 'warn', r: 2, ts: u.last_seen_at, ico: 'warn', ttl: 'Blocking feedback', tag: u.tool || u.area, msg: `${u.agents} agents report this blocks their work: ${u.title}`, btns: bt('Open', `data-fb="${esc(u.id)}"`, 'pri') });
   for (const c of S.conf) L.push({ id: c.id, s: 'warn', r: 3, ts: c.created_at, ico: 'note', ttl: 'Vault conflict', tag: c.agent_label || c.source || '', msg: c.path, btns: bt('Open', 'data-go="vault" data-arg="conf"', 'pri') });
   if (!openAlerts().some((a) => a.type === 'stalled_member' || a.type === 'task_blocked')) {
     for (const t of S.teams) { const bl = t.counts?.blocked || 0; if (t.stalled || bl) L.push({ id: 'tm' + t.id, s: 'warn', r: 3, ts: t.updated_at, ico: bl ? 'warn' : 'clock', ttl: bl ? 'Task blocked' : 'Member stalled', tag: t.name, msg: bl ? `${bl} blocked task${bl === 1 ? '' : 's'}` : `${t.stalled} stalled member${t.stalled === 1 ? '' : 's'}`, btns: bt('Open', `data-team="${esc(t.id)}"`, 'pri') }); }
@@ -2289,6 +2558,11 @@ function renderAlerts(full = true) {
   const pending2fa = !!(S.me && !S.me.totp_enrolled);
   $('#enrol2fa').hidden = !pending2fa; $('#moreDot').hidden = !pending2fa;
   $$('[data-request-badge]').forEach(badge => { badge.hidden = !S.reqs.length; });
+  const newFb = S.fbc?.new || 0;
+  $$('[data-feedback-badge]').forEach((badge) => { badge.hidden = !newFb; badge.title = newFb ? fbPlural(newFb, 'new feedback report', 'new feedback reports') : ''; });
+  const openDec = (S.dec || []).length, openDrp = S.dirU || 0, workTip = [openDec ? fbPlural(openDec, 'question for you', 'questions for you') : '', newFb ? fbPlural(newFb, 'new feedback report', 'new feedback reports') : '', openDrp ? fbPlural(openDrp, 'directive to review', 'directives to review') : ''].filter(Boolean).join(' · ');
+  $$('[data-dir-badge]').forEach((badge) => { badge.hidden = !openDrp; badge.title = openDrp ? fbPlural(openDrp, 'directive to review', 'directives to review') : ''; });
+  $$('[data-work-badge]').forEach((badge) => { badge.hidden = !workTip; badge.title = workTip; });
   $$('[data-alert-count]').forEach((n) => { n.textContent = S.alerts.length || ''; });
   if (!full) return;
   const L = urgent(), a = L[0], box = $('#ovAlert');
@@ -2452,7 +2726,7 @@ async function auditCalls(pre, r0) {
   // time · agent · tool; the result shows only when it is not ok; the duration ends the row.
   const rw = (i) => { const ag = agentOf(i), a = argText(i.args_summary);
     return row({ cls: 'aud', attrs: ag ? { 'data-ses': ag } : {}, lead: auTime(i.created_at), title: whoName(i), metaId: true, meta: raw(`<span title="${esc(i.args_summary || '')}">${esc(i.tool)}${a ? ` · ${esc(a)}` : ''}</span>`),
-      trail: `${i.result === 'ok' ? '' : pill(i.result + (i.error_code && i.result !== 'denied' ? ' · ' + i.error_code : ''), i.result === 'denied' ? 'bad' : 'warn')}<span class="aud-d">${esc(i.duration_ms)} ms</span>` }); };
+      trail: `${i.now_allowed ? `<span class="pill ok" title="${esc(`${i.denied_action || 'This action'} on ${i.denied_path || 'this path'} is allowed now${i.access_changed_at ? `: access changed ${dt(i.access_changed_at)}` : ''}. The call itself stays denied in the record.`)}">Allowed now</span>` : ''}${i.result === 'ok' ? '' : pill(i.result + (i.error_code && i.result !== 'denied' ? ' · ' + i.error_code : ''), i.result === 'denied' ? 'bad' : 'warn')}<span class="aud-d">${esc(i.duration_ms)} ms</span>` }); };
   const nF = () => (F.who ? 1 : 0) + (F.q ? 1 : 0);
   const draw = () => {
     const L = all.filter(match);
@@ -3234,6 +3508,194 @@ VIEWS.share = async (id) => {
   };
 };
 
+/* ---------- agent feedback (Work → Feedback; docs/feedback.md) ---------- */
+/* Reports are written by agents. Every piece of their text goes through esc() or row()'s escaping, never into markup as is. */
+const FB_F = { kind: '', tool: '', team: '', agent: '', q: '', sort: 'impact', group: false };
+const FB_KIND = { bug: ['Bug', 'bug'], limitation: ['Limitation', 'limit'], wish: ['Wish', 'wish'] };
+const FB_SEV = { blocking: 'Blocking', costly: 'Costly', minor: 'Minor' };
+const FB_ST = { new: ['New', 'info'], needs_info: ['Needs info', 'warn'], accepted: ['Accepted', 'acc'], fixed: ['Fixed', 'ok'], wont_fix: ["Won't fix", 'idle'], duplicate: ['Duplicate', 'idle'], withdrawn: ['Withdrawn', 'idle'] };
+const FB_OPEN = ['new', 'needs_info', 'accepted'];
+const FB_EMPTY = { new: 'No new reports', open: 'Nothing open', closed: 'Nothing closed' };
+const fbStatusName = (s) => (FB_ST[s] || [s])[0];
+const fbStatus = (s) => pill(fbStatusName(s), (FB_ST[s] || [0, 'idle'])[1]);
+const fbPlural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+/* The kind glyph: a different shape per kind (bug, limitation, wish), never colour only. */
+const fbGlyph = (kind) => { const [l, i] = FB_KIND[kind] || [kind, 'note']; return `<span class="pl-lead" role="img" aria-label="${esc(l)}" title="${esc(l)}">${ic(i)}</span>`; };
+const fbCost = (c) => (c ? [c.extra_calls ? `${fmt(c.extra_calls)} calls` : '', c.extra_tokens ? `${kTok(c.extra_tokens)} tokens` : '', c.minutes_lost ? `${fmt(c.minutes_lost)} min` : ''].filter(Boolean).join(' · ') : '');
+function fbRow(r, bucket) {
+  const sum = bucket === 'open' ? fbCost(r.cost_sum) : '';
+  return row({ lead: fbGlyph(r.kind), title: r.title,
+    meta: [r.tool || r.area, r.error_code, fbPlural(r.backers, 'agent', 'agents'), sum && 'est. ' + sum, ago(r.last_seen_at)].filter(Boolean).join(' · '),
+    trail: (r.reopen_count && r.status === 'new' ? pill('Reopened', 'warn') : '') + (r.severity === 'blocking' ? pill('Blocking', 'bad') : ''), chev: true, attrs: { 'data-fb': r.id } });
+}
+/* The list: rows in impact order, or under an overline per tool or area when grouped. */
+function fbList(reports, bucket) {
+  if (!reports.length) return none('wish', FB_EMPTY[bucket]);
+  if (!FB_F.group) return reports.map((r) => fbRow(r, bucket)).join('');
+  const by = new Map();
+  for (const r of reports) { const k = r.tool || r.area; by.set(k, [...(by.get(k) || []), r]); }
+  return [...by].map(([k, g]) => overline(k, g.length) + g.map((r) => fbRow(r, bucket)).join('')).join('');
+}
+const fbQuery = (bucket) => { const q = new URLSearchParams({ bucket, sort: FB_F.sort }); for (const k of ['kind', 'tool', 'team', 'agent', 'q']) if (FB_F[k]) q.set(k, FB_F[k]); return q; };
+const fbFilterN = () => ['kind', 'tool', 'team', 'agent', 'q'].filter((k) => FB_F[k]).length + (FB_F.sort !== 'impact' ? 1 : 0) + (FB_F.group ? 1 : 0);
+/* Copy a report, or the filtered list, as Markdown or JSON, ready to paste into an issue tracker. The hub audits every export. */
+async function fbExport(params, format) {
+  const q = new URLSearchParams({ ...params, format });
+  const r = await fetch('/api/feedback/export?' + q, { credentials: 'same-origin' });
+  if (!r.ok) { const j = await r.json().catch(() => ({})); throw Object.assign(new Error(j.message || 'Export failed'), { status: r.status }); }
+  copy(await r.text());
+}
+const fbExportItems = (params) => [{ label: 'Export as Markdown', icon: 'dl', fn: () => run(() => fbExport(params, 'md')) }, { label: 'Export as JSON', icon: 'dl', fn: () => run(() => fbExport(params, 'json')) }];
+/* Hub-wide switches: feedback on or off, and agents seeing only their own reports. */
+function openFbSettings(btn, set) {
+  const L = set.limits;
+  const sh = openSheet({ title: 'Feedback settings', anchor: btn, html: `<div class="sheet-form"><div>
+    ${row({ one: true, as: 'div', title: 'Agents can use feedback', trail: info('Off: every feedback tool is refused for every agent.') + switchBtn('Agents can use feedback', set.enabled, 'data-fbs="enabled"') })}
+    ${row({ one: true, as: 'div', title: 'Agents see only their own', trail: info('On: an agent finds and reads only the reports it filed or backed.') + switchBtn('Agents see only their own reports', set.own_only, 'data-fbs="own_only"') })}
+    ${row({ one: true, as: 'div', title: 'Rate limits', trail: info(`Per agent: ${L.reportsPerHour} new reports an hour, ${L.reportsPerDay} a day, ${L.entriesPerHour} entries an hour. Hub-wide: ${L.hubReportsPerDay} new reports a day.`) + `<span>${L.reportsPerHour} an hour</span>` })}
+    </div><div class="sheet-acts"><button type="button" class="btn pri lg" data-sheet-close>Done</button></div></div>` });
+  sh.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-fbs]'); if (!b) return;
+    const on = flipSwitch(b);
+    run(async () => { await api('/feedback/settings', 'PUT', { [b.dataset.fbs]: on }); toast('Saved'); set[b.dataset.fbs] = on; refresh(); });
+  });
+}
+function openFbFilters(btn, tools, draw) {
+  const sh = openSheet({ title: 'Filter reports', anchor: btn, html: `<div class="sheet-form">
+    ${selField('fbK', 'Kind', [['', 'Any kind'], ...Object.entries(FB_KIND).map(([v, [l]]) => [v, l])], FB_F.kind)}
+    ${selField('fbT', 'Tool or area', [['', 'Any tool or area'], ...tools.map((t) => [t, t])], FB_F.tool)}
+    ${selField('fbTm', 'Team', [['', 'Any team'], ...S.teams.map((t) => [t.id, t.name])], FB_F.team)}
+    ${selField('fbA', 'Agent', [['', 'Any agent'], ...S.agents.map((a) => [a.id, a.label])], FB_F.agent)}
+    ${selField('fbS', 'Sort by', [['impact', 'Impact'], ['recent', 'Last seen']], FB_F.sort)}
+    <label class="fld"><span class="vlabel">Search</span><div class="srch">${ic('search')}<input class="inp" id="fbQ" type="search" placeholder="Title, tool, error code" aria-label="Search reports" value="${esc(FB_F.q)}"></div></label>
+    ${row({ one: true, as: 'div', title: 'Group by tool or area', trail: switchBtn('Group by tool or area', FB_F.group, 'id="fbG"') })}
+    <div class="sheet-acts"><button type="button" class="btn lg" id="fbClear">Clear</button><button type="button" class="btn pri lg" data-sheet-close>Done</button></div></div>` });
+  [['#fbK', 'kind'], ['#fbT', 'tool'], ['#fbTm', 'team'], ['#fbA', 'agent'], ['#fbS', 'sort']].forEach(([s, k]) => ($(s, sh).onchange = () => { FB_F[k] = $(s, sh).value; draw(); }));
+  onSearch($('#fbQ', sh), (q) => { FB_F.q = q; draw(); });
+  $('#fbG', sh).onclick = (e) => { FB_F.group = flipSwitch(e.currentTarget); draw(); };
+  $('#fbClear', sh).onclick = () => { Object.assign(FB_F, { kind: '', tool: '', team: '', agent: '', q: '', sort: 'impact', group: false }); closeSheet(); draw(); };
+}
+VIEWS.feedback = async (arg) => {
+  const bucket = ['new', 'open', 'closed'].includes(arg) ? arg : 'new';
+  const [d, set] = await Promise.all([api('/feedback?' + fbQuery(bucket)), api('/feedback/settings')]);
+  S.fbc = { ...(S.fbc || {}), ...d.counts };
+  const seg = [['new', 'New'], ['open', 'Open'], ['closed', 'Closed']];
+  const exportParams = () => Object.fromEntries(fbQuery(bucket));
+  return {
+    t: `${ic('wish')}Feedback <span class="n">${d.counts.new + d.counts.open}</span>`,
+    a: `<button type="button" class="btn sm" id="fbEx">${ic('dl')}Export</button><button type="button" class="btn sm" id="fbSet">${ic('shield')}Settings</button>`,
+    pmenu: [...fbExportItems(exportParams()), { label: 'Feedback settings', icon: 'shield', fn: () => openFbSettings(null, set) }],
+    b: (set.enabled ? '' : vnote('Feedback is turned off. Agents cannot file or read reports until you turn it on in Settings.'))
+      + vtools(`<div class="seg eq" role="group" aria-label="Show">${seg.map(([k, l]) => `<button type="button" data-fbb="${k}" class="${k === bucket ? 'on' : ''}" aria-pressed="${k === bucket}">${l}${d.counts[k] ? ' ' + d.counts[k] : ''}</button>`).join('')}</div>${filterBtn('fbMore', fbFilterN())}`)
+      + `<div class="pcard" id="fbL">${fbList(d.reports, bucket)}</div>`,
+    after() {
+      const L = $('#fbL');
+      const draw = async () => { setFilterCount('fbMore', fbFilterN()); const r = await api('/feedback?' + fbQuery(bucket)); if (L.isConnected) L.innerHTML = fbList(r.reports, bucket); };
+      $('#fbMore').onclick = (e) => openFbFilters(e.currentTarget, d.tools, () => run(draw));
+      $('#fbEx').onclick = (e) => openMenu(fbExportItems(exportParams()), e.currentTarget);
+      $('#fbSet').onclick = (e) => openFbSettings(e.currentTarget, set);
+    },
+  };
+};
+/* A sheet with a short form: fields (trusted markup), a Cancel and one action. onGo returns an error message to keep the sheet open. */
+function fbSheet({ title, fields, label, tone = 'pri', anchor, onGo }) {
+  const sh = openSheet({ title, anchor, html: `<div class="sheet-form">${fields}<span class="err" id="fbErr" role="alert"></span><div class="sheet-acts"><button type="button" class="btn lg" data-sheet-close>Cancel</button><button type="button" class="btn ${tone} lg" id="fbGo">${esc(label)}</button></div></div>` });
+  $('#fbGo', sh).onclick = () => run(async () => { const err = await onGo(sh); if (err) { $('#fbErr', sh).textContent = err; return; } closeSheet(); });
+  return sh;
+}
+const fbArea = (id, label, max, rows = 3) => `<label class="fld"><span class="vlabel">${esc(label)}</span><textarea class="inp" id="${id}" rows="${rows}" maxlength="${max}"></textarea></label>`;
+const fbVal = (sh, id) => $('#' + id, sh).value.trim();
+const FB_FIELD = { status: 'Status', title: 'Title', severity: 'Severity', hidden: 'Visibility', merged_from: 'Merged from' };
+const fbWho = (id, label) => (AG(id) ? `<a href="#" data-ses="${esc(id)}">${esc(label)}</a>` : esc(label));
+const fbLinkH = (l) => (l.startsWith('/') ? vaultFileLink(l) : l.startsWith('share:') ? `<a href="#" data-share="${esc(l.slice(6))}">${esc(l)}</a>` : esc(l));
+VIEWS.fbr = async (id) => {
+  const u = encodeURIComponent(id), fp = '/feedback/' + u;
+  const [d, set] = await Promise.all([api(fp), api('/feedback/settings')]);
+  const r = d.report, kindL = (FB_KIND[r.kind] || [r.kind])[0], isOpen = FB_OPEN.includes(r.status), canSet = isOpen || ['fixed', 'wont_fix'].includes(r.status);
+  const re = async () => { await refresh(); openD('fbr', id, true); };
+  const setStatus = (body) => run(async () => { await post(fp + '/status', body); toast('Saved'); await re(); });
+  const patch = (body) => run(async () => { await api(fp, 'PATCH', body); toast('Saved'); await re(); });
+  const accept = (anchor) => fbSheet({ title: 'Accept report', anchor, label: 'Accept', fields: fbArea('fbN', 'Note for the agents (optional)', 2000) + fbArea('fbGd', 'Guidance: a workaround or the right way to do it (optional)', 2000),
+    onGo: (sh) => { setStatus({ status: 'accepted', note: fbVal(sh, 'fbN') || null, guidance: fbVal(sh, 'fbGd') || null }); } });
+  const fixed = (anchor) => fbSheet({ title: 'Mark fixed', anchor, label: 'Mark fixed', fields: fbArea('fbN', 'What changed', 2000)
+      + `<label class="fld"><span class="vlabel">Hub version (optional)</span><input class="inp mono" id="fbV" maxlength="40" value="${esc(r.fixed_in || set.hub_version || '')}" autocomplete="off"></label>` + fbArea('fbGd', 'Guidance (optional)', 2000),
+    onGo: (sh) => { const note = fbVal(sh, 'fbN'); if (!note) return 'Say what changed.'; setStatus({ status: 'fixed', note, fixed_in: fbVal(sh, 'fbV') || null, guidance: fbVal(sh, 'fbGd') || null }); } });
+  const ask = () => fbSheet({ title: 'Ask a question', label: 'Ask', fields: fbArea('fbN', 'Your question for the filing agent', 2000),
+    onGo: (sh) => { const note = fbVal(sh, 'fbN'); if (!note) return 'Write the question.'; setStatus({ status: 'needs_info', note }); } });
+  const wont = () => fbSheet({ title: "Won't fix", label: "Won't fix", fields: fbArea('fbN', 'Reason', 2000) + fbArea('fbGd', 'Guidance: what to do instead (optional)', 2000),
+    onGo: (sh) => { const note = fbVal(sh, 'fbN'); if (!note) return 'Give a reason.'; setStatus({ status: 'wont_fix', note, guidance: fbVal(sh, 'fbGd') || null }); } });
+  const dup = async () => {
+    const all = (await api('/feedback?sort=recent&limit=500')).reports.filter((x) => x.id !== id && !['duplicate', 'withdrawn'].includes(x.status));
+    if (!all.length) return toast('No other report to merge into', true);
+    fbSheet({ title: 'Mark duplicate of', label: 'Mark duplicate', fields: selField('fbT', 'Continues as', all.map((x) => [x.id, `${trunc(x.title, 60)} (${x.id})`]), all[0].id),
+      onGo: (sh) => { const target = $('#fbT', sh).value; run(async () => { await post(fp + '/merge', { target_id: target }); toast('Merged'); await refresh(); openD('fbr', target, true); }); } });
+  };
+  const severity = () => fbSheet({ title: 'Change severity', label: 'Save', fields: selField('fbSv', 'Severity', Object.entries(FB_SEV), r.severity), onGo: (sh) => { patch({ severity: $('#fbSv', sh).value }); } });
+  const title = () => fbSheet({ title: 'Edit title', label: 'Save', fields: `<label class="fld"><span class="vlabel">Title (one line, at most 120 characters)</span><input class="inp" id="fbTi" maxlength="120" value="${esc(r.title)}" autocomplete="off"></label>`,
+    onGo: (sh) => { const t = fbVal(sh, 'fbTi'); if (!t) return 'The title cannot be empty.'; patch({ title: t }); } });
+  const del = () => run(async () => { await api(fp, 'DELETE'); toast('Deleted'); await refresh(); DR.stack.length ? back() : openD('feedback', undefined, true); });
+  const prim = (sm) => {
+    const b = (key, label) => `<button type="button" class="btn${sm ? ' sm' : ''} pri" data-fba="${key}">${ic('check')}${label}</button>`;
+    return r.status === 'new' ? b('accept', 'Accept') : r.status === 'accepted' ? b('fixed', 'Mark fixed') : '';
+  };
+  const menu = [
+    r.status !== 'needs_info' && ['new', 'accepted'].includes(r.status) ? { label: 'Ask a question', icon: 'chat', fn: ask } : null,
+    isOpen ? { label: "Won't fix", icon: 'ban', fn: wont } : null,
+    !isOpen && canSet ? { label: 'Reopen as new', icon: 'rot', fn: () => setStatus({ status: 'new' }) } : null,
+    r.status !== 'duplicate' ? { label: 'Mark duplicate of…', icon: 'link', fn: () => run(dup) } : null,
+    { label: 'Change severity', icon: 'warn', fn: severity },
+    { label: 'Edit title', icon: 'edit', fn: title },
+    { label: r.hidden ? 'Show to other agents' : 'Hide from other agents', icon: 'eye', fn: () => patch({ hidden: !r.hidden }) },
+    ...fbExportItems({ ids: id }),
+    { label: 'Delete report', icon: 'trash', bad: true, confirm: 'Tap again to delete', fn: del },
+  ];
+  const c = r.cost, kvs = [
+    kv('Status', fbStatus(r.status) + (r.reopen_count ? ' ' + pill(`Reopened ${r.reopen_count}×`, 'warn') : '')),
+    kv('Kind', esc(kindL)), r.tool ? kv('Tool', esc(r.tool), { id: true }) : '', kv('Area', esc(r.area)), r.error_code ? kv('Error code', esc(r.error_code), { id: true }) : '',
+    kv('Severity', r.severity === 'blocking' ? pill('Blocking', 'bad') : esc(FB_SEV[r.severity] || r.severity)),
+    kv('Filed by', fbWho(r.filer_agent_id, d.filer.label)), kv('Client', esc(d.filer.client || 'Not reported')), kv('Hub version', esc(r.hub_version), { id: true }), kv('Filed', esc(dt(r.created_at))),
+    r.fixed_in ? kv('Fixed in', esc(r.fixed_in), { id: true }) : '', r.hidden ? kv('Visibility', pill('Hidden from other agents', 'idle')) : '',
+    d.notices.notified ? kv(raw(`Last decision ${info('How many agents received the latest status notice, and how many have confirmed it.')}`), `Notified ${d.notices.notified} · seen ${d.notices.seen}`) : '',
+  ].join('');
+  const decision = r.status_note || r.guidance ? (r.status_note ? `${overline('Note')}<p class="fb-text">${esc(r.status_note)}</p>` : '') + (r.guidance ? `${overline('Guidance for agents')}<p class="fb-text">${esc(r.guidance)}</p>` : '') : '';
+  const account = [['Tried', r.tried], ['Happened', r.happened], ['Expected', r.expected], ['Workaround', r.workaround]].filter(([, v]) => v).map(([k, v]) => `${overline(k)}<p class="fb-text">${esc(v)}</p>`).join('');
+  const sums = d.entries.reduce((a, e) => ({ extra_calls: a.extra_calls + (e.cost?.extra_calls || 0), extra_tokens: a.extra_tokens + (e.cost?.extra_tokens || 0), minutes_lost: a.minutes_lost + (e.cost?.minutes_lost || 0) }), { extra_calls: c?.extra_calls || 0, extra_tokens: c?.extra_tokens || 0, minutes_lost: c?.minutes_lost || 0 });
+  const costRows = fbCost(sums) ? `${overline('Cost estimates', null, info('The agents\' own estimates, summed over the report and its entries.'))}${kv('Extra calls', fmt(sums.extra_calls))}${kv('Extra tokens', fmt(sums.extra_tokens))}${kv('Minutes lost', fmt(sums.minutes_lost))}` : '';
+  const E = d.hub_evidence, callRow = (x) => row({ cls: 'aud', attrs: { 'data-go': 'log', 'data-arg': `calls|agent:${x.agent_id}` }, lead: auTime(x.created_at), title: x.tool, metaId: true, meta: `${x.invocation_id} · ${x.agent_label}`,
+    trail: `${x.result === 'ok' ? '' : pill(x.result + (x.error_code && x.result !== 'denied' ? ' · ' + x.error_code : ''), x.result === 'denied' ? 'bad' : 'warn')}<span class="aud-d">${esc(x.duration_ms)} ms${x.result_bytes ? ' · ' + esc(fmtB(x.result_bytes)) : ''}</span>`, chev: true });
+  const same = E.same_error_7d ? kv(raw(`Same error, 7 days ${info('Calls to this tool that failed with this error code, across all agents.')}`), `${fbPlural(E.same_error_7d.calls, 'call', 'calls')} · ${fbPlural(E.same_error_7d.agents, 'agent', 'agents')}`) : '';
+  const evidence = `<div class="pcard">${overline('Hub evidence', null, info('Recorded by the hub, not written by an agent: the filer\'s calls to this tool in the 30 minutes before it filed. Arguments are not copied; open a call in Calls.'))}${same}${E.calls.map(callRow).join('') || none('bolt', 'No calls recorded')}</div>`;
+  const bkRow = (b) => row({ as: 'div', lead: `<span class="av lg">${esc(initials(b.label))}</span>`, title: raw(fbWho(b.agent_id, b.label)), meta: [b.teams.map((t) => t.name).join(', '), b.app, b.client].filter(Boolean).join(' · ') || 'No team', trail: b.filer ? `<span class="tag">Filer</span>` : `<span>${ago(b.since)}</span>` });
+  const plusBare = d.entries.filter((e) => e.kind === 'plus_one' && !e.text), shown = d.entries.filter((e) => !(e.kind === 'plus_one' && !e.text));
+  const ENTRY = { plus_one: 'Backed it', evidence: 'Evidence', answer: 'Answer', still_happening: 'Still happening', withdraw: 'Withdrawn' };
+  const entryH = (e) => `<div class="fb"><div class="rq-hd"><span class="rq-who">${fbWho(e.agent_id, e.agent_label)}</span><span class="meta">${esc(ENTRY[e.kind] || e.kind)} · ${esc(dt(e.created_at))}${e.hub_version ? ' · hub ' + esc(e.hub_version) : ''}${e.from_report ? ' · from ' + esc(e.from_report) : ''}</span></div>${e.text ? `<p class="fb-text">${esc(e.text)}</p>` : ''}${fbCost(e.cost) ? `<span class="meta">Estimate: ${esc(fbCost(e.cost))}</span>` : ''}${e.links.length ? `<span class="meta">${e.links.map(fbLinkH).join(', ')}</span>` : ''}</div>`;
+  const plusGroup = plusBare.length ? `<div class="vgroup">${row({ as: 'div', group: true, expanded: false, cls: 'vg-head', extra: 'role="button" tabindex="0" data-gtoggle', title: raw(`${plusBare.length} backed this${info('Agents that added a +1. Each is counted once, whatever key or login it used.')}`), trail: `<span>${ago(plusBare[0].created_at)}</span>` })}<div class="vg-rows" hidden>${plusBare.map((e) => row({ one: true, as: 'div', title: raw(fbWho(e.agent_id, e.agent_label)), trail: `<span>${esc(dt(e.created_at))}</span>` })).join('')}</div></div>` : '';
+  let plusDone = false;
+  const entriesH = d.entries.length ? d.entries.map((e) => (e.kind === 'plus_one' && !e.text ? (plusDone ? '' : ((plusDone = true), plusGroup)) : entryH(e))).join('') : none('note', 'No entries yet');
+  const hist = (h) => { const f = FB_FIELD[h.field] || h.field, v = h.field === 'status' ? `${h.old_value ? fbStatusName(h.old_value) + ' → ' : ''}${fbStatusName(h.new_value)}` : h.field === 'merged_from' ? h.new_value : h.field === 'hidden' ? h.new_value : `${h.old_value ?? '—'} → ${h.new_value ?? '—'}`;
+    return row({ as: 'div', title: `${f}: ${v}`, meta: `${h.actor_kind === 'admin' ? 'You' : h.actor_label}${h.note ? ' · ' + trunc(h.note.replace(/\s+/g, ' '), 90) : ''}`, trail: `<span>${esc(dt(h.created_at))}</span>` }); };
+  const dupNote = r.status === 'duplicate' && r.duplicate_of ? vnote(`Merged into <a href="#" data-fb="${esc(r.duplicate_of)}">${esc(r.duplicate_of)}</a>. Its backers and entries moved there.`) : '';
+  const dups = d.duplicates.length ? `<div class="pcard">${overline('Merged into this report', d.duplicates.length)}${d.duplicates.map((x) => row({ title: x.title, meta: x.id, metaId: true, chev: true, attrs: { 'data-fb': x.id } })).join('')}</div>` : '';
+  return {
+    t: `${fbGlyph(r.kind)}<span class="ellip">${esc(r.title)}</span>${fbStatus(r.status)}`,
+    a: prim(true) + moreBtn(),
+    dbar: { title: r.title, meta: `${kindL} · ${fbStatusName(r.status)} · ${fbPlural(r.backers, 'agent', 'agents')}`, menu },
+    b: dupNote
+      + `<div class="pcard">${overline('Report')}${kvs}${decision}</div>`
+      + `<div class="pcard">${overline("Agent's account", null, info("Written by the agent that filed it. Shown as plain text; cost figures are the agent's own estimates."))}${account}${costRows}</div>`
+      + evidence
+      + `<div class="pcard">${overline('Affected', d.backers.length)}${d.backers.map(bkRow).join('')}</div>`
+      + `<div class="pcard">${overline('Entries', d.entries.length)}${entriesH}</div>`
+      + (d.links.length ? `<div class="pcard">${overline('Links', d.links.length)}${d.links.map((l) => row({ one: true, as: 'div', title: raw(`<span class="mono">${fbLinkH(l)}</span>`) })).join('')}</div>` : '')
+      + dups
+      + `<div class="pcard">${overline('History', d.history.length)}${d.history.map(hist).join('')}</div>`
+      + (prim(false) ? `<div class="actionbar only-m">${prim(false)}</div>` : ''),
+    after() {
+      $$('[data-fba]').forEach((b) => (b.onclick = () => (b.dataset.fba === 'accept' ? accept(b) : fixed(b))));
+    },
+  };
+};
+
 /* ---------- events ---------- */
 document.addEventListener('click', (e) => {
   const t = e.target;
@@ -3265,6 +3727,12 @@ document.addEventListener('click', (e) => {
   const rt = t.closest('[data-rt]'); if (rt) { openD('req', rt.dataset.rt, true); return; }
   const st_ = t.closest('[data-sht]'); if (st_) { openD('shares', st_.dataset.sht, true); return; }
   const sh = t.closest('[data-share]'); if (sh) { openD('share', sh.dataset.share); return; }
+  const fbr = t.closest('[data-fb]'); if (fbr) { e.preventDefault(); openD('fbr', fbr.dataset.fb); return; }
+  const dir = t.closest('[data-dir]'); if (dir) { e.preventDefault(); openD('directive', dir.dataset.dir); return; }
+  const dirs = t.closest('[data-dirs]'); if (dirs) { e.preventDefault(); openD('directives', dirs.dataset.dirs, true); return; }
+  const dec = t.closest('[data-dec]'); if (dec) { e.preventDefault(); openD('dec', dec.dataset.dec); return; }
+  const decs = t.closest('[data-decs]'); if (decs) { e.preventDefault(); openD('decisions', decs.dataset.decs, DR.type === 'decisions'); return; }
+  const fbb = t.closest('[data-fbb]'); if (fbb) { openD('feedback', fbb.dataset.fbb, true); return; }
   const df = t.closest('[data-df]'); if (df) { openD('diff', df.dataset.df); return; }
   const grant = t.closest('[data-grant-flow]');
   if (grant) { openD(grant.dataset.grantFlow); return; }

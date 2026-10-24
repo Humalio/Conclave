@@ -13,8 +13,8 @@ export interface Phase2Deps { db: Db; keys: Keys; setup: Setup; links: Links; co
 
 export function setupMessage(hub: string, setupKey: string, pcName: string): string {
   return [
-    `Set up this PC ("${pcName}") for Agent Hub.`,
-    `Using the Agent Hub MCP server that is already configured in this app (${hub}/mcp), call the tool \`setup_pc\` with:`,
+    `Set up this PC ("${pcName}") for Conclave.`,
+    `Using the Conclave MCP server that is already configured in this app (${hub}/mcp), call the tool \`setup_pc\` with:`,
     `- setup_key: ${setupKey}`,
     '- os: windows, macos or linux (the OS you are running on)',
     '- proposed_folders: the absolute paths of the folders on this PC you want to share with the hub (the administrator confirms each one)',

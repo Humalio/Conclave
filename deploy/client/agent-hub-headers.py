@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Claude Code headersHelper for Agent Hub: log in outside the model and hand Claude Code ready headers.
+"""Claude Code headersHelper for Conclave: log in outside the model and hand Claude Code ready headers.
 
 Claude Code runs this at every connection and again after the hub answers 401 (for example when the session token
 expired). It prints {"Authorization": "Bearer <app key>", "X-Agent-Hub-Session": "<session token>"}, so the agent never

@@ -8,9 +8,9 @@ import { KeyError } from '../keys/keys.js';
 import type { Audit, Actor } from '../audit/audit.js';
 import type { Vault } from '../vault/vault.js';
 import type { Config } from '../config.js';
-import { authorize, canReach, validateRules, parseResource } from '../policy/engine.js';
+import { authorize, canReach, validateRules, parseResource, explicitlyDenied } from '../policy/engine.js';
 import type { Rule } from '../policy/engine.js';
-import { BASE_TOOLS, GRANTED_TOOLS } from '../policy/catalogue.js';
+import { BASE_TOOLS, DEFAULT_TOOLS, GRANTED_TOOLS } from '../policy/catalogue.js';
 import { hashPassword, randomToken, safeEqualHex, sha256Hex, verifyPasswordAsync, verifyTotp } from '../util/crypto.js';
 import { newId } from '../util/ids.js';
 import type { Setup } from '../setup/setup.js';
@@ -23,6 +23,12 @@ import { registerTeams } from './teams.js';
 import { registerVaultApi } from './vaultApi.js';
 import { registerResetApi } from './resetApi.js';
 import { registerTelemetryApi } from './telemetryApi.js';
+import { registerFeedbackApi } from './feedbackApi.js';
+import { registerDecisionsApi } from './decisionsApi.js';
+import { registerDirectivesApi } from './directivesApi.js';
+import type { Directives } from '../directives/directives.js';
+import type { Decisions } from '../teams/decisions.js';
+import type { Feedback } from '../feedback/feedback.js';
 import type { VaultStore } from '../vault/store.js';
 import { registerPhase5 } from './phase5.js';
 import { registerGraphAdmin } from './graphApi.js';
@@ -32,7 +38,7 @@ import type { Phase5Deps } from './phase5.js';
 const COOKIE = 'ah_admin';
 const SESSION_MS = 12 * 60 * 60 * 1000;
 
-export interface AdminDeps { db: Db; keys: Keys; audit: Audit; vault: Vault; store: VaultStore; config: Config; loginLimit: RateLimit; setup: Setup; links: Links; messaging: Messaging; teams: Teams; phase5: Omit<Phase5Deps, 'db' | 'keys' | 'audit'>; graph: Graph }
+export interface AdminDeps { db: Db; keys: Keys; audit: Audit; vault: Vault; store: VaultStore; config: Config; loginLimit: RateLimit; setup: Setup; links: Links; messaging: Messaging; teams: Teams; phase5: Omit<Phase5Deps, 'db' | 'keys' | 'audit'>; graph: Graph; feedback: Feedback; decisions: Decisions; directives: Directives }
 interface AdminCtx { id: string; username: string; csrf: string; totp: boolean }
 declare module 'fastify' { interface FastifyRequest { admin?: AdminCtx } }
 
@@ -125,7 +131,7 @@ export function registerAdminApi(f: FastifyInstance, d: AdminDeps): void {
       db.prepare('INSERT INTO system_settings(key,value,updated_at) VALUES (?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at')
         .run(`totp_pending:${req.admin!.id}`, JSON.stringify(secret), Date.now());
       const s = secret.toUpperCase();
-      return { secret: s, otpauth_uri: `otpauth://totp/AgentHub:${encodeURIComponent(req.admin!.username)}?secret=${s}&issuer=AgentHub` };
+      return { secret: s, otpauth_uri: `otpauth://totp/Conclave:${encodeURIComponent(req.admin!.username)}?secret=${s}&issuer=Conclave` };
     });
     api.post('/api/totp/confirm', async (req) => {
       const { code } = body(z.object({ code: z.string() }), req);
@@ -195,7 +201,7 @@ export function registerAdminApi(f: FastifyInstance, d: AdminDeps): void {
       const r = keys.createSessionKey({ agentId, label: b.label, expiresAt: b.expires_at, templateId: b.template_id }, actor(req));
       return {
         key: view(r.credential), secret: r.secret,
-        handoff: `Your Agent Hub key: ${r.secret}\nCall session_login first with this key, then session_describe to state your role. Pass the returned session_token on every other call. Never put this key into anything you send.`,
+        handoff: `Your Conclave key: ${r.secret}\nCall session_login first with this key, then session_describe to state your role. Pass the returned session_token on every other call. Never put this key into anything you send.`,
       };
     });
     api.get('/api/keys/:id', async (req) => {
@@ -214,7 +220,7 @@ export function registerAdminApi(f: FastifyInstance, d: AdminDeps): void {
       return {
         key: view(r.credential), secret: r.secret,
         handoff: r.credential.kind === 'session_key'
-          ? `Your Agent Hub key was rotated. New key: ${r.secret}\nCall session_login with this key. Your permissions are unchanged. Never put this key into anything you send.` : undefined,
+          ? `Your Conclave key was rotated. New key: ${r.secret}\nCall session_login with this key. Your permissions are unchanged. Never put this key into anything you send.` : undefined,
       };
     });
     api.post('/api/keys/:id/end-logins', async (req) => ({ ended: keys.endLogins(idOf(req), actor(req)) }));
@@ -246,8 +252,12 @@ export function registerAdminApi(f: FastifyInstance, d: AdminDeps): void {
       const rules = keys.rules(c.policy_id);
       const capCred = q.app_key_id ? cred(q.app_key_id) : null;
       const cap = capCred ? keys.rules(capCred.policy_id) : [];
-      const tools = [...BASE_TOOLS, ...GRANTED_TOOLS].map((t) => {
+      const tools = [...BASE_TOOLS, ...DEFAULT_TOOLS, ...GRANTED_TOOLS].map((t) => {
         if ((BASE_TOOLS as readonly string[]).includes(t)) return { tool: t, allowed: true, reason: 'always available when logged in' };
+        if ((DEFAULT_TOOLS as readonly string[]).includes(t)) {
+          const no = explicitlyDenied(rules, cap, 'tool.invoke', `tool:${t}`);
+          return { tool: t, allowed: !no, reason: no ? 'refused by an explicit deny rule' : 'on by default for every logged-in session' };
+        }
         const dec = authorize(rules, cap, 'tool.invoke', `tool:${t}`);
         return { tool: t, allowed: dec.allowed, reason: dec.reason, source: dec.source };
       });
@@ -274,6 +284,9 @@ export function registerAdminApi(f: FastifyInstance, d: AdminDeps): void {
     registerVaultApi(api, { db, keys, audit, vault, store: d.store }, actor);
     registerResetApi(api, { db, audit, config, loginLimit, maintenance: d.phase5.maintenance }, actor);
     registerTelemetryApi(api, { db, audit }, actor);
+    registerFeedbackApi(api, { feedback: d.feedback }, actor);
+    registerDirectivesApi(api, { directives: d.directives }, actor);
+    registerDecisionsApi(api, { db, decisions: d.decisions, teams: d.teams, vault }, actor);
 
     // ───── templates ─────
     api.get('/api/templates', async () => ({ templates: keys.templates() }));
@@ -290,13 +303,45 @@ export function registerAdminApi(f: FastifyInstance, d: AdminDeps): void {
       return { events: rows };
     });
     /** since (epoch ms) bounds the window, so "calls in the last hour" counts more than the latest 200 rows (up to 2000). */
+    /**
+     * A denied call stays denied in the record, but the console should not present it as an open problem once the
+     * access was granted. For denied calls on a vault path (the hub logged the refused action and path), re-check
+     * that action against the key's current rules and app key cap: now_allowed says it would pass today, and
+     * access_changed_at is when the key's rules last changed (or a temporary grant was made).
+     */
+    const nowAllowed = (rows: Record<string, unknown>[]) => {
+      const ev = db.prepare("SELECT action, path FROM resource_access_events WHERE credential_id=? AND decision='deny' AND created_at BETWEEN ? AND ? ORDER BY ABS(created_at-?) LIMIT 1");
+      const rulesOf = new Map<string, Rule[]>(), changedOf = new Map<string, number | null>();
+      const rules = (id: string) => { if (!rulesOf.has(id)) rulesOf.set(id, keys.rulesFor(id)); return rulesOf.get(id)!; };
+      const changed = (credId: string) => {
+        if (!changedOf.has(credId)) {
+          const c = keys.credential(credId);
+          const pv = c ? (db.prepare('SELECT MAX(created_at) t FROM policy_versions WHERE policy_id=?').get(c.policy_id) as { t: number | null }).t : null;
+          const tg = (db.prepare('SELECT MAX(created_at) t FROM temporary_grants WHERE credential_id=? AND revoked_at IS NULL').get(credId) as { t: number | null }).t;
+          changedOf.set(credId, Math.max(pv ?? 0, tg ?? 0) || null);
+        }
+        return changedOf.get(credId)!;
+      };
+      let checked = 0;
+      return rows.map((r) => {
+        if (r.result !== 'denied' || typeof r.credential_id !== 'string' || checked >= 300) return r;
+        checked++;
+        const at = Number(r.created_at), e = ev.get(r.credential_id, at - 5000, at + 5000, at) as { action: string; path: string } | undefined;
+        if (!e) return r;
+        const c = keys.credential(r.credential_id);
+        if (!c || keys.effectiveStatus(c) !== 'active') return { ...r, now_allowed: false };
+        const cap = typeof r.app_credential_id === 'string' ? rules(r.app_credential_id) : [];
+        const ok = authorize(rules(r.credential_id), cap, e.action, `path:${e.path}`).allowed;
+        return { ...r, now_allowed: ok, denied_action: e.action, denied_path: e.path, ...(ok ? { access_changed_at: changed(r.credential_id) } : {}) };
+      });
+    };
     api.get('/api/invocations', async (req) => {
       const q = req.query as { credential?: string; since?: string };
       const since = Number(q.since ?? 0) || 0, n = limit(req, 2000);
       const rows = q.credential
         ? db.prepare('SELECT * FROM tool_invocations WHERE credential_id=? AND created_at>=? UNION SELECT * FROM tool_invocations WHERE app_credential_id=? AND created_at>=? ORDER BY created_at DESC LIMIT ?').all(q.credential, since, q.credential, since, n)
         : db.prepare('SELECT * FROM tool_invocations WHERE created_at>=? ORDER BY created_at DESC LIMIT ?').all(since, n);
-      return { invocations: rows };
+      return { invocations: nowAllowed(rows as Record<string, unknown>[]) };
     });
     api.get('/api/alerts', async (req) => {
       const { credential: c, status } = req.query as { credential?: string; status?: string };

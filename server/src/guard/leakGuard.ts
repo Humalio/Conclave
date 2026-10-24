@@ -1,5 +1,5 @@
 /**
- * Leak guard (SPECIFICATION F7). Scans what agents send and receive for Agent Hub keys and tokens, including
+ * Leak guard (SPECIFICATION F7). Scans what agents send and receive for Conclave keys and tokens, including
  * spaced, split, case-changed, base64- or hex-encoded forms.
  *
  * Both tests follow the real key structure, so ordinary prose never matches:

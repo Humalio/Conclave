@@ -1,4 +1,4 @@
-# Agent Hub server
+# Conclave server
 
 Fastify and Node.js host the MCP endpoint, console API, bridge endpoints, and domain services. SQLite migrations run at startup. The console is served from [public](public/).
 

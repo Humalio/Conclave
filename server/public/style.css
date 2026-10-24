@@ -1,4 +1,4 @@
-/* Agent Hub console styles. Rules: docs/design-guidelines.md. Tokens first, then base, shell and components; every @media sits next to the block it changes. */
+/* Conclave console styles. Rules: docs/design-guidelines.md. Tokens first, then base, shell and components; every @media sits next to the block it changes. */
 /* Geist and Geist Mono (OFL-1.1, fonts/OFL.txt), served by the hub so the console works offline. */
 @font-face{font-family:Geist;src:url(/fonts/geist.woff2) format("woff2");font-weight:100 900;font-style:normal;font-display:swap}
 @font-face{font-family:"Geist Mono";src:url(/fonts/geist-mono.woff2) format("woff2");font-weight:100 900;font-style:normal;font-display:swap}
@@ -268,6 +268,9 @@ button.info.end .info-tip{left:auto;right:0}
 .tip div{display:flex;align-items:center;gap:var(--s2);justify-content:space-between}
 .tip i{width:7px;height:7px;border-radius:var(--r-sm);display:inline-block;margin-right:var(--s1)}
 .pill{display:inline-flex;align-items:center;gap:var(--s1);height:20px;padding:2px var(--s2);border-radius:var(--r-full);font:var(--t-cap);white-space:nowrap}
+/* A pill that opens the evidence behind its count (the denied pill on a project card). */
+.pill-btn{border:0;cursor:pointer}
+.pill-btn:hover{text-decoration:underline}
 .pill.ok,.p-live{background:var(--ok-soft);color:var(--ok-t)}
 .pill.warn{background:var(--warn-soft);color:var(--warn-t)}
 .pill.bad{background:var(--bad-soft);color:var(--bad-t)}
@@ -277,6 +280,7 @@ button.info.end .info-tip{left:auto;right:0}
 .p-block{background:var(--warn-soft);color:var(--warn-t)}
 .p-susp{background:var(--bad-soft);color:var(--bad-t)}
 .p-new{background:var(--info-soft);color:var(--info)}
+.pill.acc{background:var(--accent-soft);color:var(--accent)}
 /* Workspaces: bar (title + tabs) → card (header: title, count, actions · toolbar row · body) */
 .workspace-view{margin-top:var(--s3);min-width:0;padding:0}
 .workspace-bar{display:flex;align-items:center;gap:var(--s3) var(--s5);flex-wrap:wrap;margin-top:var(--s4)}
@@ -981,6 +985,9 @@ details.cf summary::-webkit-details-marker{display:none}
 .tw-recf .tw-num .inp{width:64px}
 .tw-roles{display:inline-flex;gap:var(--s3);font:var(--t-body);color:var(--muted)}
 .tw-roles input{accent-color:var(--accent)}
+.chk-row{display:flex;align-items:center;gap:var(--s2);font:var(--t-meta);color:var(--muted)}
+.chk-row input{accent-color:var(--accent)}
+.dir-review .row,.dir-revall{display:flex;flex-wrap:wrap;gap:var(--s2);justify-content:flex-end;margin-top:var(--s3)}
 .rq-list{display:flex;flex-direction:column;gap:var(--s2)}
 .rq{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:var(--s2) var(--s4);align-items:center;padding:var(--s3) var(--s3);border:1px solid color-mix(in srgb,var(--warn-t) 40%,var(--line));border-radius:var(--r-lg);background:var(--panel-2)}
 .rq small{display:block;color:var(--muted);font:var(--t-meta);margin-top:var(--s1)}
@@ -1363,3 +1370,30 @@ b,strong{font-weight:600}
 .tk-fold .task-md{padding-bottom:var(--s3)}
 .tk-tlr .overline{margin:var(--s3) 0 var(--s1)}
 .tk-tlr .lrow.aud .lrow-title{font:var(--t-body)}
+/* agent feedback (Work → Feedback): reports are agent text, shown as plain text */
+.fb-text{margin:0;font:var(--t-body);white-space:pre-wrap;overflow-wrap:anywhere}
+/* Decisions (Work → team → Decisions; docs/decisions.md): the question screen and the choice list.
+   The question is the screen's subject, so it is set in --t-head inside its card (see Exceptions). */
+.dc-head .meta{margin:0 0 var(--s1)}
+.dc-q{margin:0;font:var(--t-head);overflow-wrap:anywhere}
+.dc-wait{display:flex;gap:var(--s2);align-items:center;margin:var(--s2) 0 0;font:var(--t-meta);color:var(--info)}
+.dc-answer{margin:0 0 var(--s1);font:var(--t-title);overflow-wrap:anywhere}
+.dc-refs{display:flex;flex-wrap:wrap;gap:var(--s2);padding:var(--s2) 0 var(--s1)}
+.dc-ref{max-width:100%;padding:2px var(--s2);border-radius:var(--r-sm);background:var(--panel-2);font:var(--t-meta);color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dc-ctx.clamp{display:-webkit-box;-webkit-line-clamp:4;-webkit-box-orient:vertical;overflow:hidden}
+.dc-more{margin-top:var(--s1)}
+.dc-opts{display:flex;flex-direction:column;gap:var(--s2);margin-bottom:var(--s3)}
+.lrow.dc-opt{height:auto;min-height:56px;align-items:flex-start;padding:var(--s3);border:1px solid var(--line-2);border-radius:var(--r-md);background:none;font:inherit;cursor:pointer}
+.lrow.dc-opt:first-child{border-top:1px solid var(--line-2)}
+.lrow.dc-opt[aria-checked=true]{border-color:var(--accent);background:var(--accent-soft)}
+.lrow.dc-opt[aria-checked=true] .dc-key{background:var(--accent);color:var(--accent-ink)}
+.dc-key{font:var(--t-label)}
+.dc-opt-t{display:flex;flex-wrap:wrap;align-items:center;gap:var(--s2);font:var(--t-title)}
+.dc-opt-e{display:block;margin-top:2px;font:var(--t-meta);color:var(--muted);white-space:normal;overflow-wrap:anywhere}
+.dc-bar{align-items:center;flex-wrap:wrap}
+.dc-after{flex:1 1 240px;font:var(--t-meta);color:var(--muted)}
+.dc-bar #dcGo{display:inline-flex;align-items:center;flex-wrap:nowrap;gap:var(--s2);min-width:0;max-width:100%}
+.dc-bar #dcGoL{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+@media (max-width:767.98px){.dc-after{flex-basis:100%}.dc-bar #dcGo{flex:1 1 0}}
+.overline+.kv{border-top:0}
+.fb .meta{white-space:normal;overflow-wrap:anywhere}

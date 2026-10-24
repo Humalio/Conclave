@@ -112,6 +112,12 @@ export class Vault {
     return out.sort();
   }
 
+  /** The whole file as bytes (hub-internal use, such as appending to a log note); not_found when it does not exist. */
+  async readBytes(rel: string[]): Promise<Buffer> {
+    // resolve() refuses a missing file like a forbidden one; here the difference matters (a log note not created yet).
+    try { await fs.lstat(join(this.root, ...rel)); } catch (e) { if ((e as NodeJS.ErrnoException).code === 'ENOENT') throw new VaultError('not_found', 'no such file'); throw e; }
+    return fs.readFile(await this.resolve(rel));
+  }
   async read(rel: string[], offset = 0, length = MAX_READ_BYTES, inspect?: (text: string) => void): Promise<{ path: string; revision: string; size: number; offset: number; content: string; truncated: boolean }> {
     if (!Number.isInteger(offset) || offset < 0) throw new VaultError('invalid_argument', 'offset must be a non-negative integer');
     if (!Number.isInteger(length) || length <= 0) throw new VaultError('invalid_argument', 'length must be a positive integer');
