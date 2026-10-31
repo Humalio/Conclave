@@ -115,6 +115,41 @@ describe('task workflow', () => {
     expect((await X.R('task_review', { task_id: t.id, decision: 'approve', comments: 'ok' })).isError).toBeFalsy();
   });
 
+  it('a member whose role lacks the action is told who may and what to use; others still get the generic denial', async () => {
+    const X = await team();
+    const t = await mkTask(X);
+    await X.C('task_assign', { task_id: t.id, agent_id: X.w1.id });
+    await X.W1('task_start', { task_id: t.id });
+    const NF = 'Not allowed, or does not exist.';
+    const sc = async (c: Call, tool: string, args: Record<string, unknown>) => (await c(tool, args)).structuredContent;
+    for (const [tool, args, phrase] of [
+      ['task_block', { task_id: t.id, reason: 'nothing to add' }, 'block a task'],
+      ['task_cancel', { task_id: t.id, reason: 'x' }, 'cancel a task'],
+      ['task_complete', { task_id: t.id }, 'complete a task'],
+    ] as const) {
+      const r = await sc(X.W1, tool, args);
+      expect(r.error).toBe('denied');
+      expect(r.message).toContain(`Only the team coordinator can ${phrase}. As worker, report on your task with task_progress or task_submit`);
+    }
+    // Same shape for other roles and actions.
+    expect((await sc(X.R, 'task_create', { team_id: X.tid, title: 'x' })).message).toMatch(/^Only the team coordinator can create a task\. As reviewer, review the tasks that name you with task_review/);
+    expect((await sc(X.C, 'task_claim', { task_id: t.id, version: 1 })).message).toMatch(/^Only the team worker can claim a task\. As coordinator, /);
+    // A non-member learns nothing about the team or the task.
+    const out = mk('outsider'), O = await out.login();
+    const o = await sc(O, 'task_block', { task_id: t.id, reason: 'x' });
+    expect(o).toMatchObject({ error: 'denied' });
+    expect(o.message.startsWith(NF)).toBe(true);
+    // A member whose role allows the action but whose rules deny it keeps the generic denial too.
+    app.keys.setRules(X.c.cred.policy_id, [{ effect: 'deny', actions: ['task.block'], resource: `team:${X.tid}` }], 'test', sys);
+    const d = await sc(X.C, 'task_block', { task_id: t.id, reason: 'x' });
+    expect(d.error).toBe('denied');
+    expect(d.message.startsWith(NF)).toBe(true);
+    expect((await sc(X.C, 'task_cancel', { task_id: t.id, reason: 'x' })).message.startsWith(NF)).toBe(true);
+    // It was the rule (the tool itself stays allowed): without it the coordinator can cancel.
+    app.keys.setRules(X.c.cred.policy_id, [], 'test', sys);
+    expect((await sc(X.C, 'task_cancel', { task_id: t.id, reason: 'x' })).task.status).toBe('cancelled');
+  });
+
   it('first claim wins, the others get conflict', async () => {
     const X = await team();
     const t = await mkTask(X, { claimable: true });
@@ -170,8 +205,14 @@ describe('task workflow', () => {
     await X.R('task_review', { task_id: t.id, decision: 'approve', comments: 'ok' });
     const r = (await X.C('task_complete', { task_id: t.id })).structuredContent;
     expect(r).toMatchObject({ awaiting_approval: true, task: { status: 'approved' } });
+    // The teams list shows the lead, the approval waiting on the operator, and when the team last moved.
+    const row = () => api('GET', '/teams').then((x) => x.body.teams.find((tm: any) => tm.id === X.tid));
+    const before = await row();
+    expect(before).toMatchObject({ lead_id: X.c.id, approvals: 1 });
+    expect(before.last_activity_at).toBeGreaterThanOrEqual(r.task.updated_at);
     const ap = await api('POST', `/teams/${X.tid}/tasks/${t.id}/approve`);
     expect(ap.body.task.status).toBe('done');
+    expect((await row()).approvals).toBe(0);
   });
 
   it('team status: the administrator asks, the coordinator is told, team_report becomes the status and closes the request', async () => {
@@ -1037,5 +1078,57 @@ describe('directives: standing rules with scope, versions and read tracking', ()
     // an edit by the operator counts as a review and reaches the agent as a change
     await api('PATCH', `/directives/${r3.directive_id}`, { scope: { kind: 'team', ref: X.tid }, note: 'for the whole team' });
     expect((await X.W2('directives_list')).structuredContent.directives.some((d: any) => d.id === r3.directive_id)).toBe(true);
+  });
+
+  it('categories and tags: the operator files directives, agents filter by them and only propose a category', async () => {
+    const X = await team();
+    await Promise.all([X.W1, X.W2].map((c) => c('session_ack', { notice_seq: 1e6 })));
+    const mk_ = (b: Record<string, unknown>) => api('POST', '/directives', b).then((r) => { expect(r.status).toBe(200); return r.body.directive; });
+    const tok = await mk_({ title: 'Save tokens', body: 'Read only what the task touches.', scope: { kind: 'team', ref: X.tid }, category: 'tokens', tags: ['Budget', 'budget', 'context window'] });
+    expect(tok).toMatchObject({ category: 'tokens', tags: ['budget', 'context-window'] });
+    const cite = await mk_({ title: 'Cite notes', body: 'Cite the vault note.', scope: { kind: 'team', ref: X.tid } });
+    expect((await api('POST', '/directives', { title: 'x', body: 'y', scope: { kind: 'hub' }, category: 'nope' })).status).toBe(400);
+    expect((await api('GET', '/directives/categories')).body.categories.map((c: any) => c.label)).toEqual(['Access & security', 'Communication', 'Token economy', 'Reporting', 'Sources & quality', 'Process & workflow', 'Tooling']);
+    // admin list and MCP list filter by category and tag; a category id or "none"
+    const ids = (q: string) => api('GET', '/directives' + q).then((r) => r.body.directives.map((d: any) => d.id).filter((i: string) => [tok.id, cite.id].includes(i)));
+    expect(await ids('?category=tokens')).toEqual([tok.id]);
+    expect(await ids('?category=none')).toEqual([cite.id]);
+    expect(await ids('?tag=budget')).toEqual([tok.id]);
+    const byCat = (await X.W1('directives_list', { category: 'tokens' })).structuredContent;
+    expect(byCat.directives).toEqual([expect.objectContaining({ id: tok.id, category: 'tokens', tags: ['budget', 'context-window'] })]);
+    expect((await X.W1('directives_list', { tag: 'context-window' })).content[0]!.text).toContain('Token economy');
+    expect((await X.W1('directives_read', { id: tok.id })).structuredContent.directives[0]).toMatchObject({ category: 'tokens' });
+    // login and whoami stay one short line per directive: no category or tags
+    expect((await X.W1('session_whoami')).structuredContent.directives[0]).not.toHaveProperty('category');
+    // filing is not a new version and sends no notice
+    await X.W1('session_ack', { notice_seq: 1e6 });
+    const changed = (await api('POST', '/directives/categorize', { ids: [tok.id, cite.id], category: 'sources', add_tags: ['vault'] })).body.changed;
+    expect(changed).toBe(2);
+    const c2 = (await api('GET', `/directives/${cite.id}`)).body;
+    expect(c2.directive).toMatchObject({ version: 1, category: 'sources', tags: ['vault'] });
+    expect(((await X.W1('session_whoami')).structuredContent.notices ?? []).filter((n: any) => n.kind === 'directive_changed')).toEqual([]);
+    // a text edit makes a version that records the category and tags it was saved with
+    await api('PATCH', `/directives/${cite.id}`, { body: 'Cite the vault note and line.', tags: ['vault', 'citations'] });
+    expect((await api('GET', `/directives/${cite.id}`)).body.versions[0]).toMatchObject({ version: 2, category: 'sources', tags: ['vault', 'citations'] });
+    // agents only propose: the category is set when the operator reviews (kept as proposed, or changed)
+    const r = (await X.W1('directives_report', { title: 'Ask before pushing', summary: 'Never push without asking.', category: 'access' })).structuredContent;
+    expect(r.proposed_category).toBe('access');
+    let d = (await api('GET', `/directives/${r.directive_id}`)).body.directive;
+    expect(d).toMatchObject({ category: null, proposed_category: 'access' });
+    expect((await X.W1('directives_report', { title: 'x', summary: 'y', category: 'bogus' })).isError).toBe(true);
+    await api('POST', `/directives/${r.directive_id}/review`, {});
+    d = (await api('GET', `/directives/${r.directive_id}`)).body.directive;
+    expect(d).toMatchObject({ category: 'access', proposed_category: null });
+    const r2 = (await X.W2('directives_report', { title: 'Daily status', summary: 'Post a status daily.', category: 'communication' })).structuredContent;
+    await api('POST', `/directives/${r2.directive_id}/review`, { category: 'reporting' });
+    expect((await api('GET', `/directives/${r2.directive_id}`)).body.directive).toMatchObject({ category: 'reporting', proposed_category: null });
+    // review-all confirms proposals too; merge keeps a shared category
+    const a1 = (await X.W1('directives_report', { title: 'Short replies', summary: 'Keep replies short.', category: 'tokens' })).structuredContent;
+    const a2 = (await X.W2('directives_report', { title: 'Short replies', summary: 'Be brief.', category: 'tokens' })).structuredContent;
+    const m = (await api('POST', '/directives/merge', { ids: [a1.directive_id, a2.directive_id], title: 'Short replies', body: 'Keep replies short.', scope: { kind: 'team', ref: X.tid } })).body.directive;
+    expect(m.category).toBe('tokens');
+    const a3 = (await X.W1('directives_report', { title: 'Use the CLI', summary: 'Prefer the CLI.', category: 'tooling' })).structuredContent;
+    await api('POST', '/directives/review-all', {});
+    expect((await api('GET', `/directives/${a3.directive_id}`)).body.directive.category).toBe('tooling');
   });
 });

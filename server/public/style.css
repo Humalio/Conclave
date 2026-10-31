@@ -268,7 +268,7 @@ button.info.end .info-tip{left:auto;right:0}
 .tip div{display:flex;align-items:center;gap:var(--s2);justify-content:space-between}
 .tip i{width:7px;height:7px;border-radius:var(--r-sm);display:inline-block;margin-right:var(--s1)}
 .pill{display:inline-flex;align-items:center;gap:var(--s1);height:20px;padding:2px var(--s2);border-radius:var(--r-full);font:var(--t-cap);white-space:nowrap}
-/* A pill that opens the evidence behind its count (the denied pill on a project card). */
+/* A pill that opens the evidence behind its count (the denied pill on a project group header in Teams). */
 .pill-btn{border:0;cursor:pointer}
 .pill-btn:hover{text-decoration:underline}
 .pill.ok,.p-live{background:var(--ok-soft);color:var(--ok-t)}
@@ -720,9 +720,32 @@ details.cf summary::-webkit-details-marker{display:none}
 .tg-node use{stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
 .tg-node.busy rect{stroke:var(--ok);stroke-width:2.5}
 .tg-node:hover rect,.tg-node:focus-visible rect{stroke:var(--accent);stroke-width:2.5}
-.tg.focus .tg-eg,.tg.focus .tg-node{opacity:.14}
-.tg.focus .hl{opacity:1}
-.tg.focus .tg-eg.hl .tg-e{opacity:1}
+/* focus view: the focused node in the centre, its connections on a ring, everything else faded to a ghost */
+.tg .tg-eg{transition:opacity .25s}
+.tg:not(.ego) .tg-sub,.tg:not(.ego) .tg-agent:not(.hov) .tg-lbl,.tg.narrow:not(.ego) .tg-prog{display:none}
+.tg.ego .tg-node.ego-out{opacity:.07;pointer-events:none}
+.tg.ego .tg-node.ego-out text{display:none}
+.tg.narrow .tg-node.n1 .tg-sub{display:none}
+.tg.ego .tg-eg.off{opacity:.04;pointer-events:none}
+.tg.ego .tg-eg.mid{opacity:.4}
+.tg.ego .tg-eg.on .tg-e{opacity:1}
+.tg .tg-eg.hl .tg-e{opacity:1;stroke:var(--accent)}
+.tg-node.focus .core{fill:var(--accent-soft);stroke:var(--accent);stroke-width:3}
+.tg-node.focus>rect:first-of-type{stroke:var(--accent);stroke-width:3}
+.tg-node.hov .core,.tg-node.hov>rect:first-of-type{stroke:var(--accent);stroke-width:2.5}
+@media (prefers-reduced-motion: reduce){.tg .tg-node,.tg .tg-eg,.tg .tg-e{transition:none}}
+.tg-trail{display:flex;align-items:center;gap:var(--s2);flex-wrap:wrap;min-height:var(--s8);margin-bottom:var(--s2)}
+.tg-crumbs{display:flex;align-items:center;gap:var(--s1);flex-wrap:wrap;min-width:0}
+.tg-crumbs .sep{width:14px;height:14px;color:var(--faint);flex:none}
+.tg-hint{margin-left:auto;font:var(--t-meta);color:var(--faint)}
+@media (max-width:559.98px){.tg-trail.has .tg-hint{display:none}}
+/* side panel of the focus view: who the focus is, Pin and Open, then its connections by kind */
+.tg-ego-h{display:flex;align-items:center;gap:var(--s3);min-width:0}
+.tg-ego-id{min-width:0}
+.tg-ego-id h4{margin:0;font:var(--t-head);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tg-ego-id p{margin:0;font:var(--t-meta);color:var(--muted)}
+.tg-ego-act{display:flex;gap:var(--s2);flex-wrap:wrap;margin-top:var(--s3)}
+.tg-ego .lrow.hov{background:var(--panel-2)}
 .tg-lg{display:flex;gap:var(--s3);flex-wrap:wrap;color:var(--muted);font:var(--t-meta);margin-left:auto}
 .tg-lg>span{display:inline-flex;align-items:center;gap:var(--s2)}
 .tg-lg .tg-sw{display:inline-block;width:18px;height:3px;border-radius:var(--r-sm);background:var(--line-2)}
@@ -743,14 +766,12 @@ details.cf summary::-webkit-details-marker{display:none}
 .fe-age{color:var(--faint);font:var(--t-cap)}
 /* actions of a tab view sit at the right end of its workspace bar */
 .ws-act{display:flex;align-items:center;gap:var(--s2);flex-wrap:wrap;margin-left:auto}
-/* topology levels: breadcrumb, project nodes, outside agents */
+/* topology: project breadcrumb, outside agents */
 .tg-crumb{display:flex;align-items:center;gap:var(--s2);flex-wrap:wrap;font:var(--t-title)}
 .tg-crumb .sep{width:14px;height:14px;color:var(--faint)}
 .tg-crumb b{font:var(--t-title)}
-.tg-crumb [data-ses]{margin-left:auto}
 .tg-agent.ext{opacity:.55}
 .tg-agent.ext .core{stroke-dasharray:3 3}
-.tg-agent.center .ini{font:var(--t-head)}
 /* auditing: alert triage */
 .al-list{display:flex;flex-direction:column;gap:var(--s3)}
 /* auditing: trail */
@@ -905,7 +926,6 @@ details.cf summary::-webkit-details-marker{display:none}
 .rs-restart svg{width:28px;height:28px;color:var(--accent);animation:spin 1.2s linear infinite}
 .rs-restart small{color:var(--muted)}
 @keyframes spin{to{transform:rotate(360deg)}}
-.pj-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:var(--s3)}
 /* team workflow settings and task deadline states */
 .tw{display:flex;flex-direction:column;gap:var(--s1)}
 .tw-row{display:flex;align-items:center;justify-content:space-between;gap:var(--s4);min-height:var(--h-touch);padding:var(--s2) 0;border-top:1px solid var(--line)}
@@ -987,7 +1007,62 @@ details.cf summary::-webkit-details-marker{display:none}
 .tw-roles input{accent-color:var(--accent)}
 .chk-row{display:flex;align-items:center;gap:var(--s2);font:var(--t-meta);color:var(--muted)}
 .chk-row input{accent-color:var(--accent)}
-.dir-review .row,.dir-revall{display:flex;flex-wrap:wrap;gap:var(--s2);justify-content:flex-end;margin-top:var(--s3)}
+.dir-review .row{display:flex;flex-wrap:wrap;gap:var(--s2);justify-content:flex-end;margin-top:var(--s3)}
+/* Directives list (Work → Directives): rows with a tick box, folding scope groups, a bulk bar; side by side with the selected directive from 1024 px */
+.dl-q{flex:1;min-width:160px;max-width:320px;margin:0}
+.dl-sels{display:inline-flex;gap:var(--s2);flex-wrap:wrap}
+.dl-chk{width:var(--icon);height:var(--icon);margin:0;accent-color:var(--accent);cursor:pointer}
+.dl-hit{display:grid;place-items:center;flex:none;width:44px;height:44px;margin-inline:-6px;cursor:pointer} /* 44 px tap target in the 32 px leading column */
+.dl-sum{display:flex;align-items:center;gap:var(--s3);min-height:44px}
+.dl-sum .lrow-lead,.dl-sum>.dl-chk{margin-inline:var(--s2)}
+.dl-sum .meta b{color:var(--text);font-weight:500}
+.dl-sum .info-t{color:var(--info)}
+.dl-gh{display:flex;align-items:center;gap:var(--s2);width:100%;height:44px;padding:0;border:0;border-top:1px solid var(--line);background:none;color:var(--faint);font:var(--t-cap);letter-spacing:var(--track-cap);text-transform:uppercase;cursor:pointer;text-align:left}
+.dl-gh .chev{width:var(--icon);height:var(--icon);margin-inline:var(--s2);transform:rotate(90deg);transition:transform .15s}
+.dl-gh[aria-expanded=false] .chev{transform:none}
+.dl-gh:hover{color:var(--text)}
+.dl-row{width:calc(100% + var(--s4));margin-inline:calc(var(--s2) * -1);padding-inline:var(--s2);border-radius:var(--r-md);cursor:pointer}
+.dl-gh+.dl-row{border-top:0}
+.dl-row:hover{background:var(--panel-2)}
+.dl-row.on{background:var(--accent-soft)}
+.dl-row .lrow-title{display:flex;align-items:center;gap:var(--s2)}
+.dl-row .lrow-title .pill{flex:none}
+.dl-t{min-width:0;overflow:hidden;text-overflow:ellipsis}
+.tag.txt{font:var(--t-meta)}
+.dl-scope{max-width:140px;overflow:hidden;text-overflow:ellipsis}
+.dl-n{color:var(--muted)}
+/* category chips over the list: one line that scrolls sideways on its own (never the page) */
+.dl-cats{display:flex;gap:var(--s2);overflow-x:auto;scrollbar-width:none;padding-bottom:var(--s2);margin-bottom:var(--s1)}
+.dl-cats::-webkit-scrollbar{display:none}
+.dl-cats .btn{flex:none}
+.dl-cats .btn .i{width:14px;height:14px;margin-left:var(--s1)}
+.dl-cats .fcount{color:var(--faint);font-variant-numeric:tabular-nums}
+.dl-cats .btn.on .fcount{color:inherit}
+.dl-cat{color:var(--text)}
+.dir-tags{display:inline-flex;flex-wrap:wrap;gap:var(--s1)}
+.dir-revcat{margin:var(--s3) 0}
+.dl-bulk{position:sticky;bottom:0;z-index:5;display:flex;align-items:center;flex-wrap:wrap;gap:var(--s2);margin-top:var(--s3);padding:var(--s2) var(--s3);background:var(--panel-3);border:1px solid var(--line-2);border-radius:var(--r-lg);box-shadow:var(--shadow-pop)}
+.dl-bn{flex:1;font:var(--t-label)}
+.dl-det{display:none}
+.dl-dh{display:flex;align-items:flex-start;gap:var(--s2)}
+.dl-dh h3{flex:1;min-width:0;margin:0;display:flex;align-items:center;gap:var(--s2);font:var(--t-head)}
+.dl-dh h3 svg{flex:none;color:var(--muted)}
+.dl-dh .dact{display:flex;gap:var(--s2);flex:none}
+@media (min-width:1024px){
+  #workspaceView[data-view=directives] .db{overflow:visible}
+  .dl{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.1fr);align-items:start}
+  .dl-list{min-width:0;padding-right:var(--s5);border-right:1px solid var(--line)}
+  .dl-det{display:flex;flex-direction:column;gap:var(--s6);position:sticky;top:calc(var(--h-bar) + var(--s3));max-height:calc(100dvh - var(--h-bar) - var(--s6));overflow:auto;scrollbar-gutter:stable;min-width:0;padding-left:var(--s5);padding-right:var(--s2)}
+  .dl-row .chev{display:none}
+}
+@media (max-width:767.98px){
+  /* count and clear on the first line, the two actions side by side under them */
+  .dl-bulk{display:grid;grid-template-columns:1fr 1fr;bottom:calc(var(--h-nav) + env(safe-area-inset-bottom) + var(--s2))}
+  .dl-bulk .btn{height:var(--h-touch)}
+  .dl-bn{grid-row:1;grid-column:1;align-self:center}
+  #dlClr{grid-row:1;grid-column:2;justify-self:end;width:var(--h-touch)}
+}
+@media (prefers-reduced-motion: reduce){.dl-gh .chev{transition:none}}
 .rq-list{display:flex;flex-direction:column;gap:var(--s2)}
 .rq{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:var(--s2) var(--s4);align-items:center;padding:var(--s3) var(--s3);border:1px solid color-mix(in srgb,var(--warn-t) 40%,var(--line));border-radius:var(--r-lg);background:var(--panel-2)}
 .rq small{display:block;color:var(--muted);font:var(--t-meta);margin-top:var(--s1)}
@@ -1108,21 +1183,54 @@ button.av{cursor:pointer}
 .av .st.warn{background:var(--warn)}
 .kvc{padding-top:0;padding-bottom:0}
 .kv-sub{font:var(--t-meta);color:var(--muted)}
-/* Teams list: one card per project */
+/* Teams list (Work → Teams): one grouped table. Project group headers fold; team rows share the column tracks,
+   so status, progress, attention, members and activity line up across projects. Phones: two-line rows, no table. */
+.tm-card{padding-top:0;padding-bottom:0}
+.tm-q{flex:1;min-width:160px;max-width:320px;margin:0}
+.tm-tools{display:inline-flex;align-items:center;gap:var(--s2);flex-wrap:wrap}
+.tm-tools .seg{height:var(--h-ctl)}
+.tm-tools .sel{max-width:none}
+.tm-tools .seg .faint{font-variant-numeric:tabular-nums}
+.tm-row{display:grid;grid-template-columns:minmax(160px,1.6fr) 88px 136px minmax(140px,1.4fr) 120px 48px var(--icon);gap:var(--s3);align-items:center;width:calc(100% + var(--s4));height:56px;padding:7px var(--s2) 8px;margin-inline:calc(var(--s2) * -1);border-top:1px solid var(--line);border-radius:var(--r-md);cursor:pointer;min-width:0}
+.tm-row:hover{background:var(--panel-2)}
+.tm-head{height:44px;padding-block:0;border-top:0;cursor:default;font:var(--t-cap);letter-spacing:var(--track-cap);text-transform:uppercase;color:var(--faint)}
+.tm-head:hover{background:none}
+.tm-c{min-width:0;display:flex;align-items:center}
+.tm-name{flex-direction:column;align-items:stretch}
+.tm-name b{font:var(--t-title);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tm-name .meta{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tm-prog{gap:var(--s2);font:var(--t-meta);color:var(--muted);font-variant-numeric:tabular-nums}
+.tm-prog .pb{flex:none;width:72px;min-width:0}
+.tm-prog .pb i.s-paused{background:var(--warn)}
+.tm-prog .pb i.s-done{background:var(--ok)}
+.tm-prog .pb i.s-draft{background:var(--idle)}
+.tm-attn{flex-wrap:wrap;gap:0 var(--s1);height:var(--s5);overflow:hidden} /* pills that do not fit wrap out of sight; the cell title lists them all */
+.tm-attn .pill{flex:none}
+.tm-avs{display:flex;gap:var(--s1)}
+.tm-when{justify-content:flex-end;text-align:right;font:var(--t-meta);color:var(--muted);font-variant-numeric:tabular-nums}
+.tm-head .tm-when{font:var(--t-cap)}
+.tm-chev .chev{color:var(--faint)}
+.tm-gh{display:flex;align-items:center;gap:var(--s2);height:44px;border-top:1px solid var(--line-2)}
+.tm-head+.tm-grp .tm-gh{border-top:0}
+.tm-fold{display:flex;align-items:center;gap:var(--s2);min-width:0;height:44px;padding:0;border:0;background:none;color:var(--text);font:var(--t-title);cursor:pointer;text-align:left}
+.tm-fold .chev{flex:none;width:var(--icon);height:var(--icon);color:var(--faint);transform:rotate(90deg);transition:transform .15s}
+.tm-fold[aria-expanded=false] .chev{transform:none}
+.tm-gn{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tm-gf{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+@media (max-width:1179.98px){
+  .tm-row{grid-template-columns:minmax(140px,1.6fr) 88px 136px minmax(120px,1.4fr) 48px var(--icon)}
+  .tm-mem{display:none}
+}
+@media (max-width:767.98px){
+  .tm-head{display:none}
+  .tm-head+.tm-grp .tm-gh,.tm-grp:first-child .tm-gh{border-top:0}
+  .tm-row{grid-template-columns:minmax(0,1fr) auto;grid-template-areas:"n s" "n w";row-gap:0}
+  .tm-name{grid-area:n}
+  .tm-st{grid-area:s;justify-content:flex-end}
+  .tm-when{grid-area:w}
+  .tm-prog,.tm-attn,.tm-mem,.tm-chev{display:none}
+}
 .stat{display:flex;flex-direction:column;gap:var(--s1);min-width:0}
-.pj{display:flex;flex-direction:column;gap:var(--s3)}
-.pj.r-act{border-color:color-mix(in srgb,var(--ok) 45%,var(--line))}
-.pj>.lrow{border-top:0}
-.pj-chips{display:flex;flex-wrap:wrap;align-items:center;gap:var(--s1)}
-.pj-list{display:flex;flex-direction:column}
-.pj-list>.overline{margin:0 0 var(--s1)}
-.pj-team .lrow-lead svg{color:var(--faint)}
-.pj-prog{display:flex;align-items:center;gap:var(--s2)}
-.pj-prog .pb{flex:1;max-width:120px}
-.pj-none{margin:0;color:var(--faint);font:var(--t-meta)}
-.pj-peers{display:flex;gap:var(--s2);margin:0;font:var(--t-meta);color:var(--muted)}
-.pj-peers svg{margin-top:var(--s1)}
-.pj-peers b{color:var(--text)}
 /* Activity graph */
 .tg-bar{margin-bottom:var(--s3)}
 .tg-card{min-width:0}
@@ -1295,12 +1403,6 @@ button.stat:hover .stat-l{color:var(--text)}
 .kvc>.sheet-item{padding:0;height:var(--h-touch)}
 #tB:empty{display:none}
 b,strong{font-weight:600}
-/* Agent pool: the agents without a project or team, as one list under the projects */
-.pool{display:flex;flex-direction:column}
-.pool-h{display:flex;align-items:center;gap:var(--s2);margin-bottom:var(--s2)}
-.pool-t{margin:0;font:var(--t-title)}
-.pool-n{margin-left:auto;font:var(--t-meta);color:var(--muted);font-variant-numeric:tabular-nums}
-.pool-h+.lrow{border-top:0}
 /* Task screen: lifecycle stepper, people, review rounds, then the folded timeline and brief */
 .tk{display:flex;flex-direction:column;gap:var(--s3);max-width:1200px}
 .tk-ht{display:flex;flex-direction:column;min-width:0}
@@ -1372,6 +1474,59 @@ b,strong{font-weight:600}
 .tk-tlr .lrow.aud .lrow-title{font:var(--t-body)}
 /* agent feedback (Work → Feedback): reports are agent text, shown as plain text */
 .fb-text{margin:0;font:var(--t-body);white-space:pre-wrap;overflow-wrap:anywhere}
+/* Feedback report (#fbr): the queue beside the report and the report as main | side (250 px) from 1024 px; one column below */
+.fbx{display:block}
+.fb-queue{display:none}
+.fb-rep{display:flex;flex-direction:column;gap:var(--s3);min-width:0}
+.fb-step{display:inline-flex;align-items:center;gap:var(--s1)}
+.fb-step .meta{min-width:64px;text-align:center;font-variant-numeric:tabular-nums}
+.fb-step.only-m{display:flex;justify-content:space-between}
+.split{display:inline-flex}
+.split .btn:first-child{border-top-right-radius:0;border-bottom-right-radius:0}
+.split .btn+.btn{border-top-left-radius:0;border-bottom-left-radius:0;border-left:1px solid color-mix(in srgb,var(--accent-ink) 35%,transparent)}
+.split .dn,[data-fbsm] .dn{transform:rotate(90deg)}
+.fb-impact{display:flex;flex-wrap:wrap;align-items:center;gap:var(--s2) var(--s4);padding:var(--s3) var(--s4);background:var(--panel-2);border:1px solid var(--line);border-radius:var(--r-lg)}
+.fbi{display:inline-flex;align-items:baseline;gap:var(--s1);font:var(--t-meta);color:var(--muted)}
+.fbi b{font:var(--t-head);color:var(--text);font-variant-numeric:tabular-nums}
+.fb-impact .info{margin-left:auto}
+.fb-cols,.fb-main{display:flex;flex-direction:column;gap:var(--s3);min-width:0}
+.fb-sec{min-width:0}
+.fb-side{display:flex;flex-direction:column;gap:var(--s3);min-width:0}
+.fb-gview{display:flex;align-items:flex-start;gap:var(--s3)}
+.fb-gview p{flex:1;min-width:0}
+.fb-gview .btn{flex:none}
+.fb-gedit{display:flex;flex-direction:column;gap:var(--s2)}
+.fb-gedit .row{display:flex;gap:var(--s2);justify-content:flex-end}
+.fb-guide .overline~.overline{margin-top:var(--s4)}
+.fb-acct{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:var(--s3)}
+.fb-cell{min-width:0;padding:var(--s3);background:var(--panel-2);border:1px solid var(--line);border-radius:var(--r-md)}
+.fb-cell .overline{margin:0 0 var(--s1)}
+.fb-mine .rq-who{color:var(--accent)}
+.fb-note{display:flex;gap:var(--s2);margin-top:var(--s3)}
+.fb-note .inp{flex:1;min-width:0}
+.fbq-hd{display:flex;align-items:center;justify-content:space-between;gap:var(--s2);height:44px}
+.fbq-hd .overline{margin:0}
+.fbq-row{width:calc(100% + var(--s4));margin-inline:calc(var(--s2) * -1);padding-inline:var(--s2);border-radius:var(--r-md)}
+.fbq-row:hover{background:var(--panel-2)}
+.fbq-row.on{background:var(--accent-soft)}
+.fbq-hd+.fbq-row{border-top:0}
+@media (max-width:1023.98px){
+  /* one column: the details come after the agent's account, before the timeline */
+  .fb-main{display:contents}
+  .fb-side{order:1}
+  .fb-tl,.fb-tl~.fb-sec{order:2}
+}
+@media (max-width:767.98px){
+  .fb-acct{grid-template-columns:minmax(0,1fr)}
+  .fb-note .btn,.fb-step.only-m .btn{height:var(--h-touch);min-width:var(--h-touch)}
+}
+@media (min-width:1024px){
+  #workspaceView[data-view=fbr] .db{overflow:visible}
+  .fbx{display:grid;grid-template-columns:248px minmax(0,1fr);gap:var(--s5);align-items:start}
+  .fb-queue{display:block;position:sticky;top:calc(var(--h-bar) + var(--s3));max-height:calc(100dvh - var(--h-bar) - var(--s6));overflow:auto;scrollbar-gutter:stable;padding-right:var(--s3);border-right:1px solid var(--line)}
+  .fb-cols{display:grid;grid-template-columns:minmax(0,1fr) 250px;gap:var(--s6);align-items:start}
+  .fb-main,.fb-side{gap:var(--s6)}
+}
 /* Decisions (Work → team → Decisions; docs/decisions.md): the question screen and the choice list.
    The question is the screen's subject, so it is set in --t-head inside its card (see Exceptions). */
 .dc-head .meta{margin:0 0 var(--s1)}

@@ -4,7 +4,7 @@ import type { Keys } from '../keys/keys.js';
 import type { Teams } from '../teams/teams.js';
 import type { Vault } from '../vault/vault.js';
 import { VaultError } from '../vault/vault.js';
-import type { VaultStore, Who } from '../vault/store.js';
+import type { VaultStore, Who, RevisionRow } from '../vault/store.js';
 import { MAX_CONTENT } from '../vault/store.js';
 import { authorize } from '../policy/engine.js';
 
@@ -40,6 +40,19 @@ export function registerFileWriteTools(reg: Reg, d: FileToolDeps): void {
     };
   };
   const norm = (p: unknown) => vault.normalise(String(p));
+  /**
+   * Revisions recorded at a path this login may still see. A file renamed in from a folder the caller cannot read keeps its
+   * earlier revisions for those who can, but they are not shown (or diffable) here: they are the old folder's history.
+   */
+  const mayAt = (ctx: any, relPath: string, actions: string[]) =>
+    actions.every((act) => authorize(ctx.session.rules, ctx.session.cap, act, `path:${vault.virtual(relPath.split('/'))}`).allowed);
+  const visible = (ctx: any, rows: RevisionRow[]) => {
+    const ok = new Map<string, boolean>();
+    return rows.filter((r) => ok.get(r.path_at_revision) ?? ok.set(r.path_at_revision, mayAt(ctx, r.path_at_revision, ['fs.history'])).get(r.path_at_revision)!);
+  };
+  /** A revision the caller may use: recorded (at least once) at a path where it holds every one of these actions. */
+  const revisionVisible = (ctx: any, fileId: string, revision: string, actions: string[]) =>
+    store.revisionPaths(fileId, revision).some((p) => mayAt(ctx, p, actions));
   const label = (id: string | null) => (id ? keys.agent(id)?.label ?? null : null);
   const content = z.string().max(MAX_CONTENT).describe('Full text content (UTF-8)');
 
@@ -112,7 +125,7 @@ export function registerFileWriteTools(reg: Reg, d: FileToolDeps): void {
     await store.observe(rel);
     const file = store.fileByPath(rel.join('/'), true);
     if (!file) throw new ToolError('not_found', DENIED);
-    const revisions = store.revisions(file.id, a.limit ?? 50).map((r) => ({
+    const revisions = visible(ctx, store.revisions(file.id, 1000)).slice(0, a.limit ?? 50).map((r) => ({
       revision: r.revision, parent_revision: r.parent_revision, op: r.op, origin: r.origin, recovered: !!r.recovered, path: r.path_at_revision, size: r.size, at: r.created_at,
       by: r.agent_id ? { agent_id: r.agent_id, label: label(r.agent_id) } : r.admin_id ? { admin_id: r.admin_id } : null,
     }));
@@ -131,6 +144,9 @@ export function registerFileWriteTools(reg: Reg, d: FileToolDeps): void {
     await store.observe(rel);
     const file = store.fileByPath(rel.join('/'), true);
     if (!file) throw new ToolError('not_found', DENIED);
+    for (const want of [a.from_revision, a.to_revision ?? file.current_revision]) {
+      if (want && want !== 'tombstone' && want !== 'absent' && !revisionVisible(ctx, file.id, want, ['fs.history', 'fs.read'])) throw new ToolError('not_found', 'No such revision for this file.');
+    }
     const r = await store.diff(file, a.from_revision, a.to_revision);
     const truncated = r.diff.length > 90_000;
     const diff = truncated ? r.diff.slice(0, 90_000) : r.diff;
@@ -144,7 +160,7 @@ export function registerFileWriteTools(reg: Reg, d: FileToolDeps): void {
     ctx.need('fs.restore', path);
     await store.observe(rel);
     const file = store.fileByPath(rel.join('/'), true);
-    if (!file || a.revision === 'tombstone' || !store.hasRevision(file.id, a.revision)) throw new ToolError('not_found', 'No such revision for this file.');
+    if (!file || a.revision === 'tombstone' || !revisionVisible(ctx, file.id, a.revision, ['fs.read'])) throw new ToolError('not_found', 'No such revision for this file.');
     const bytes = await store.getBlob(a.revision);
     if (!bytes) throw new ToolError('not_found', 'That revision was not kept (too large), so it cannot be restored.');
     const base = a.base_revision === 'tombstone' ? 'absent' : a.base_revision;

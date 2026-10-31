@@ -54,7 +54,7 @@ export class Maintenance {
 
   /**
    * Tables that otherwise only grow. Each rule keeps what later logic still reads:
-   * - logins dead (expired or ended) for 30 days, with their read positions, except each agent's newest login,
+   * - logins dead (expired or ended) for 30 days, with their read positions and cursor snapshots, except each agent's newest login,
    *   which a new login copies its notice and read positions from;
    * - notices older than 90 days, except each agent's newest (new notices number on from it);
    * - history of tasks finished more than 180 days ago, impact candidates of old revisions, curator results and
@@ -68,7 +68,9 @@ export class Maintenance {
       LIMIT ?`;
     const out: Record<string, number> = {};
     out.cursors = this.batched(`DELETE FROM message_delivery_cursors WHERE token_hash IN (${deadTokens})`, days(30));
-    out.logins = this.batched(`DELETE FROM session_tokens WHERE token_hash IN (${deadTokens}) AND NOT EXISTS (SELECT 1 FROM message_delivery_cursors m WHERE m.token_hash=session_tokens.token_hash)`, days(30));
+    out.ack_snapshots = this.batched(`DELETE FROM message_ack_snapshots WHERE token_hash IN (${deadTokens})`, days(30));
+    out.logins = this.batched(`DELETE FROM session_tokens WHERE token_hash IN (${deadTokens}) AND NOT EXISTS (SELECT 1 FROM message_delivery_cursors m WHERE m.token_hash=session_tokens.token_hash)
+      AND NOT EXISTS (SELECT 1 FROM message_ack_snapshots a WHERE a.token_hash=session_tokens.token_hash)`, days(30));
     out.notices = this.batched(`DELETE FROM agent_notices WHERE id IN (SELECT n.id FROM agent_notices n WHERE n.created_at<?
       AND n.seq < (SELECT MAX(m.seq) FROM agent_notices m WHERE m.agent_id=n.agent_id) LIMIT ?)`, days(90));
     out.task_events = this.batched(`DELETE FROM task_events WHERE id IN (SELECT e.id FROM task_events e JOIN tasks k ON k.id=e.task_id

@@ -22,6 +22,7 @@ import type { Shares, Entry } from '../shares/shares.js';
 import type { LeakGuard } from '../guard/leakGuard.js';
 import type { Audit } from '../audit/audit.js';
 import { newId } from '../util/ids.js';
+import { authorize } from '../policy/engine.js';
 import { VirtualStream, frameHeader, FRAME_END, parseFramedFile } from '../util/frames.js';
 import { isPathAllowed, osKind, joinFor } from '../util/paths.js';
 
@@ -153,6 +154,11 @@ export class Channels {
     const now = Date.now();
     const rows = this.db.prepare("SELECT id FROM data_channels WHERE status='offered' AND expires_at<?").all(now) as { id: string }[];
     for (const r of rows) this.end(r.id, 'expired', 'expired');
+    // A suspended or revoked key, or a download whose reader lost access, ends its live channels with a clear status
+    // instead of leaving them open (and their bytes buffered) until they expire.
+    for (const c of this.db.prepare("SELECT * FROM data_channels WHERE status IN ('offered','open')").all() as unknown as ChannelRow[]) {
+      if (!this.bridgeParticipantsActive(c) || !this.downloadAllowed(c)) this.fail(c.id, 'denied');
+    }
   }
 
   // ───────── bridge facts ─────────
@@ -265,6 +271,21 @@ export class Channels {
     const cr = this.keys.credential(credId);
     return !!cr && this.keys.effectiveStatus(cr) === 'active';
   }
+  /**
+   * A download is re-authorized on every chunk it delivers, not only when it was opened: the reader's key must still be
+   * active and still grant fs.read and fs.download on the vault file, or still reach the share. (The session key's own
+   * rules and temporary grants; an app-key cap changed mid-transfer is not seen here.)
+   */
+  private downloadAllowed(c: ChannelRow): boolean {
+    if (c.direction !== 'download') return true;
+    if (!this.credActive(c.from_credential_id)) return false;
+    if (c.target_kind === 'vault') {
+      const rules = this.keys.rulesFor(c.from_credential_id), res = `path:${c.target}`;
+      return authorize(rules, [], 'fs.read', res).allowed && authorize(rules, [], 'fs.download', res).allowed;
+    }
+    if (c.target_kind === 'share') { const sh = this.shares.share(c.target.split('@')[0]!); return !!sh && this.shares.canAccess(sh, c.from_agent_id); }
+    return true;
+  }
   private bridgeParticipantsActive(c: ChannelRow): boolean {
     return this.credActive(c.from_credential_id) &&
       (c.to_credential_id === null || this.credActive(c.to_credential_id));
@@ -327,6 +348,7 @@ export class Channels {
     for (;;) {
       const c = this.get(id)!;
       if (c.status === 'offered') throw err('invalid_state', 'Accept the channel first.');
+      if (c.status === 'open' && !this.downloadAllowed(c)) { this.fail(id, 'denied'); continue; }
       const r = this.relay(id);
       if (c.status === 'open' && r.queue.length > 0) {
         const out: { seq: number; data: string }[] = [];
@@ -492,6 +514,7 @@ export class Channels {
     }
   }
   private async serveDownload(c: ChannelRow, offset: number): Promise<BridgeReply> {
+    if (!this.downloadAllowed(c)) { this.fail(c.id, 'denied'); return { status: 410, body: { error: 'gone', status: 'failed', failure_reason: 'denied' } }; }
     if (offset > c.confirmed_offset) this.db.prepare('UPDATE data_channels SET confirmed_offset=? WHERE id=?').run(offset, c.id);
     if (offset >= c.size!) return { status: 200, data: Buffer.alloc(0), total: c.size!, eof: true };
     try {

@@ -53,8 +53,12 @@ export function registerFeedbackApi(api: FastifyInstance, d: FeedbackApiDeps, ac
     return { moved: r.moved, detail: feedback.detail(idOf(req)) };
   });
   api.patch('/api/feedback/:id', async (req) => {
-    const b = body(z.object({ title: z.string().min(1).max(120).optional(), severity: z.enum(SEVERITIES).optional(), hidden: z.boolean().optional() }), req);
+    const b = body(z.object({ title: z.string().min(1).max(120).optional(), severity: z.enum(SEVERITIES).optional(), hidden: z.boolean().optional(), guidance: z.string().max(2000).nullable().optional() }), req);
     feedback.edit(idOf(req), b, actor(req));
+    return feedback.detail(idOf(req));
+  });
+  api.post('/api/feedback/:id/notes', async (req) => {
+    feedback.note(idOf(req), body(z.object({ text: z.string().min(1).max(2000) }), req).text, actor(req));
     return feedback.detail(idOf(req));
   });
   api.delete('/api/feedback/:id', async (req) => { feedback.delete(idOf(req), actor(req)); return { ok: true }; });

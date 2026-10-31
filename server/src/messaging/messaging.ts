@@ -169,10 +169,38 @@ export class Messaging {
     }
     return n;
   }
+  /** This login's delivered position in one room (0 when it has read nothing there). */
+  deliveredSeq(tokenHash: string, roomId: string): number {
+    return (this.db.prepare('SELECT delivered_seq s FROM message_delivery_cursors WHERE token_hash=? AND room_id=?').get(tokenHash, roomId) as { s: number } | undefined)?.s ?? 0;
+  }
+  /**
+   * Delivered positions of this login in the rooms it has not acknowledged that far. A room acknowledged up to its
+   * delivered position is left out: acknowledging it again changes nothing, and leaving it out keeps the cursor short.
+   */
   cursorOf(tokenHash: string): Record<string, number> {
     const o: Record<string, number> = {};
-    for (const r of this.db.prepare('SELECT room_id, delivered_seq FROM message_delivery_cursors WHERE token_hash=?').all(tokenHash) as { room_id: string; delivered_seq: number }[]) o[r.room_id] = r.delivered_seq;
+    for (const r of this.db.prepare('SELECT room_id, delivered_seq FROM message_delivery_cursors WHERE token_hash=? AND delivered_seq>acked_seq').all(tokenHash) as { room_id: string; delivered_seq: number }[]) o[r.room_id] = r.delivered_seq;
     return o;
+  }
+  /**
+   * The next_cursor for message_read: the positions inline while they stay short, otherwise a snapshot id bound to this
+   * login (`s1.<id>`), so message_ack can always take its own cursor however many rooms the agent is in.
+   */
+  cursorFor(tokenHash: string): string {
+    const rooms = this.cursorOf(tokenHash);
+    const inline = encodeCursor(rooms);
+    if (inline.length <= INLINE_CURSOR_MAX) return inline;
+    const id = Number(this.db.prepare('INSERT INTO message_ack_snapshots(token_hash,rooms,created_at) VALUES (?,?,?)').run(tokenHash, JSON.stringify(rooms), Date.now()).lastInsertRowid);
+    this.db.prepare('DELETE FROM message_ack_snapshots WHERE token_hash=? AND id NOT IN (SELECT id FROM message_ack_snapshots WHERE token_hash=? ORDER BY id DESC LIMIT ?)').run(tokenHash, tokenHash, SNAPSHOTS_KEPT);
+    return `${SNAPSHOT_PREFIX}${id}`;
+  }
+  /** Positions a cursor stands for: an inline cursor (any login's, as before), or a snapshot of this login's. Null if neither. */
+  resolveCursor(tokenHash: string, cursor: string): Record<string, number> | null {
+    if (!cursor.startsWith(SNAPSHOT_PREFIX)) return decodeCursor(cursor);
+    const id = cursor.slice(SNAPSHOT_PREFIX.length);
+    if (!/^[1-9]\d{0,15}$/.test(id)) return null;
+    const row = this.db.prepare('SELECT rooms FROM message_ack_snapshots WHERE id=? AND token_hash=?').get(Number(id), tokenHash) as { rooms: string } | undefined;
+    return row ? positions(JSON.parse(row.rooms)) : null;
   }
   unread(tokenHash: string, agentId: string, roomId: string): number {
     return (this.db.prepare(`SELECT COUNT(*) n FROM messages m LEFT JOIN message_delivery_cursors c ON c.token_hash=? AND c.room_id=m.room_id
@@ -200,13 +228,18 @@ export class Messaging {
   releaseAll(): void { this._closed = true; for (const w of [...this.waiters]) w(); }
 }
 
+/** Longest inline cursor; longer ones become snapshot ids. Well under message_ack's 4,000-character argument limit. */
+export const INLINE_CURSOR_MAX = 2000;
+/** Snapshot cursors kept per login; an older one is refused and the agent reads again. */
+export const SNAPSHOTS_KEPT = 16;
+const SNAPSHOT_PREFIX = 's1.';
 export const encodeCursor = (m: Record<string, number>): string => Buffer.from(JSON.stringify(m)).toString('base64url');
 export function decodeCursor(c: string): Record<string, number> | null {
-  try {
-    const o = JSON.parse(Buffer.from(c, 'base64url').toString('utf8')) as unknown;
-    if (!o || typeof o !== 'object' || Array.isArray(o)) return null;
-    const out: Record<string, number> = {};
-    for (const [k, v] of Object.entries(o)) { if (!Number.isInteger(v) || (v as number) < 0) return null; out[k] = v as number; }
-    return out;
-  } catch { return null; }
+  try { return positions(JSON.parse(Buffer.from(c, 'base64url').toString('utf8'))); } catch { return null; }
+}
+function positions(o: unknown): Record<string, number> | null {
+  if (!o || typeof o !== 'object' || Array.isArray(o)) return null;
+  const out: Record<string, number> = {};
+  for (const [k, v] of Object.entries(o)) { if (!Number.isInteger(v) || (v as number) < 0) return null; out[k] = v as number; }
+  return out;
 }

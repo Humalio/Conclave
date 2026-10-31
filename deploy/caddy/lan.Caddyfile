@@ -22,7 +22,14 @@ http://:{$HTTP_PORT} {
 	handle @machine {
 		reverse_proxy agent-hub:8080
 	}
-	# The hub has no OAuth. Answer discovery here instead of redirecting it to the internal-CA
+	# The hub has no OAuth. When a header login fails, an MCP client gets a 401 and falls back to
+	# the spec's default OAuth endpoints; a 308 to HTTPS there makes it report a refused OAuth
+	# redirect and hides the real cause. Answer them with 404 so the 401 stays visible.
+	@oauth path /authorize /authorize/* /register /token /revoke
+	handle @oauth {
+		respond 404
+	}
+	# Likewise answer discovery here instead of redirecting it to the internal-CA
 	# HTTPS port, where an MCP client fails with a certificate error that hides the real cause
 	# (no app key sent).
 	handle /.well-known/* {

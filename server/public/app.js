@@ -129,7 +129,7 @@ function openSheet({ title = '', html = '', onClose, anchor } = {}) {
   if (title) sh.setAttribute('aria-labelledby', 'sheetT'); else sh.setAttribute('aria-label', 'Details');
   sh.innerHTML = (title ? `<div class="sheet-hd"><h2 id="sheetT">${esc(title)}</h2><button type="button" class="ibtn" data-sheet-close aria-label="Close">${ic('x')}</button></div>` : '') + html;
   document.body.append(scrim, sh);
-  if (pop) { const r = anchor.getBoundingClientRect(); sh.style.left = Math.max(8, Math.min(innerWidth - sh.offsetWidth - 8, r.right - sh.offsetWidth)) + 'px'; sh.style.top = r.bottom + 8 + 'px'; }
+  if (pop) { const r = anchor.getBoundingClientRect(); sh.style.left = Math.max(8, Math.min(innerWidth - sh.offsetWidth - 8, r.right - sh.offsetWidth)) + 'px'; sh.style.top = (r.bottom + 8 + sh.offsetHeight > innerHeight - 8 && r.top - 8 - sh.offsetHeight >= 8 ? r.top - 8 - sh.offsetHeight : r.bottom + 8) + 'px'; } // above the anchor when it does not fit below (bulk bars sit at the bottom)
   SHEET = { sh, scrim, opener: document.activeElement, onClose };
   scrim.addEventListener('click', () => closeSheet());
   sh.addEventListener('click', (e) => { if (e.target.closest('[data-sheet-close]')) closeSheet(); });
@@ -412,6 +412,8 @@ let viewRequest = 0;
 let viewLoading = false;
 async function openD(type, arg, replace, reset = false) {
   closeSheet(); // a sheet belongs to the screen it was opened on
+  // From 1024 px a directive opens beside the list (Work → Directives), keeping the list's filters when it is already open.
+  if (type === 'directive' && dirWide() && RID.test(String(arg))) { const f = (DR.type === 'directives' && dirArgs(DR.arg)) || dirArgs(''); type = 'directives'; arg = dirArgStr({ ...f, d: String(arg) }); }
   const request = ++viewRequest;
   viewLoading = true;
   let r;
@@ -463,7 +465,7 @@ const ROUTE_OK = {
   plan: (a) => { const [i, k = 'req', f = ''] = a.split('|'); return RID.test(i) && ['req', 'ms'].includes(k) && /^[a-z]*$/.test(f); }, room: (a) => RID.test(a), share: (a) => RID.test(a), app: (a) => !a || RID.test(a),
   task: (a) => { const p = a.split('|'); return p.length === 2 && p.every((x) => RID.test(x)); },
   feedback: (a) => ['', 'new', 'open', 'closed'].includes(a), fbr: (a) => RID.test(a),
-  directive: (a) => RID.test(a), directives: (a) => ['', 'retired'].includes(a),
+  directive: (a) => RID.test(a), directives: (a) => !!dirArgs(a), teams: (a) => !!tmArgs(a),
   dec: (a) => RID.test(a), decisions: (a) => { const [i, f = ''] = a.split('|'); return RID.test(i) && ['', 'open', 'answered', 'all'].includes(f); },
   diff: (a) => { const [f, from = '', to] = a.split('|'); return RID.test(f) && (from === 'absent' || RID.test(from)) && (!to || RID.test(to)); },
 };
@@ -715,7 +717,7 @@ const VIEWS = {
   },
 
   async shortcuts() {
-    const L = [['S', 'Sessions'], ['M', 'Teams'], ['C', 'Chats'], ['K', 'Keys'], ['P', 'PCs'], ['V', 'Vault'], ['R', 'Requests'], ['H', 'Shares'], ['O', 'Lockdown'], ['G', 'Work'], ['L', 'Audit'], ['T', 'Theme'], ['Esc', 'Back']];
+    const L = [['S', 'Sessions'], ['M', 'Teams'], ['C', 'Chats'], ['K', 'Keys'], ['P', 'PCs'], ['V', 'Vault'], ['R', 'Requests'], ['H', 'Shares'], ['O', 'Lockdown'], ['G', 'Work'], ['L', 'Audit'], ['T', 'Theme'], ['J / K', 'Next or previous (Directives, feedback report)'], ['Esc', 'Back']];
     // Touch devices have no keyboard: they get a one-line note instead of the list (CSS, @media (hover: none)).
     return { t: `${ic('kbd')}Shortcuts`, dbar: { title: 'Shortcuts', meta: 'Keyboard' },
       b: `<div class="pcard kb-list">${L.map(([k, l]) => `<span class="kbd">${k}</span><span>${l}</span>`).join('')}</div><p class="kb-note hint">Keyboard shortcuts are available with a keyboard.</p>` };
@@ -959,14 +961,11 @@ const TCOL = { open: 'idle', assigned: 'info', in_progress: 'accent', in_review:
 const TSTC = { running: 'ok', paused: 'warn', draft: 'idle', stopped: 'bad', done: 'accent' }; // tone classes (.tg-pbf.<tone>)
 const ring = (p, sz = 36, col = 'var(--ok)') => { const r = sz / 2 - 3, c = 2 * Math.PI * r, h = sz / 2; return `<svg class="rg" width="${sz}" height="${sz}" viewBox="0 0 ${sz} ${sz}" aria-hidden="true"><circle cx="${h}" cy="${h}" r="${r}" fill="none" stroke-width="3.5" class="rg-trk"/><circle cx="${h}" cy="${h}" r="${r}" fill="none" stroke-width="3.5" stroke-linecap="round" stroke-dasharray="${(c * p / 100).toFixed(1)} ${c.toFixed(1)}" transform="rotate(-90 ${h} ${h})" style="stroke:${col}"/><text x="50%" y="50%" dominant-baseline="central" text-anchor="middle" class="rt${sz > 44 ? ' big' : ''}">${p}</text></svg>`; };
 const agLabel = (id) => (id === 'hub' ? 'hub' : AG(id)?.label || SESA(id)?.agent.label || trunc(String(id || '—'), 12));
-/* Agents topology. Three levels: Projects (one node per project), Agents (agents only) and All (agents, teams, rooms).
-   Clicking a project or, at the Agents level, an agent drills into its neighbourhood; the breadcrumb goes back.
-   Edges are coloured by how recently they carried activity. */
+/* Agents topology (Work → Activity): agents, team hubs and group chats; Teams → Activity scopes it to one project.
+   Edges are coloured by how recently they carried activity. The focus view is described above EGO. */
 const ACT_MS = 30_000, REC_MS = 300_000;
 const TGW = [['5m', 300_000], ['1h', 3600_000], ['24h', 86400_000], ['7d', 7 * 86400_000]];
-const TGL = [['projects', 'Projects', 'vault'], ['agents', 'Agents', 'ses'], ['all', 'All', 'hub']];
-const TG_S = { win: 86400_000, layers: { team: true, msg: true, link: true }, hover: null, level: 'projects', focus: null };
-try { TG_S.level = TGL.some(([k]) => k === localStorage.getItem('ah-topo-level')) ? localStorage.getItem('ah-topo-level') : 'projects'; } catch { /* ignore */ }
+const TG_S = { win: 86400_000, layers: { team: true, msg: true, link: true }, focus: null };
 const recency = (t) => (!t ? 'old' : Date.now() - t < ACT_MS ? 'act' : Date.now() - t < REC_MS ? 'rec' : 'old');
 const TEAM_TOOLS = /^(team_|task_|work_)/;
 const NO_PROJECT = 'No project';
@@ -1001,174 +1000,332 @@ function topoModel() {
   const proj = new Map(agents.map((a) => [a.id, projectOf(a)]));
   return { agents, act, live, rooms, proj, edges: [...edges.values()].filter((e) => TG_S.layers[e.kind === 'room' ? 'msg' : e.kind]) };
 }
-/* Which part of the model the current level and focus show. drill: clicks drill in instead of opening the agent. */
+/* Which part of the model a project focus shows (Teams → Activity). Without one, the whole hub. */
 function topoScope(M) {
-  const f = TG_S.focus, between = (e, set) => set.has(e.a) && !e.b.includes(':') && set.has(e.b);
+  const f = TG_S.focus;
   if (f?.kind === 'project') {
     const inside = new Set(M.agents.filter((a) => M.proj.get(a.id) === f.id).map((a) => a.id)), ext = new Set();
     // Outside agents this project talks to stay visible, faded, so cross-project traffic is not hidden.
     for (const e of M.edges) if (!e.b.includes(':') && inside.has(e.a) !== inside.has(e.b)) ext.add(inside.has(e.a) ? e.b : e.a);
-    const ids = new Set([...inside, ...ext]);
-    return { ids, ext, center: null, drill: false, edges: M.edges.filter((e) => (e.b.includes(':') ? inside.has(e.a) : between(e, ids) && (inside.has(e.a) || inside.has(e.b)))) };
+    const ids = new Set([...inside, ...ext]), between = (e) => ids.has(e.a) && ids.has(e.b) && (inside.has(e.a) || inside.has(e.b));
+    return { ids, ext, edges: M.edges.filter((e) => (e.b.includes(':') ? inside.has(e.a) : between(e))) };
   }
-  if (f?.kind === 'agent') {
-    const ids = new Set([f.id]), teamsOf = new Set(M.edges.filter((e) => e.kind === 'team' && e.a === f.id).map((e) => e.b));
-    for (const e of M.edges) {
-      if (!e.b.includes(':') && (e.a === f.id || e.b === f.id)) ids.add(e.a === f.id ? e.b : e.a);
-      if (e.kind === 'team' && teamsOf.has(e.b)) ids.add(e.a);
-    }
-    return { ids, ext: new Set(), center: f.id, drill: false, edges: M.edges.filter((e) => (e.b.includes(':') ? ids.has(e.a) && (e.kind !== 'team' || teamsOf.has(e.b)) && (e.kind !== 'room' || e.a === f.id) : between(e, ids))) };
-  }
-  const ids = new Set(M.agents.map((a) => a.id));
-  if (TG_S.level === 'agents') return { ids, ext: new Set(), center: null, drill: true, edges: M.edges.filter((e) => !e.b.includes(':')) };
-  return { ids, ext: new Set(), center: null, drill: false, edges: M.edges };
+  return { ids: new Set(M.agents.map((a) => a.id)), ext: new Set(), edges: M.edges };
 }
 const edgeWidth = (e) => (e.kind === 'msg' || e.kind === 'room' ? Math.min(1.5 + Math.log2(e.count + 1), 6) : 1.6);
-function bindGraphHover(svg) {
-  const focus = (id) => {
-    TG_S.hover = id; svg.classList.toggle('focus', !!id); $$('.hl', svg).forEach((x) => x.classList.remove('hl')); if (!id) return;
-    $$('.tg-eg', svg).forEach((g) => { if (g.dataset.a === id || g.dataset.b === id) { g.classList.add('hl'); svg.querySelector(`[data-n="${CSS.escape(g.dataset.a === id ? g.dataset.b : g.dataset.a)}"]`)?.classList.add('hl'); } });
-    svg.querySelector(`[data-n="${CSS.escape(id)}"]`)?.classList.add('hl');
-  };
-  svg.onmouseover = (e) => { const n = e.target.closest('.tg-node'); if (n) focus(n.dataset.n); };
-  svg.onmouseleave = () => focus(null);
-  if (TG_S.hover && svg.querySelector(`[data-n="${CSS.escape(TG_S.hover)}"]`)) focus(TG_S.hover);
-}
 /* What a denied call was aimed at (a path or resource), never the content it carried. */
 const denTarget = (i) => { try { const a = JSON.parse(i.args_summary || '{}') || {}; return [a.path, a.resource, a.to, a.room_id, a.team_id].find((v) => typeof v === 'string') || ''; } catch { return ''; } };
-/* Projects level: one card per project instead of a graph. Who is in it (live or not), its teams and their
-   progress, recent activity and denials, and which other projects it talks to. A click opens the project's agents. */
-function renderProjectCards(graph, M) {
-  const now = Date.now(), byProj = new Map();
-  for (const a of M.agents) { const n = M.proj.get(a.id); if (!byProj.has(n)) byProj.set(n, []); byProj.get(n).push(a); }
-  const list = [...byProj.entries()].sort(([x], [y]) => (x === NO_PROJECT) - (y === NO_PROJECT) || x.localeCompare(y));
-  /* Agents without a project or team are not a project: they are a pool to draw team members from. */
-  const pool = (agents) => {
-    const seen = (a) => Math.max(a.last_seen_at || 0, M.act.get(a.id)?.last || 0), live = (a) => M.live.has(a.id);
-    const rows = agents.slice().sort((x, y) => live(y) - live(x) || seen(y) - seen(x) || x.label.localeCompare(y.label)).map((a) => row({
-      lead: `<span class="av lg">${esc(initials(a.label || '?'))}<i class="st${live(a) ? ' on' : ''}" title="${live(a) ? 'Logged in' : 'Not logged in'}"></i></span>`,
-      title: a.label, meta: `${a.role || 'No role'} · ${seen(a) ? 'seen ' + ago(seen(a)) + ' ago' : 'never signed in'}`,
-      trail: live(a) ? pill('Live', 'ok') : '', chev: true, attrs: { 'data-ses': a.id } })).join('');
-    return `<article class="card pool"><div class="pool-h"><h3 class="pool-t">Agent pool</h3>${info('Agents without a project or team. Add one to a team to give it work.')}<span class="pool-n">${agents.length} agent${agents.length === 1 ? '' : 's'}</span></div>${rows}</article>`;
-  };
-  const card = ([name, agents]) => {
-    if (name === NO_PROJECT) return pool(agents);
-    const ids = new Set(agents.map((a) => a.id));
-    const st = agents.map((a) => M.act.get(a.id));
-    const last = Math.max(0, ...st.map((s) => Math.max(s.last, s.teamLast)));
-    const live = agents.filter((a) => M.live.has(a.id)).length;
-    // Denied calls of this project in the last hour, newest first: the pill names the latest and opens them in Audit.
-    const den = S.inv.filter((i) => i.result === 'denied' && !i.now_allowed && now - i.created_at < 3600_000 && ids.has(i.agent_id || keyAgentOf(i.credential_id))).sort((a, b) => b.created_at - a.created_at);
-    const denWho = [...new Set(den.map((i) => i.agent_id || keyAgentOf(i.credential_id)))];
-    const denTip = den.length ? `${den.length} denied in the last hour. Latest: ${agLabel(denWho[0])}, ${den[0].tool}${denTarget(den[0]) ? ' on ' + denTarget(den[0]) : ''}, ${ago(den[0].created_at)} ago. Open them in Audit.` : '';
-    const denPill = den.length ? `<button type="button" class="pill bad pill-btn" data-go="log" data-arg="calls|${denWho.length === 1 ? 'agent:' + esc(denWho[0]) : ''}|denied" title="${esc(denTip)}" aria-label="${esc(denTip)}">${den.length} denied</button>` : '';
-    const teams = S.teams.filter((t) => (t.agent_ids || []).some((id) => ids.has(id)));
-    const calls = S.inv.filter((i) => now - i.created_at < 3600_000 && ids.has(K(i.credential_id)?.agent_id)).length;
-    // Other projects this one exchanged messages with in the selected window.
-    const peers = new Map();
-    for (const e of M.edges) {
-      if (e.b.includes(':') || e.kind !== 'msg') continue;
-      const pa = M.proj.get(e.a), pb = M.proj.get(e.b);
-      if (pa === pb || (pa !== name && pb !== name)) continue;
-      const o = pa === name ? pb : pa; peers.set(o, (peers.get(o) || 0) + e.count);
+/* Activity graph. At rest, agents sit in clusters around their team hub (hubs on an ellipse, agents in no team in the middle).
+   Resting the pointer on a node for 250 ms, or giving it keyboard focus, moves it to the centre with its direct connections on a
+   ring (team first, then messages by count, then links) and fades the rest. Leaving the graph or Esc goes back; resting on a ring
+   node walks to it (the trail above the graph jumps back); a click or Enter pins. The SVG is built once and reconciled on every
+   refresh: one element per node and edge id, positions interpolated with requestAnimationFrame, so the 4 s poll keeps the focus,
+   the pin and keyboard focus. */
+const SVGNS = 'http://www.w3.org/2000/svg';
+const EGO = { focus: null, pinned: false, trail: [], hov: null, dwell: 0, anim: 0, lock: null, px: null, cur: new Map(), G: null, ring: [], nb: new Map(), role: new Map(), only: null, W: 0 };
+const EGO_DWELL = 250, EGO_MS = 380, EGO_TRAIL = 6, EGO_RANK = { team: 0, msg: 1, room: 1, link: 2 };
+function egoReset() { clearTimeout(EGO.dwell); cancelAnimationFrame(EGO.anim); Object.assign(EGO, { focus: null, pinned: false, trail: [], hov: null, lock: null, cur: new Map(), G: null, W: 0 }); }
+/* Nodes, edges and the resting layout for the current scope. Team hubs appear with the Teams layer; clusters always follow teams. */
+function topoGraph(M, scope, W, H) {
+  const nodes = new Map(), narrow = W < 560;
+  for (const a of M.agents) if (scope.ids.has(a.id)) nodes.set(a.id, { id: a.id, kind: 'agent', label: a.label || a.id, a, ext: scope.ext.has(a.id) });
+  const teams = S.teams.map((t) => ({ t, members: (t.agent_ids || []).filter((id) => nodes.has(id) && !scope.ext.has(id)) })).filter((x) => x.members.length);
+  if (TG_S.layers.team) for (const { t, members } of teams) nodes.set('team:' + t.id, { id: 'team:' + t.id, kind: 'team', label: t.name, t, members });
+  for (const e of scope.edges) if (e.kind === 'room' && !nodes.has(e.b)) nodes.set(e.b, { id: e.b, kind: 'room', label: M.rooms.get(e.b.slice(5)) || 'Room', room: e.b.slice(5) });
+  const edges = scope.edges.filter((e) => nodes.has(e.a) && nodes.has(e.b)).map((e) => ({ ...e, key: e.kind + ':' + e.a + '|' + e.b }));
+  const G = { M, nodes, edges, teams, W, H, narrow };
+  G.base = topoBase(G);
+  return G;
+}
+function topoBase({ nodes, teams, W, H, narrow }) {
+  const P = new Map(), cx = W / 2, cy = H / 2, rx = W / 2 - (narrow ? 40 : 96), ry = H / 2 - (narrow ? 44 : 64), T = teams.length;
+  const home = new Map(); teams.forEach(({ t, members }) => members.forEach((id) => { if (!home.has(id)) home.set(id, t.id); }));
+  const free = [...nodes.values()].filter((n) => n.kind === 'agent' && !home.has(n.id)).sort((x, y) => x.ext - y.ext || x.label.localeCompare(y.label));
+  // One team: its cluster on the left and the agents in no team on the right, instead of a lone hub at the top.
+  const one = T === 1, mid = { x: one && free.length ? cx + rx * 0.45 : cx, y: cy };
+  // Each team gets a slice of the ellipse in proportion to the agents clustered around it (a team whose members all sit with
+  // an earlier team needs room for its hub only).
+  const homed = teams.map(({ t, members }) => members.filter((id) => home.get(id) === t.id)), wt = homed.map((m) => 1.2 + m.length), sum = wt.reduce((s, w) => s + w, 0);
+  let acc = 0;
+  teams.forEach(({ t }, i) => {
+    const a = -Math.PI / 2 + (2 * Math.PI * (acc + wt[i] / 2)) / sum; acc += wt[i];
+    const hx = one ? (free.length ? cx - rx * 0.4 : cx) : cx + rx * Math.cos(a), hy = one ? cy : cy + ry * Math.sin(a);
+    P.set('team:' + t.id, { x: hx, y: hy });
+    // Members on an arc around the hub that leaves the space under it free for the hub's name and progress bar.
+    const mem = homed[i], m = mem.length, r = Math.max(narrow ? 32 : 60, m * (narrow ? 7 : 10)), gap = (narrow ? 140 : 160) * Math.PI / 180;
+    mem.forEach((id, j) => { const b = Math.PI / 2 + gap / 2 + ((2 * Math.PI - gap) * (m === 1 ? 0.5 : j / (m - 1))); P.set(id, { x: hx + r * Math.cos(b), y: hy + r * Math.sin(b) }); });
+  });
+  // Agents in no team (and, in a project view, outside agents) in the middle; with no teams at all they take the whole ellipse.
+  const k = free.length, fr = T ? Math.min(Math.max(34, (k * 44) / (2 * Math.PI)), Math.min(rx, ry) * 0.34) : 0;
+  free.forEach((n, i) => {
+    const a = -Math.PI / 2 + (2 * Math.PI * i) / k;
+    P.set(n.id, k === 1 ? { ...mid } : T ? { x: mid.x + fr * Math.cos(a), y: mid.y + fr * Math.sin(a) } : { x: cx + rx * Math.cos(a), y: cy + ry * Math.sin(a) });
+  });
+  const rooms = [...nodes.values()].filter((n) => n.kind === 'room');
+  rooms.forEach((n, i) => { const a = -Math.PI / 2 + (2 * Math.PI * (i + 0.5)) / Math.max(rooms.length, T, 1); P.set(n.id, { x: cx + rx * 0.62 * Math.cos(a), y: cy + ry * 0.62 * Math.sin(a) }); });
+  return P;
+}
+/* Direct connections of a node, one edge per neighbour (the strongest kind wins). */
+function egoNbrs(G, id) {
+  const nb = new Map();
+  for (const e of G.edges) { const o = e.a === id ? e.b : e.b === id ? e.a : null; if (!o) continue; const p = nb.get(o); if (!p || EGO_RANK[e.kind] < EGO_RANK[p.kind]) nb.set(o, e); }
+  return nb;
+}
+function egoLayout(G) {
+  const f = EGO.focus, P = new Map(G.base), role = new Map();
+  if (!f) { G.nodes.forEach((_, id) => role.set(id, 'base')); return { P, role, nb: new Map(), ring: [] }; }
+  const nb = egoNbrs(G, f), lab = (id) => G.nodes.get(id).label;
+  const ring = [...nb.keys()].sort((x, y) => EGO_RANK[nb.get(x).kind] - EGO_RANK[nb.get(y).kind] || (nb.get(y).count || 0) - (nb.get(x).count || 0) || lab(x).localeCompare(lab(y)));
+  const { W, H, narrow } = G, cx = W / 2, cy = H / 2, n = ring.length;
+  const rx = Math.min(W / 2 - (narrow ? 44 : 110), (narrow ? 90 : 150) + n * 16), ry = Math.min(H / 2 - 56, 120 + n * 10);
+  P.set(f, { x: cx, y: cy }); role.set(f, 'focus');
+  ring.forEach((id, i) => { const a = -Math.PI / 2 + (2 * Math.PI * i) / n; P.set(id, { x: cx + rx * Math.cos(a), y: cy + ry * Math.sin(a) }); role.set(id, 'n1'); });
+  G.nodes.forEach((_, id) => { if (!role.has(id)) role.set(id, 'out'); });
+  return { P, role, nb, ring };
+}
+/* Markup inside a node's or edge's <g>, drawn around the origin (the <g> carries the position). */
+function egoNodeParts(n, G) {
+  const M = G.M;
+  if (n.kind === 'agent') {
+    const st = M.act.get(n.id), rc = recency(st.last), on = M.live.has(n.id), rr = G.narrow ? 14 : 19;
+    const sub = n.ext ? M.proj.get(n.id) : st.last ? `${st.tool} · ${ago(st.last)}` : on ? 'connected' : 'offline';
+    const tip = `${n.label}${n.a.role ? ' · ' + n.a.role : ''} · ${on ? 'live' : 'offline'}${n.ext ? ' · project ' + M.proj.get(n.id) : ''}${st.last ? ' · last call ' + st.tool + ' ' + ago(st.last) + ' ago' : ''}${st.denied ? ' · ' + st.denied + ' denied in 5m' : ''}`;
+    return { cls: `tg-node tg-agent${on ? ' live' : ''}${n.ext ? ' ext' : ''} r-${rc}`, html: `<title>${esc(tip)}</title>`
+      + (rc === 'act' && !n.ext ? `<circle class="halo" r="${rr + 1}"/>` : '') + `<circle class="core" r="${rr}"/>`
+      + `<text class="ini" text-anchor="middle" dominant-baseline="central">${esc(initials(n.label))}</text>`
+      + (st.denied && !n.ext ? `<g class="tg-den"><circle cx="${rr * 0.8}" cy="${-rr * 0.8}" r="8"/><text x="${rr * 0.8}" y="${-rr * 0.8}" text-anchor="middle" dominant-baseline="central">${st.denied}</text></g>` : '')
+      + `<text class="tg-lbl" y="${rr + 15}" text-anchor="middle">${esc(trunc(n.label, G.narrow ? 12 : 18))}</text>`
+      + `<text class="tg-sub${!n.ext && st.result && st.result !== 'ok' && rc !== 'old' ? ' bad' : ''}" y="${rr + 29}" text-anchor="middle">${esc(trunc(sub, G.narrow ? 16 : 24))}</text>` };
+  }
+  const team = n.kind === 'team', t = n.t, hs = G.narrow ? 15 : 21, is = G.narrow ? 8 : 11, busy = G.edges.some((e) => e.b === n.id && recency(e.last) === 'act'), pct = team ? t.progress?.pct || 0 : 0;
+  return { cls: `tg-node ${team ? 'tg-team' : 'tg-room'}${busy ? ' busy' : ''}`, html: `<title>${esc(n.label + (team ? ' · ' + t.status + ' · ' + t.members + ' members · ' + tasksLabel(t.progress || {}) : ' · group chat'))}</title>`
+    + `<rect x="${-hs}" y="${-hs}" width="${2 * hs}" height="${2 * hs}" rx="${hs * 0.57}"/><use href="#i-${team ? 'team' : 'chat'}" x="${-is}" y="${-is}" width="${2 * is}" height="${2 * is}"/>`
+    + `<text class="tg-lbl" y="${hs + 16}" text-anchor="middle">${esc(trunc(n.label, G.narrow ? 14 : 22))}</text>`
+    + (team ? `<g class="tg-prog"><rect class="tg-pb" x="-26" y="${hs + 25}" width="52" height="5" rx="2.5"/><rect class="tg-pbf ${TSTC[t.status] || ''}" x="-26" y="${hs + 25}" width="${(52 * pct / 100).toFixed(1)}" height="5" rx="2.5"/><text class="tg-sub" x="31" y="${hs + 30}">${pct}%</text></g>` : '') };
+}
+/* A link's kind for people: team:<id> links are named after their team, never by id. */
+const linkKindLabel = (k) => { if (!k) return 'Link'; if (!k.startsWith('team:')) return cap(k) + ' link'; const t = S.teams.find((x) => x.id === k.slice(5)); return t ? 'Team link (' + t.name + ')' : 'Team link'; };
+function egoEdgeParts(e, G) {
+  const name = (id) => G.nodes.get(id)?.label || id, rc = e.kind === 'link' ? 'old' : recency(e.last);
+  const tip = e.kind === 'team' ? `${name(e.a)} · member of ${name(e.b)}${e.last ? ' · team activity ' + ago(e.last) + ' ago' : ''}`
+    : e.kind === 'link' ? `${name(e.a)} ↔ ${name(e.b)} · ${linkKindLabel(e.link.kind)}${e.link.grants_messaging ? ' · messaging allowed' : ''} · no messages in this window`
+    : `${name(e.a)} ${e.kind === 'room' ? '→' : '↔'} ${name(e.b)} · ${e.count} message${e.count === 1 ? '' : 's'} · last ${ago(e.last)} ago`;
+  return `<title>${esc(tip)}</title><path class="tg-e k-${e.kind} r-${rc}" style="stroke-width:${edgeWidth(e)}"/><path class="tg-hit"/>`;
+}
+const egoEl = (cls) => { const g = document.createElementNS(SVGNS, 'g'); g.setAttribute('class', cls); return g; };
+/* The SVG for #agentGraph, created once per visit to the view; later renders only reconcile it. */
+function egoSvg(graph) {
+  let svg = graph.querySelector('svg.tg');
+  if (svg) return svg;
+  graph.innerHTML = `<div class="tg-trail" id="tgTrail"></div><svg class="tg" role="group" aria-label="Agent topology"><g class="tg-edges"></g><g class="tg-nodes"></g></svg>`;
+  svg = graph.querySelector('svg.tg'); svg._n = new Map(); svg._e = new Map(); EGO.cur = new Map();
+  egoBind(svg);
+  graph.querySelector('#tgTrail').addEventListener('click', (e) => {
+    if (e.target.closest('[data-tg-pin]')) { egoPin(!EGO.pinned); return; }
+    const c = e.target.closest('[data-tg-crumb]'); if (!c) return;
+    const i = +c.dataset.tgCrumb, id = EGO.trail[i];
+    EGO.trail = EGO.trail.slice(0, i); EGO.focus = id; EGO.pinned = true; EGO.hov = null; egoApply();
+  });
+  return svg;
+}
+function egoSync(svg, G) {
+  const nodesG = svg.querySelector('.tg-nodes'), edgesG = svg.querySelector('.tg-edges');
+  for (const [id, g] of svg._n) if (!G.nodes.has(id)) { g.remove(); svg._n.delete(id); EGO.cur.delete(id); }
+  for (const n of G.nodes.values()) {
+    let g = svg._n.get(n.id);
+    if (!g) { g = egoEl('tg-node'); g.dataset.n = n.id; g.setAttribute('role', 'button'); nodesG.appendChild(g); svg._n.set(n.id, g); }
+    const { cls, html } = egoNodeParts(n, G);
+    g._base = cls; g.setAttribute('aria-label', n.label + (n.kind === 'team' ? ' (team)' : n.kind === 'room' ? ' (group chat)' : ''));
+    if (g._html !== html) { g.innerHTML = html; g._html = html; }
+  }
+  const keys = new Set(G.edges.map((e) => e.key));
+  for (const [k, g] of svg._e) if (!keys.has(k)) { g.remove(); svg._e.delete(k); }
+  for (const e of G.edges) {
+    let g = svg._e.get(e.key);
+    if (!g) {
+      g = egoEl('tg-eg'); g.dataset.a = e.a; g.dataset.b = e.b;
+      if (e.room) g.dataset.room = e.room; else if (e.team) g.dataset.team = e.team;
+      edgesG.appendChild(g); svg._e.set(e.key, g);
     }
-    const rc = recency(last);
-    const when = rc === 'act' ? 'Active now' : last ? 'Last activity ' + ago(last) + ' ago' : 'No activity yet';
-    // One meta line instead of a grid of big numbers: who is in it, who is live, how busy, and when. Task progress lives on the team rows.
-    const facts = [`${agents.length} agent${agents.length === 1 ? '' : 's'}`, live ? `${live} live` : '', calls ? `${calls} calls/h` : '', when.charAt(0).toLowerCase() + when.slice(1)].filter(Boolean).join(' · ');
-    const head = row({ lead: `<span class="av lg">${ic(name === NO_PROJECT ? 'ses' : 'vault')}</span>`, title: name, meta: facts,
-      trail: `${denPill}<button type="button" class="btn sm only-d" data-go="topology" data-arg="project:${esc(name)}" title="Who talks to whom in this project">${ic('pulse')}Activity</button>` });
-    const chips = `<div class="pj-chips">${agents.slice(0, 10).map((a) => `<span class="av" title="${esc(a.label)}${a.role ? ' · ' + esc(a.role) : ''} · ${M.live.has(a.id) ? 'live' : 'offline'}">${esc(initials(a.label))}${M.live.has(a.id) ? '<i class="st on"></i>' : ''}</span>`).join('')}${agents.length > 10 ? `<span class="meta">+${agents.length - 10}</span>` : ''}</div>`;
-    const teamRows = teams.map((t) => { const pct = t.progress?.pct || 0, tot = t.progress?.total || 0;
-      return row({ lead: ic('team'), title: t.name, cls: 'pj-team', chev: true, trail: pill(cap(t.status), TONE[t.status] || 'idle'), attrs: { 'data-team': t.id, title: 'Open the team dashboard' },
-        meta: raw(`<span class="pj-prog"><span class="pb" role="progressbar" aria-label="Task progress" aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100"><i style="width:${pct}%"></i></span><span>${tot ? `${t.progress.done} of ${tot} tasks` : 'No tasks'}${t.stalled ? ` · ${t.stalled} stalled` : ''}</span></span>`) }); }).join('');
-    return `<article class="card pj r-${rc}">${head}${chips}
-      ${teams.length ? `<div class="pj-list">${overline('Teams', teams.length)}${teamRows}</div>` : '<p class="pj-none">No team yet.</p>'}
-      ${peers.size ? `<p class="pj-peers">${ic('chat')}<span>Talks to ${[...peers].map(([p, n]) => `<b>${esc(p)}</b> (${n})`).join(', ')}</span></p>` : ''}</article>`;
+    g._e = e;
+    const html = egoEdgeParts(e, G);
+    if (g._html !== html) { g.innerHTML = html; g._html = html; g._p = [...g.querySelectorAll('path')]; }
+  }
+}
+function egoDraw(svg) {
+  svg._n.forEach((g, id) => { const p = EGO.cur.get(id); if (p) g.setAttribute('transform', `translate(${p.x.toFixed(1)} ${p.y.toFixed(1)})`); });
+  svg._e.forEach((g) => {
+    const p = EGO.cur.get(g._e.a), q = EGO.cur.get(g._e.b); if (!p || !q) return;
+    const d = `M${p.x.toFixed(1)} ${p.y.toFixed(1)}L${q.x.toFixed(1)} ${q.y.toFixed(1)}`;
+    g._p.forEach((x) => x.setAttribute('d', d));
+  });
+}
+/* Moves every node from where it is drawn now to P: 380 ms ease-out, or at once (first draw, resize, reduced motion). */
+function egoAnimate(svg, P, instant) {
+  cancelAnimationFrame(EGO.anim);
+  const from = new Map(EGO.cur); let far = 0;
+  P.forEach((p, id) => { const a = from.get(id); if (a) far = Math.max(far, Math.hypot(a.x - p.x, a.y - p.y)); });
+  if (instant || RM() || far < 0.5) { EGO.cur = new Map(P); egoDraw(svg); return; }
+  const t0 = performance.now(), ease = (t) => 1 - Math.pow(1 - t, 3);
+  const step = (now) => {
+    const k = ease(Math.min(1, (now - t0) / EGO_MS)), cur = new Map();
+    P.forEach((p, id) => { const a = from.get(id) || p; cur.set(id, { x: a.x + (p.x - a.x) * k, y: a.y + (p.y - a.y) * k }); });
+    EGO.cur = cur; egoDraw(svg);
+    if (k < 1) EGO.anim = requestAnimationFrame(step);
   };
-  graph.innerHTML = `<div class="pj-grid">${list.map(card).join('')}</div>`;
+  EGO.anim = requestAnimationFrame(step);
+}
+/* Applies the focus: roles (focus, ring, faded), the move, the trail and hint, and the side panel. */
+function egoApply(instant) {
+  const G = EGO.G, svg = $('#agentGraph svg.tg'); if (!G || !svg) return;
+  if (EGO.focus && !G.nodes.has(EGO.focus)) { EGO.focus = null; EGO.pinned = false; }
+  EGO.trail = EGO.focus ? EGO.trail.filter((id) => G.nodes.has(id) && id !== EGO.focus) : [];
+  const { P, role, nb, ring } = egoLayout(G), f = EGO.focus;
+  Object.assign(EGO, { role, nb, ring });
+  svg.classList.toggle('ego', !!f); svg.classList.toggle('narrow', G.narrow);
+  svg._n.forEach((g, id) => {
+    const r = role.get(id);
+    g.setAttribute('class', g._base + (r === 'focus' ? ' focus' : r === 'n1' ? ' n1' : r === 'out' ? ' ego-out' : ''));
+    g.setAttribute('tabindex', r === 'out' ? '-1' : '0');
+    if (r === 'focus') g.setAttribute('aria-current', 'true'); else g.removeAttribute('aria-current');
+  });
+  const near = (id) => role.get(id) === 'focus' || role.get(id) === 'n1';
+  svg._e.forEach((g) => { const e = g._e; g.setAttribute('class', 'tg-eg' + (!f ? '' : e.a === f || e.b === f ? ' on' : near(e.a) && near(e.b) ? ' mid' : ' off')); });
+  egoHov(EGO.hov);
+  egoAnimate(svg, P, instant);
+  egoChrome(); egoPanels();
+}
+function egoSet(id, walk) {
+  clearTimeout(EGO.dwell);
+  if (id === EGO.focus) return;
+  if (!id) { EGO.trail = []; EGO.pinned = false; }
+  else if (walk && EGO.focus) { const i = EGO.trail.indexOf(id); EGO.trail = i >= 0 ? EGO.trail.slice(0, i) : [...EGO.trail, EGO.focus].slice(-EGO_TRAIL); }
+  else EGO.trail = [];
+  EGO.focus = id; EGO.hov = null; egoApply();
+}
+function egoPin(on) { EGO.pinned = on; egoChrome(); egoPanels(); }
+/* Pointer or keyboard over a node: outline it and light its line to the focus (at rest, all its lines). */
+function egoHov(id) {
+  EGO.hov = id; const svg = $('#agentGraph svg.tg'); if (!svg) return;
+  const f = EGO.focus;
+  svg._n.forEach((g, k) => g.classList.toggle('hov', k === id));
+  svg._e.forEach((g) => { const e = g._e; g.classList.toggle('hl', !!id && (f && id !== f ? (e.a === id && e.b === f) || (e.b === id && e.a === f) : e.a === id || e.b === id)); });
+  $$('[data-tg-go]').forEach((b) => b.classList.toggle('hov', b.dataset.tgGo === id));
+}
+function egoDwell(id) {
+  clearTimeout(EGO.dwell);
+  if (!id || EGO.pinned || id === EGO.focus || EGO.role.get(id) === 'out') return;
+  EGO.dwell = setTimeout(() => { EGO.lock = EGO.px; egoSet(id, true); }, EGO_DWELL);
+}
+function egoBind(svg) {
+  const nodeOf = (t) => t.closest?.('.tg-node');
+  svg.addEventListener('pointermove', (e) => {
+    if (e.pointerType === 'touch') return;
+    EGO.px = { x: e.clientX, y: e.clientY };
+    // After a move the pointer sits over whatever slid under it; wait for a real movement before it can walk again.
+    if (EGO.lock) { if (Math.hypot(e.clientX - EGO.lock.x, e.clientY - EGO.lock.y) < 8) return; EGO.lock = null; }
+    const g = nodeOf(e.target), id = g ? g.dataset.n : null;
+    if (id === EGO.hov) return;
+    egoHov(id); egoDwell(id);
+  });
+  svg.addEventListener('pointerleave', (e) => {
+    clearTimeout(EGO.dwell); EGO.lock = null; egoHov(null);
+    if (e.pointerType !== 'touch' && !EGO.pinned) egoSet(null);
+  });
+  svg.addEventListener('click', (e) => {
+    clearTimeout(EGO.dwell);
+    const g = nodeOf(e.target);
+    if (!g) { if (!e.target.closest('.tg-eg')) egoSet(null); return; }
+    const id = g.dataset.n;
+    if (id === EGO.focus) egoPin(!EGO.pinned); else { EGO.pinned = true; egoSet(id, true); }
+  });
+  svg.addEventListener('focusin', (e) => { const g = nodeOf(e.target); if (g) { egoHov(g.dataset.n); egoDwell(g.dataset.n); } });
+  svg.addEventListener('focusout', (e) => {
+    if (svg.contains(e.relatedTarget)) return;
+    clearTimeout(EGO.dwell); egoHov(null);
+    if (!EGO.pinned && e.relatedTarget) egoSet(null);
+  });
+}
+/* Above the graph: the trail of focused nodes (click one to jump back; the last one pins) and a short hint. */
+function egoChrome() {
+  const bar = $('#tgTrail'), G = EGO.G; if (!bar || !G) return;
+  const f = EGO.focus, lab = (id) => G.nodes.get(id)?.label || id, touch = matchMedia('(hover: none)').matches;
+  const hint = !f ? (touch ? 'Tap a node to focus it' : 'Rest on a node to focus it · click to pin')
+    : touch ? 'Tap the background to go back' : EGO.pinned ? 'Pinned · Esc or a click on the background goes back' : 'Move off the graph or press Esc to go back · click to pin';
+  const keep = bar.contains(document.activeElement) ? document.activeElement.getAttribute('data-tg-crumb') ?? (document.activeElement.hasAttribute('data-tg-pin') ? 'pin' : null) : null;
+  bar.classList.toggle('has', !!f);
+  bar.innerHTML = (f ? `<nav class="tg-crumbs" aria-label="Focus trail">${EGO.trail.map((id, i) => `<button type="button" class="btn sm" data-tg-crumb="${i}">${esc(trunc(lab(id), 18))}</button>${ic('chev', 'sep')}`).join('')}`
+    + `<button type="button" class="btn sm${EGO.pinned ? ' on' : ''}" data-tg-pin aria-pressed="${EGO.pinned}" title="${EGO.pinned ? 'Pinned: click to unpin' : 'Click to pin'}">${esc(trunc(lab(f), 22))}</button></nav>` : '')
+    + `<span class="tg-hint">${esc(hint)}</span>`;
+  if (keep !== null) bar.querySelector(keep === 'pin' ? '[data-tg-pin]' : `[data-tg-crumb="${keep}"]`)?.focus();
+}
+/* The side panel (desktop) and the list under the graph (phones) show the focused node's connections by kind. */
+function egoPanelHtml() {
+  const G = EGO.G, M = G.M, f = EGO.focus, n = G.nodes.get(f), nb = EGO.nb;
+  const lead = (x) => (x.kind === 'agent' ? `<span class="av lg">${esc(initials(x.label))}<i class="st${M.live.has(x.id) ? ' on' : ''}"></i></span>` : `<span class="av lg">${ic(x.kind === 'team' ? 'team' : 'chat')}</span>`);
+  let meta, open;
+  if (n.kind === 'agent') {
+    const st = M.act.get(f);
+    meta = [n.a.role || 'No role', M.live.has(f) ? 'live' : 'offline', st.last ? `last call ${ago(st.last)} ago` : ''].filter(Boolean).join(' · ');
+    open = `<button type="button" class="btn sm pri" data-ses="${esc(f)}">${ic('user')}Open agent</button>`;
+  } else if (n.kind === 'team') {
+    meta = `${cap(n.t.status)} · ${n.t.members} members · ${tasksLabel(n.t.progress || {})}`;
+    open = `<button type="button" class="btn sm pri" data-team="${esc(n.t.id)}">${ic('team')}Open team</button>`;
+  } else {
+    meta = 'Group chat';
+    open = `<button type="button" class="btn sm pri" data-room="${esc(n.room)}">${ic('chat')}Open chat</button>`;
+  }
+  const rel = (id, e) => {
+    const x = G.nodes.get(id);
+    if (e.kind === 'team') return x.kind === 'team' ? `${cap(x.t.status)}${e.last ? ' · team activity ' + ago(e.last) + ' ago' : ''}` : `${M.live.has(id) ? 'Live' : 'Offline'}${e.last ? ' · team activity ' + ago(e.last) + ' ago' : ''}`;
+    if (e.kind === 'link') return `${linkKindLabel(e.link.kind)} · no messages in this window`;
+    return `${e.count} message${e.count === 1 ? '' : 's'} · last ${ago(e.last)} ago`;
+  };
+  const by = { team: [], msg: [], room: [], link: [] };
+  EGO.ring.forEach((id) => by[nb.get(id).kind].push(id));
+  const title = { team: n.kind === 'agent' ? 'Teams' : 'Members', msg: 'Messages', room: n.kind === 'room' ? 'Members' : 'Group chats', link: 'Links' };
+  const grp = (k) => (by[k].length ? overline(title[k], by[k].length) + by[k].map((id) => row({ lead: lead(G.nodes.get(id)), title: G.nodes.get(id).label, meta: rel(id, nb.get(id)), attrs: { 'data-tg-go': id, title: 'Walk to ' + G.nodes.get(id).label } })).join('') : '');
+  const body = ['team', 'msg', 'room', 'link'].map(grp).join('');
+  return `<div class="tg-ego"><div class="tg-ego-h">${lead(n)}<div class="tg-ego-id"><h4>${esc(n.label)}</h4><p>${esc(meta)}</p></div></div>`
+    + `<div class="tg-ego-act"><button type="button" class="btn sm${EGO.pinned ? ' on' : ''}" data-tg-pin aria-pressed="${EGO.pinned}">${EGO.pinned ? 'Unpin' : 'Pin'}</button>${open}</div>`
+    + (body || none('link', 'No connections in this window')) + '</div>';
+}
+function egoPanels() {
+  const G = EGO.G; if (!G) return;
+  if (!EGO.focus) { renderTopoFeed(G.M, EGO.only); renderTgRank(G.M); return; }
+  const html = egoPanelHtml();
+  for (const box of [$('#topoFeed'), $('#tgRank')]) {
+    if (!box) continue;
+    // Keep keyboard focus on the same control across a redraw.
+    const a = box.contains(document.activeElement) ? document.activeElement : null, sel = a?.dataset.tgGo ? `[data-tg-go="${CSS.escape(a.dataset.tgGo)}"]` : a?.hasAttribute('data-tg-pin') ? '[data-tg-pin]' : a?.dataset.ses ? '[data-ses]' : null;
+    box.innerHTML = html;
+    if (sel) box.querySelector(sel)?.focus();
+  }
+  egoHov(EGO.hov);
+}
+function egoPanelBind(box) {
+  if (!box) return;
+  box.addEventListener('click', (e) => {
+    if (!EGO.focus) return;
+    if (e.target.closest('[data-tg-pin]')) { e.stopPropagation(); egoPin(!EGO.pinned); return; }
+    const b = e.target.closest('[data-tg-go]'); if (b) { e.stopPropagation(); EGO.pinned = true; egoSet(b.dataset.tgGo, true); }
+  });
+  box.addEventListener('pointerover', (e) => { if (EGO.focus) egoHov(e.target.closest('[data-tg-go]')?.dataset.tgGo || null); });
 }
 function renderAgentGraph() {
   const graph = $('#agentGraph');
-  if (!graph || graph.contains(document.activeElement)) return;
+  if (!graph) return;
   syncTopoBar();
-  const M = topoModel(), teams = S.teams;
-  if (!M.agents.length) { graph.innerHTML = none('ses', 'No agents'); renderTopoFeed(M, null); renderTgRank(M); return; }
-
-  const scope = topoScope(M), { act, live } = M, edges = scope.edges;
-  const agents = M.agents.filter((a) => scope.ids.has(a.id));
-  const W = Math.max(graph.clientWidth, 240), H = Math.round(Math.min(Math.max(W * 0.62, 380), 620)), narrow = W < 500;
-  const cx = W / 2, cy = H / 2, R = narrow ? Math.max(48, Math.min(W / 2 - 44, H / 2 - 64)) : Math.min(W, H) / 2 - 64, r = R * 0.42;
-  // Order agents by their first team so members sit next to each other and edges cross less.
-  const firstTeam = new Map(); teams.forEach((t, i) => (t.agent_ids || []).forEach((id) => { if (!firstTeam.has(id)) firstTeam.set(id, i); }));
-  const first = (a) => firstTeam.get(a.id) ?? teams.length;
-  const ordered = agents.filter((a) => a.id !== scope.center).sort((x, y) => scope.ext.has(x.id) - scope.ext.has(y.id) || first(x) - first(y) || x.label.localeCompare(y.label));
-  const P = new Map();
-  if (scope.center) P.set(scope.center, { x: cx, y: cy, ang: Math.PI / 2 });
-  ordered.forEach((a, i) => { const ang = -Math.PI / 2 + (2 * Math.PI * i) / ordered.length; P.set(a.id, { x: cx + R * Math.cos(ang), y: cy + R * Math.sin(ang), ang }); });
-  const used = new Set(edges.map((e) => e.b));
-  const hubs = [...teams.filter((t) => used.has('team:' + t.id)).map((t) => ['team:' + t.id, t]), ...[...M.rooms].filter(([id]) => used.has('room:' + id)).map(([id, name]) => ['room:' + id, { name }])];
-  hubs.forEach(([id], i) => {
-    if (hubs.length === 1 && !scope.center) { P.set(id, { x: cx, y: cy }); return; }
-    // Place each hub toward the middle of its members, falling back to an inner ring.
-    const mem = edges.filter((e) => e.b === id).map((e) => P.get(e.a)).filter(Boolean);
-    const ang = -Math.PI / 2 + (2 * Math.PI * (i + 0.5)) / hubs.length;
-    const mx = mem.length ? mem.reduce((s, p) => s + p.x, 0) / mem.length : cx + r * Math.cos(ang), my = mem.length ? mem.reduce((s, p) => s + p.y, 0) / mem.length : cy + r * Math.sin(ang);
-    const k = scope.center ? 0.6 : 0.35, off = scope.center ? r * 0.6 : 18;
-    P.set(id, { x: cx + (mx - cx) * k + Math.cos(ang) * off, y: cy + (my - cy) * k + Math.sin(ang) * off });
-  });
-  const path = (e) => {
-    const p = P.get(e.a), q = P.get(e.b); if (!p || !q) return '';
-    if (e.kind === 'team' || e.kind === 'room' || e.a === scope.center || e.b === scope.center) return `M${p.x.toFixed(1)} ${p.y.toFixed(1)}L${q.x.toFixed(1)} ${q.y.toFixed(1)}`;
-    const mx = (p.x + q.x) / 2, my = (p.y + q.y) / 2, k = e.kind === 'link' ? 0.35 : 0.55;
-    return `M${p.x.toFixed(1)} ${p.y.toFixed(1)}Q${(mx + (cx - mx) * k).toFixed(1)} ${(my + (cy - my) * k).toFixed(1)} ${q.x.toFixed(1)} ${q.y.toFixed(1)}`;
-  };
-  const nameOf = (id) => (id.startsWith('team:') ? teams.find((t) => 'team:' + t.id === id)?.name : id.startsWith('room:') ? M.rooms.get(id.slice(5)) : agLabel(id));
-  const tip = (e) => e.kind === 'team' ? `${nameOf(e.a)} · member of ${nameOf(e.b)}${e.last ? ' · team activity ' + ago(e.last) + ' ago' : ''}`
-    : e.kind === 'link' ? `${nameOf(e.a)} ↔ ${nameOf(e.b)} · ${e.link.kind} link${e.link.grants_messaging ? ' · messaging allowed' : ''} · no messages in window`
-    : `${nameOf(e.a)} ${e.kind === 'room' ? '→' : '↔'} ${nameOf(e.b)} · ${e.count} message${e.count === 1 ? '' : 's'} · last ${ago(e.last)} ago`;
-  const edgeH = edges.map((e) => { const d = path(e); if (!d) return ''; const rc = e.kind === 'link' ? 'old' : recency(e.last);
-    return `<g class="tg-eg" data-a="${esc(e.a)}" data-b="${esc(e.b)}"${e.room ? ` data-room="${esc(e.room)}"` : e.team ? ` data-team="${esc(e.team)}"` : ''}><title>${esc(tip(e))}</title>
-      <path class="tg-e k-${e.kind} r-${rc}" d="${d}" style="stroke-width:${edgeWidth(e)}"/><path class="tg-hit" d="${d}"/></g>`; }).join('');
-  const lblPos = (p, id) => {
-    // Narrow cards put the label under the node, centred, so it has the most room on both sides.
-    if (narrow) return { x: p.x, y: p.y + (id === scope.center ? 40 : 34), anchor: 'middle' };
-    if (id === scope.center) return { x: p.x, y: p.y + 40, anchor: 'middle' };
-    const c = Math.cos(p.ang), s = Math.sin(p.ang), d = 30; return { x: p.x + c * d, y: p.y + s * d + (s > 0.3 ? 8 : s < -0.3 ? -14 : -3), anchor: Math.abs(c) < 0.3 ? 'middle' : c > 0 ? 'start' : 'end' };
-  };
-  // Drill levels click into the agent; elsewhere a click opens the agent page. Outside agents open their own project.
-  const click = (a) => (scope.ext.has(a.id) ? `data-tg-proj="${esc(M.proj.get(a.id))}"` : scope.drill ? `data-tg-agent="${esc(a.id)}"` : `data-ses="${esc(a.id)}"`);
-  const agentH = [...(scope.center ? [M.agents.find((a) => a.id === scope.center)] : []), ...ordered].map((a) => {
-    const p = P.get(a.id), st = act.get(a.id), rc = recency(st.last), l = lblPos(p, a.id), on = live.has(a.id), ext = scope.ext.has(a.id), big = a.id === scope.center;
-    const sub = ext ? M.proj.get(a.id) : st.last ? `${st.tool} · ${ago(st.last)}` : on ? 'connected' : 'offline';
-    const room = l.anchor === 'start' ? W - l.x - 4 : l.anchor === 'end' ? l.x - 4 : 2 * Math.min(l.x, W - l.x) - 8, fit = (t, cw, max) => trunc(t, Math.min(max, Math.max(5, Math.floor(room / cw))));
-    const rr = big ? 26 : 19;
-    return `<g class="tg-node tg-agent${on ? ' live' : ''}${ext ? ' ext' : ''}${big ? ' center' : ''} r-${rc}" data-n="${esc(a.id)}" ${click(a)} tabindex="0" role="button" aria-label="${esc(a.label)}">
-      <title>${esc(a.label)}${a.role ? ' · ' + esc(a.role) : ''} · ${on ? 'live' : 'offline'}${ext ? ' · project ' + esc(M.proj.get(a.id)) + ' · click to open that project' : ''}${st.last ? ' · last call ' + esc(st.tool) + ' ' + ago(st.last) + ' ago' : ''}${st.denied ? ' · ' + st.denied + ' denied in 5m' : ''}${scope.drill ? ' · click to focus' : ''}</title>
-      ${rc === 'act' && !ext ? `<circle class="halo" cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="${rr + 1}"/>` : ''}
-      <circle class="core" cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="${rr}"/>
-      <text class="ini" x="${p.x.toFixed(1)}" y="${p.y.toFixed(1)}" text-anchor="middle" dominant-baseline="central">${esc(initials(a.label))}</text>
-      ${st.denied && !ext ? `<g class="tg-den"><circle cx="${(p.x + rr * 0.8).toFixed(1)}" cy="${(p.y - rr * 0.8).toFixed(1)}" r="8"/><text x="${(p.x + rr * 0.8).toFixed(1)}" y="${(p.y - rr * 0.8).toFixed(1)}" text-anchor="middle" dominant-baseline="central">${st.denied}</text></g>` : ''}
-      <text class="tg-lbl" x="${l.x.toFixed(1)}" y="${l.y.toFixed(1)}" text-anchor="${l.anchor}">${esc(fit(a.label, 6.8, 24))}</text>
-      <text class="tg-sub${!ext && st.result && st.result !== 'ok' && rc !== 'old' ? ' bad' : ''}" x="${l.x.toFixed(1)}" y="${(l.y + 14).toFixed(1)}" text-anchor="${l.anchor}">${esc(fit(sub, 7.4, 30))}</text></g>`;
-  }).join('');
-  const hubH = hubs.map(([id, t]) => {
-    const p = P.get(id), isTeam = id.startsWith('team:'), busy = edges.some((e) => e.b === id && recency(e.last) === 'act'), hubRoom = 2 * Math.min(p.x, W - p.x) - 8, hubFit = (t) => trunc(t, Math.min(22, Math.max(5, Math.floor(hubRoom / 6.8))));
-    return `<g class="tg-node ${isTeam ? 'tg-team' : 'tg-room'}${busy ? ' busy' : ''}" data-n="${esc(id)}"${isTeam ? ` data-team="${esc(t.id)}"` : ` data-room="${esc(id.slice(5))}"`} tabindex="0" role="button" aria-label="${esc(t.name)}">
-      <title>${esc(t.name)}${isTeam ? ' · ' + esc(t.status) + ' · ' + t.members + ' members · ' + tasksLabel(t.progress) : ' · group chat'}</title>
-      <rect x="${(p.x - 21).toFixed(1)}" y="${(p.y - 21).toFixed(1)}" width="42" height="42" rx="12"/>
-      <use href="#i-${isTeam ? 'team' : 'chat'}" x="${(p.x - 11).toFixed(1)}" y="${(p.y - 11).toFixed(1)}" width="22" height="22"/>
-      <text class="tg-lbl" x="${p.x.toFixed(1)}" y="${(p.y + 37).toFixed(1)}" text-anchor="middle">${esc(hubFit(t.name))}</text>
-      ${isTeam ? `<rect class="tg-pb" x="${(p.x - 26).toFixed(1)}" y="${(p.y + 46).toFixed(1)}" width="52" height="5" rx="2.5"/><rect class="tg-pbf ${TSTC[t.status] || ''}" x="${(p.x - 26).toFixed(1)}" y="${(p.y + 46).toFixed(1)}" width="${(52 * (t.progress?.pct || 0) / 100).toFixed(1)}" height="5" rx="2.5"/><text class="tg-sub" x="${(p.x + 31).toFixed(1)}" y="${(p.y + 51).toFixed(1)}">${t.progress?.pct || 0}%</text>` : ''}</g>`;
-  }).join('');
-  // Crop the drawing to its nodes and labels so the card is only as tall as the content.
-  const ys = [];
-  P.forEach((p, id) => { if (id.includes(':')) { ys.push(p.y - 24, p.y + 56); return; } const l = lblPos(p, id); ys.push(p.y - 30, l.y - 14, l.y + 18); });
-  const y0 = Math.floor(Math.min(...ys) - 8), y1 = Math.ceil(Math.max(...ys) + 8);
-  graph.innerHTML = `<svg class="tg" viewBox="0 ${y0} ${W} ${y1 - y0}" role="group" aria-label="Agent topology">${edgeH}${hubH}${agentH}</svg>`;
-  bindGraphHover(graph.querySelector('svg'));
-  renderTopoFeed(M, TG_S.focus ? new Set([...scope.ids].filter((id) => !scope.ext.has(id))) : null);
-  renderTgRank(M);
+  const M = topoModel();
+  if (!M.agents.length) { graph.innerHTML = none('ses', 'No agents'); EGO.G = null; renderTopoFeed(M, null); renderTgRank(M); return; }
+  const scope = topoScope(M), W = Math.max(graph.clientWidth, 240), narrow = W < 560;
+  const H = narrow ? Math.round(Math.min(W * 1.9, 760)) : Math.round(Math.min(Math.max(W * 0.7, 480), 760));
+  const fresh = !graph.querySelector('svg.tg'), svg = egoSvg(graph), resized = EGO.W !== W;
+  EGO.W = W; EGO.G = topoGraph(M, scope, W, H);
+  EGO.only = TG_S.focus ? new Set([...scope.ids].filter((id) => !scope.ext.has(id))) : null;
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+  egoSync(svg, EGO.G);
+  egoApply(fresh || resized);
   fitTopoFeed(graph);
 }
 /* Phones: a ranked list under the graph ("Most active · last 24 h"), because a node diagram is a poor way to read who is busy. */
@@ -1203,25 +1360,25 @@ function renderTopoFeed(M, only) {
     <h5 class="subh">Last 5 minutes</h5>` + (L.length ? L.map((i) => { const aid = keyAgent.get(i.credential_id);
       return `<button class="fe" data-ses="${esc(aid)}"><span class="dot${recency(i.created_at) === 'act' ? ' pulse' : ''} ${i.result === 'ok' ? 'ok' : 'bad'}"></span><span class="fe-main"><b>${esc(agLabel(aid))}</b><span class="mono">${esc(i.tool)}${i.result !== 'ok' ? ' · ' + esc(i.result) : ''}</span></span><span class="mono fe-age">${ago(i.created_at)}</span></button>`; }).join('') : none('pulse', 'Quiet'));
 }
-/* Level switch and breadcrumb live above the graph; they follow TG_S on every render. */
+/* The project breadcrumb (Teams → Activity) lives above the graph; it follows TG_S on every render. */
 function syncTopoBar() {
   const crumb = $('#tgCrumb'); if (!crumb) return;
   const f = TG_S.focus; crumb.hidden = !f; if (!f) { crumb.innerHTML = ''; return; }
   const up = 'Everyone';
-  crumb.innerHTML = `<button class="btn sm" data-tg-up>${ic('back')}${up}</button>${ic('chev', 'sep')}<b>${esc(f.kind === 'agent' ? agLabel(f.id) : f.id)}</b>${f.kind === 'agent' ? `<button class="btn sm" data-ses="${esc(f.id)}">${ic('user')}Open agent</button>` : ''}`;
+  crumb.innerHTML = `<button class="btn sm" data-tg-up>${ic('back')}${up}</button>${ic('chev', 'sep')}<b>${esc(f.id)}</b>`;
 }
 function topoFocus(f) {
   setRoute('topology', f ? f.kind + ':' + f.id : '');
-  // The graph skips redraws while it holds focus; a level change must redraw, so release focus first.
-  if ($('#agentGraph')?.contains(document.activeElement)) document.activeElement.blur();
-  TG_S.focus = f; TG_S.hover = null; renderAgentGraph(); window.scrollTo(0, 0);
+  EGO.focus = null; EGO.pinned = false; EGO.trail = [];
+  TG_S.focus = f; renderAgentGraph(); window.scrollTo(0, 0);
 }
 const TG_LAYERS = [['team', 'Teams', 'team'], ['msg', 'Messages', 'chat'], ['link', 'Links', 'link']];
 const TG_LEGEND = '<span><i class="tg-sw is-act"></i>Active 30s</span><span><i class="tg-sw is-msg"></i>Messages</span><span><i class="tg-sw is-team"></i>Team</span><span><i class="tg-sw is-link"></i>Link</span><span><i class="tg-sw is-den"></i>Denied 5m</span>';
 VIEWS.topology = async (arg) => {
-  TG_S.level = 'all';
-  TG_S.focus = null;
-  if (typeof arg === 'string' && /^(project|agent):/.test(arg)) { const i = arg.indexOf(':'); TG_S.focus = { kind: arg.slice(0, i), id: arg.slice(i + 1) }; }
+  TG_S.focus = null; egoReset();
+  // project:<name> scopes the graph to a project; agent:<id> opens with that agent focused and pinned.
+  if (typeof arg === 'string' && arg.startsWith('project:')) TG_S.focus = { kind: 'project', id: arg.slice(8) };
+  else if (typeof arg === 'string' && arg.startsWith('agent:')) Object.assign(EGO, { focus: arg.slice(6), pinned: true });
   S.convs = (await api('/conversations').catch(() => ({ conversations: S.convs }))).conversations;
   return {
     t: `${ic('pulse')}Activity <span class="n">${S.agents.filter((a) => a.status !== 'archived').length}</span>`,
@@ -1246,13 +1403,7 @@ VIEWS.topology = async (arg) => {
         });
       };
       $('#tgCrumb').onclick = (e) => { if (e.target.closest('[data-tg-up]')) topoFocus(null); };
-      // Drill-down clicks are handled here, before the page-wide handler would open an agent.
-      $('#agentGraph').onkeydown = (e) => { if (e.key === 'Enter' && e.target.matches('[data-tg-proj]')) { e.preventDefault(); topoFocus({ kind: 'project', id: e.target.dataset.tgProj }); } };
-      $('#agentGraph').onclick = (e) => {
-        const p = e.target.closest('[data-tg-proj]'), a = e.target.closest('[data-tg-agent]');
-        if (p) { e.stopPropagation(); topoFocus({ kind: 'project', id: p.dataset.tgProj }); }
-        else if (a) { e.stopPropagation(); topoFocus({ kind: 'agent', id: a.dataset.tgAgent }); }
-      };
+      egoPanelBind($('#topoFeed')); egoPanelBind($('#tgRank'));
       renderAgentGraph();
     },
   };
@@ -1499,14 +1650,178 @@ VIEWS.pcs = async () => {
   };
 };
 
-VIEWS.teams = async () => {
-  S.convs = (await api('/conversations').catch(() => ({ conversations: S.convs }))).conversations;
-  const M = topoModel();
+/* Work → Teams: one grouped table. Projects are folding group headers, teams are 56 px rows with the same columns
+   everywhere (status, progress, needs attention, members, last activity), and agents in no team form the last group.
+   Filters live in the route (#teams/s=running&n=1&o=act&q=…) so the background redraw and Back keep them. */
+const TM_ST = [['', 'All'], ['running', 'Running'], ['draft', 'Draft'], ['paused', 'Paused'], ['done', 'Done']];
+const TM_SORT = [['', 'Sort: Needs attention'], ['act', 'Sort: Last activity'], ['name', 'Sort: Name']];
+const TM_POOL = 'Unassigned agents';
+function tmArgs(a = '') {
+  a = String(a ?? '');
+  const f = { s: '', n: '', o: '', q: '' };
+  if (a === '') return f;
+  if (!a.includes('=')) return null;
+  const p = new URLSearchParams(a);
+  if ([...p.keys()].some((k) => !(k in f))) return null;
+  const x = { s: p.get('s') || '', n: p.get('n') === '1' ? '1' : '', o: p.get('o') || '', q: (p.get('q') || '').slice(0, 100) };
+  return TM_ST.some(([k]) => k === x.s) && TM_SORT.some(([k]) => k === x.o) ? x : null;
+}
+const tmArgStr = (f) => { const p = new URLSearchParams(); for (const k of ['s', 'n', 'o', 'q']) if (f[k]) p.set(k, f[k]); return p.toString(); };
+/* Folded project groups survive the background redraw (they are not in the route). */
+const TM_UI = { folded: new Set() };
+/* What needs the operator or the coordinator, per team: questions and approvals waiting on you, blocked tasks, stalled members. */
+function tmAttn(t) {
+  const asks = (S.dec || []).filter((d) => d.team_id === t.id && d.status === 'open').length + (t.approvals || 0);
+  return { asks, blocked: t.counts?.blocked || 0, stalled: t.stalled || 0 };
+}
+const tmScore = (a) => a.asks * 4 + a.blocked * 2 + a.stalled;
+/* A team belongs to its lead's project, else to the project most of its members are in. */
+function tmProject(t) {
+  const lead = AG(t.lead_id)?.project; if (lead) return lead;
+  const n = new Map(); for (const id of t.agent_ids || []) { const p = AG(id)?.project; if (p) n.set(p, (n.get(p) || 0) + 1); }
+  return [...n].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0]?.[0] || NO_PROJECT;
+}
+function tmModel(f) {
+  const M = topoModel(), q = f.q.toLowerCase(), inTeam = new Set(S.teams.flatMap((t) => t.agent_ids || []));
+  const teams = S.teams.map((t) => {
+    const mem = (t.agent_ids || []).map((id) => AG(id)).filter(Boolean);
+    return { t, proj: tmProject(t), mem, lead: t.lead_id ? agLabel(t.lead_id) : '', attn: tmAttn(t), last: t.last_activity_at || t.updated_at || 0 };
+  });
+  const hit = (x) => !q || [x.t.name, x.proj, x.lead, ...x.mem.map((a) => a.label)].some((s) => String(s || '').toLowerCase().includes(q));
+  const counts = Object.fromEntries(TM_ST.map(([k]) => [k, teams.filter((x) => hit(x) && (!k || x.t.status === k)).length]));
+  const needN = teams.filter((x) => hit(x) && x.attn.asks).length;
+  const shown = teams.filter((x) => hit(x) && (!f.s || x.t.status === f.s) && (!f.n || x.attn.asks));
+  const seen = (a) => Math.max(a.last_seen_at || 0, M.act.get(a.id)?.last || 0);
+  const pool = f.s || f.n ? [] : M.agents.filter((a) => !inTeam.has(a.id) && (!q || [a.label, a.role, a.project].some((s) => String(s || '').toLowerCase().includes(q))))
+    .map((a) => ({ a, live: M.live.has(a.id), last: seen(a) }));
+  return { M, teams, shown, counts, needN, pool };
+}
+const tmSorter = (o) => ({
+  act: (a, b) => b.last - a.last,
+  name: (a, b) => a.t.name.localeCompare(b.t.name),
+  '': (a, b) => tmScore(b.attn) - tmScore(a.attn) || b.last - a.last,
+}[o]);
+function tmGroups(f, D) {
+  const by = new Map(); for (const x of D.shown) { if (!by.has(x.proj)) by.set(x.proj, []); by.get(x.proj).push(x); }
+  const G = [...by].map(([name, L]) => ({ name, L: L.sort(tmSorter(f.o)), all: D.teams.filter((x) => x.proj === name) }));
+  const key = { act: (g) => -Math.max(...g.L.map((x) => x.last)), name: () => 0, '': (g) => -Math.max(...g.L.map((x) => tmScore(x.attn))) }[f.o];
+  return G.sort((a, b) => (a.name === NO_PROJECT) - (b.name === NO_PROJECT) || key(a) - key(b) || (f.o === '' ? Math.max(...b.L.map((x) => x.last)) - Math.max(...a.L.map((x) => x.last)) : 0) || a.name.localeCompare(b.name));
+}
+const tmAvatars = (labels) => `<span class="tm-avs" title="${esc(labels.join(', '))}">${labels.slice(0, 4).map((n) => `<span class="av">${esc(initials(n))}</span>`).join('')}${labels.length > 4 ? `<span class="av more">+${labels.length - 4}</span>` : ''}</span>`;
+const tmPlural = (n, one, many = one + 's') => `${n} ${n === 1 ? one : many}`;
+/* One team: name and lead · status · progress · needs attention · members · last activity · chevron. On phones the
+   cells after the status fold into the second line (lead · progress · what needs attention), and the time stays right. */
+function tmRow(x) {
+  const { t, attn } = x, done = t.progress?.done || 0, tot = t.progress?.total || 0, pct = t.progress?.pct || 0;
+  const at = [attn.asks ? pill(`${attn.asks} waiting on you`, 'bad') : '', attn.blocked ? pill(`${attn.blocked} blocked`, 'warn') : '', attn.stalled ? pill(`${attn.stalled} stalled`, 'warn') : ''].join('');
+  const atTxt = [attn.asks ? `<span class="bad-t">${attn.asks} waiting on you</span>` : '', attn.blocked ? `<span class="warn-t">${attn.blocked} blocked</span>` : '', attn.stalled ? `<span class="warn-t">${attn.stalled} stalled</span>` : ''].filter(Boolean);
+  const lead = x.lead ? `Lead: ${esc(x.lead)}` : 'No lead';
+  const mMeta = [x.lead ? esc(x.lead) : '', tot ? `${done}/${tot}` : 'No tasks', ...atTxt].filter(Boolean).join(' · ');
+  return `<div class="tm-row" role="row" tabindex="0" data-team="${esc(t.id)}" aria-label="${esc(t.name)}">
+    <span class="tm-c tm-name" role="cell"><b>${esc(t.name)}</b><span class="meta"><span class="only-d">${lead}</span><span class="only-m">${mMeta}</span></span></span>
+    <span class="tm-c tm-st" role="cell">${pill(cap(t.status), TONE[t.status] || 'idle')}</span>
+    <span class="tm-c tm-prog" role="cell"><span class="pb" role="progressbar" aria-label="Task progress" aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100"><i class="s-${esc(t.status)}" style="width:${pct}%"></i></span><span>${tot ? `${done}/${tot}` : '–'}</span></span>
+    <span class="tm-c tm-attn" role="cell"${atTxt.length ? ` title="${esc(atTxt.map((h) => h.replace(/<[^>]+>/g, '')).join(', '))}"` : ''}>${at || '<span class="faint">–</span>'}</span>
+    <span class="tm-c tm-mem" role="cell">${tmAvatars(x.mem.map((a) => a.label))}</span>
+    <span class="tm-c tm-when" role="cell">${x.last ? ago(x.last) : '–'}</span>
+    <span class="tm-c tm-chev" role="cell" aria-hidden="true">${ic('chev', 'chev')}</span></div>`;
+}
+/* An agent in no team, in the same columns: name and role · Live when logged in · members column shows the agent itself. */
+function tmPoolRow(p) {
+  const { a } = p, meta = [a.role || 'No role', a.project || ''].filter(Boolean).map(esc).join(' · ');
+  return `<div class="tm-row" role="row" tabindex="0" data-ses="${esc(a.id)}" aria-label="${esc(a.label)}">
+    <span class="tm-c tm-name" role="cell"><b>${esc(a.label)}</b><span class="meta">${meta}</span></span>
+    <span class="tm-c tm-st" role="cell">${p.live ? pill('Live', 'ok') : ''}</span>
+    <span class="tm-c tm-prog" role="cell"><span class="faint">–</span></span>
+    <span class="tm-c tm-attn" role="cell"><span class="faint">–</span></span>
+    <span class="tm-c tm-mem" role="cell">${tmAvatars([a.label])}</span>
+    <span class="tm-c tm-when" role="cell" title="${p.last ? 'Last seen' : 'Never signed in'}">${p.last ? ago(p.last) : '–'}</span>
+    <span class="tm-c tm-chev" role="cell" aria-hidden="true">${ic('chev', 'chev')}</span></div>`;
+}
+/* A project group header: fold button with the name, then teams · agents · last activity, the denied pill, Activity. */
+function tmGroupHead(g, M) {
+  const now = Date.now(), open = !TM_UI.folded.has(g.name);
+  const ids = new Set(g.all.flatMap((x) => x.t.agent_ids || [])), last = Math.max(0, ...g.all.map((x) => x.last));
+  const den = S.inv.filter((i) => i.result === 'denied' && !i.now_allowed && now - i.created_at < 3600_000 && ids.has(i.agent_id || keyAgentOf(i.credential_id))).sort((a, b) => b.created_at - a.created_at);
+  const denWho = [...new Set(den.map((i) => i.agent_id || keyAgentOf(i.credential_id)))];
+  const denTip = den.length ? `${den.length} denied in the last hour. Latest: ${agLabel(denWho[0])}, ${den[0].tool}${denTarget(den[0]) ? ' on ' + denTarget(den[0]) : ''}, ${ago(den[0].created_at)} ago. Open them in Audit.` : '';
+  const denPill = den.length ? `<button type="button" class="pill bad pill-btn" data-go="log" data-arg="calls|${denWho.length === 1 ? 'agent:' + esc(denWho[0]) : ''}|denied" title="${esc(denTip)}" aria-label="${esc(denTip)}">${den.length} denied</button>` : '';
+  const facts = [tmPlural(g.all.length, 'team'), tmPlural(ids.size, 'agent'), last ? `active ${ago(last)} ago` : 'no activity yet'].join(' · ');
+  const act = g.name === NO_PROJECT ? '' : `<button type="button" class="btn sm only-d" data-go="topology" data-arg="project:${esc(g.name)}" title="Who talks to whom in this project">${ic('pulse')}Activity</button>`;
+  return `<div class="tm-gh"><button type="button" class="tm-fold" data-tmgrp="${esc(g.name)}" aria-expanded="${open}">${ic('chev', 'chev')}<span class="tm-gn">${esc(g.name)}</span></button><span class="meta tm-gf">${facts}</span>${denPill}${act}</div>`;
+}
+function tmTableHtml(f, D) {
+  const head = `<div class="tm-row tm-head only-d" role="row"><span role="columnheader">Team</span><span role="columnheader">Status</span><span role="columnheader">Progress</span><span role="columnheader">Needs attention</span><span role="columnheader" class="tm-mem">Members</span><span role="columnheader" class="tm-when">Activity</span><span></span></div>`;
+  const G = tmGroups(f, D);
+  let h = G.map((g) => { const open = !TM_UI.folded.has(g.name);
+    return `<div class="tm-grp" role="rowgroup" aria-label="${esc(g.name)}">${tmGroupHead(g, D.M)}${open ? g.L.map(tmRow).join('') : ''}</div>`; }).join('');
+  if (D.pool.length) {
+    const open = !TM_UI.folded.has(TM_POOL), L = D.pool.slice().sort(f.o === 'name' ? (a, b) => a.a.label.localeCompare(b.a.label) : (a, b) => b.live - a.live || b.last - a.last);
+    h += `<div class="tm-grp" role="rowgroup" aria-label="${TM_POOL}"><div class="tm-gh"><button type="button" class="tm-fold" data-tmgrp="${TM_POOL}" aria-expanded="${open}">${ic('chev', 'chev')}<span class="tm-gn">${TM_POOL}</span></button><span class="meta tm-gf">${tmPlural(D.pool.length, 'agent')} · ${D.pool.filter((p) => p.live).length} live</span>${info('Agents in no team. Add one to a team to give it work.')}</div>${open ? L.map(tmPoolRow).join('') : ''}</div>`;
+  }
+  if (!h) return none('team', D.teams.length || D.M.agents.length ? 'No team matches these filters' : 'No teams yet');
+  return `<div class="tm-tbl" role="table" aria-label="Teams">${head}${h}</div>`;
+}
+/* Toolbar: search, status with counts, Needs me and sort inline from 768 px; on phones a filter button opens them in a sheet. */
+function tmTools(f, D) {
+  const st =`<div class="seg fit" role="group" aria-label="Status">${TM_ST.map(([k, l]) => `<button type="button" data-tms="${k}" class="${k === f.s ? 'on' : ''}" aria-pressed="${k === f.s}">${l} <span class="faint">${D.counts[k]}</span></button>`).join('')}</div>`;
+  const need = `<button type="button" class="btn${f.n ? ' on' : ''}" id="tmNeed" aria-pressed="${!!f.n}">Needs me <span class="fcount">${D.needN}</span></button>`;
+  const sort = `<select class="sel" id="tmSort" aria-label="Sort">${TM_SORT.map(([k, l]) => `<option value="${k}"${k === f.o ? ' selected' : ''}>${l}</option>`).join('')}</select>`;
+  return st + need + sort;
+}
+function tmToolbar(f, D) {
+  const n = ['s', 'n', 'o', 'q'].filter((k) => f[k]).length;
+  return vtools(`<div class="srch only-d tm-q">${ic('search')}<input class="inp" id="tmQ" type="search" placeholder="Search teams, agents, projects" aria-label="Search teams" value="${esc(f.q)}" autocomplete="off"></div>`
+    + `<span class="only-d tm-tools" id="tmTools">${tmTools(f, D)}</span><span class="only-m">${filterBtn('tmMore', n)}</span>`);
+}
+/* Redraw in place: the list and the toolbar counts, keeping the page scroll; replace the route (no history entry per keystroke). */
+function tmSet(patch) {
+  const f = { ...(tmArgs(DR.arg) || tmArgs('')), ...patch };
+  DR.arg = tmArgStr(f); setRoute('teams', DR.arg, false);
+  const D = tmModel(f), box = $('#tmList'), tools = $('#tmTools');
+  if (box) { box.innerHTML = tmTableHtml(f, D); tipIcons(box); }
+  // Redraw the chips (their counts follow the search) but not the search field, so typing keeps its focus.
+  if (tools) { const foc = tools.contains(document.activeElement) && focusSel(); tools.innerHTML = tmTools(f, D); tmBindBar(); if (foc) $(foc)?.focus(); }
+  setFilterCount('tmMore', ['s', 'n', 'o', 'q'].filter((k) => f[k]).length);
+  return f;
+}
+function tmBindBar() {
+  const q = $('#tmQ'); if (q) onSearch(q, (v) => { tmSet({ q: v }); });
+  $$('[data-tms]').forEach((b) => (b.onclick = () => tmSet({ s: b.dataset.tms })));
+  const nd = $('#tmNeed'); if (nd) nd.onclick = () => tmSet({ n: (tmArgs(DR.arg) || {}).n ? '' : '1' });
+  const so = $('#tmSort'); if (so) { so.onchange = () => tmSet({ o: so.value }); so.onclick = (e) => e.stopPropagation(); }
+  const m = $('#tmMore'); if (m) m.onclick = (e) => tmFilterSheet(e.currentTarget);
+}
+function tmFilterSheet(btn) {
+  const f = tmArgs(DR.arg) || tmArgs(''), D = tmModel(f);
+  const sh = openSheet({ title: 'Filter teams', anchor: btn, html: `<div class="sheet-form">
+    <label class="fld"><span class="vlabel">Search</span><div class="srch">${ic('search')}<input class="inp" id="tmQm" type="search" placeholder="Search teams, agents, projects" aria-label="Search teams" value="${esc(f.q)}"></div></label>
+    ${selField('tmSm', 'Status', TM_ST.map(([k, l]) => [k, `${l} (${D.counts[k]})`]), f.s)}
+    <label class="chk-row"><input type="checkbox" id="tmNm"${f.n ? ' checked' : ''}>Needs me only (${D.needN})</label>
+    ${selField('tmOm', 'Sort', TM_SORT.map(([k, l]) => [k, l.replace('Sort: ', '')]), f.o)}
+    <div class="sheet-acts"><button type="button" class="btn lg" id="tmClear">Clear</button><button type="button" class="btn pri lg" data-sheet-close>Done</button></div></div>` });
+  const cnt = () => setFilterCount('tmMore', ['s', 'n', 'o', 'q'].filter((k) => (tmArgs(DR.arg) || {})[k]).length);
+  onSearch($('#tmQm', sh), (q) => { tmSet({ q }); cnt(); });
+  $('#tmSm', sh).onchange = (e) => { tmSet({ s: e.target.value }); cnt(); };
+  $('#tmNm', sh).onchange = (e) => { tmSet({ n: e.target.checked ? '1' : '' }); cnt(); };
+  $('#tmOm', sh).onchange = (e) => { tmSet({ o: e.target.value }); cnt(); };
+  $('#tmClear', sh).onclick = () => { tmSet({ s: '', n: '', o: '', q: '' }); cnt(); closeSheet(); };
+}
+VIEWS.teams = async (arg = '') => {
+  const f = tmArgs(arg) || tmArgs(''), D = tmModel(f);
   return {
     t: `${ic('team')}Teams <span class="n">${S.teams.length}</span>`,
-    a: `<button class="btn sm" data-go="tbuild">${ic('plus')}Team</button>`,
-    b: M.agents.length ? `<div id="pjCards"></div>` : none('team', 'No agents yet'),
-    after() { const g = $('#pjCards'); if (g) renderProjectCards(g, M); },
+    a: `<button class="btn sm pri" data-go="tbuild">${ic('plus')}Team</button>`,
+    b: `<div id="tmBar">${tmToolbar(f, D)}</div><div class="pcard tm-card" id="tmList">${tmTableHtml(f, D)}</div>`,
+    after() {
+      tmBindBar();
+      const box = $('#tmList');
+      // Folding is not an edit: keep it from pausing the background redraw. Clicks on rows reach the global handlers (data-team, data-ses, data-go).
+      box.addEventListener('click', (e) => {
+        const g = e.target.closest('[data-tmgrp]'); if (!g) return;
+        const k = g.dataset.tmgrp; TM_UI.folded[TM_UI.folded.has(k) ? 'delete' : 'add'](k); tmSet({}); $(`[data-tmgrp="${CSS.escape(k)}"]`)?.focus();
+      });
+    },
   };
 };
 
@@ -1724,8 +2039,6 @@ VIEWS.decisions = async (arg) => {
 /* ---------- directives: standing rules with scope, version and who has read them (docs/directives.md) ---------- */
 const DIR_READ = { current: ['Read', 'ok'], outdated: ['Out of date', 'warn'], unread: ['Not read', 'bad'] };
 const dirRead = (r, v) => pill(r === 'outdated' && v ? `Read v${v}, out of date` : DIR_READ[r][0], DIR_READ[r][1]);
-/* Coverage in a few words: "4 of 4 read" (muted) or "2 of 4 read · 1 out of date" (warn). */
-const dirCov = (d) => { if (!d.agents) return 'Applies to no agent'; const behind = d.agents - d.current; return `${d.current} of ${d.agents} read${d.outdated ? ` · ${d.outdated} out of date` : ''}${behind && !d.outdated ? ` · ${behind} not read` : ''}`; };
 /* Scope choices for a directive: what it reaches, then which one. */
 function dirScopeFields(cur = { kind: 'hub', ref: null }) {
   const projects = [...new Set(S.agents.map((a) => a.project).filter(Boolean))].sort();
@@ -1751,13 +2064,16 @@ function dirSheet({ title = 'New directive', d = null, anchor, onDone }) {
   const sc = dirScopeFields(d ? { kind: d.scope_kind, ref: d.scope_ref } : undefined);
   const sh = fbSheet({ title, anchor, label: d ? 'Save new version' : 'Create', fields: `<label class="fld"><span class="vlabel">Title</span><input class="inp" id="dsT" maxlength="120" value="${esc(d?.title || '')}" autocomplete="off"></label>
       <label class="fld"><span class="vlabel">Text (what agents must do)</span><textarea class="inp" id="dsB" rows="6" maxlength="20000">${esc(d?.body || '')}</textarea></label>${sc.html}
+      ${dirCatField(d ? d.category || (!d.reviewed_at && d.proposed_category) || '' : '', d && !d.category && !d.reviewed_at && d.proposed_category ? 'Category (the agent proposed it)' : 'Category')}
+      <label class="fld"><span class="vlabel">Tags (comma-separated)</span><input class="inp" id="dsG" maxlength="400" value="${esc((d?.tags || []).join(', '))}" placeholder="e.g. git, vault" autocomplete="off"></label>
       ${d ? fbArea('dsN', 'What changed (optional, agents see it)', 500, 2) : ''}`,
     onGo: (s) => {
-      const t = fbVal(s, 'dsT'), b = fbVal(s, 'dsB'), scope = get();
+      const t = fbVal(s, 'dsT'), b = fbVal(s, 'dsB'), scope = get(), category = $('#dsC', s).value || null, tags = dirTagList($('#dsG', s).value);
       if (!t || !b) return 'Give a title and the text.';
       if (scope.kind !== 'hub' && !scope.ref) return 'Choose what it applies to.';
+      if (tags.length > 10) return 'Use at most 10 tags.';
       run(async () => {
-        const r = d ? await api('/directives/' + encodeURIComponent(d.id), 'PATCH', { title: t, body: b, scope, note: fbVal(s, 'dsN') || null }) : await post('/directives', { title: t, body: b, scope });
+        const r = d ? await api('/directives/' + encodeURIComponent(d.id), 'PATCH', { title: t, body: b, scope, note: fbVal(s, 'dsN') || null, category, tags }) : await post('/directives', { title: t, body: b, scope, category, tags });
         toast(d ? 'Saved; agents are told' : 'Created; agents are told'); onDone?.(r.directive);
       });
     } });
@@ -1777,50 +2093,245 @@ function dirMergeSheet(group, anchor, onDone) {
       run(async () => { const x = await post('/directives/merge', { ids: group.map((d) => d.id), title: t, body: b, scope }); toast('Merged; agents are told'); onDone?.(x.directive); }); } });
   const get = sc.bind(sh);
 }
-/* A rule an agent registered: in force for that agent, waiting for your review. Groups of the same rule show as one row. */
-const dirUnreviewedRows = (U) => {
-  const groups = new Map(); for (const d of U) { if (!groups.has(d.key)) groups.set(d.key, []); groups.get(d.key).push(d); }
-  return [...groups.values()].map((g) => g.length > 1
-    ? row({ lead: planGlyph('unclear', ic('link'), 'Same rule from several agents'), title: g[0].title, meta: `${g.length} agents · ${g.map((d) => d.reported_by_label).join(', ')}`, trail: '<span class="pill acc">Merge</span>', chev: true, attrs: { 'data-dmerge': g[0].key } })
-    : row({ lead: planGlyph('', ic('sl'), 'Not reviewed'), title: g[0].title, meta: `${g[0].reported_by_label || 'Agent'}${g[0].source ? ' · ' + g[0].source : ''} · ${ago(g[0].created_at)} ago`, chev: true, attrs: { 'data-dir': g[0].id } })).join('');
+/* ---------- Work → Directives list (docs/dashboard-ux.md#directives) ----------
+   Filters live in the route: #directives, #directives/retired, or #directives/<query> with
+   s=retired · q=search · sc=scope kind · rd=read state · g=grouping · d=selected directive.
+   From 1024 px the list and the selected directive sit side by side; narrower, a row opens the directive's own screen. */
+const DIR_KINDS = ['hub', 'project', 'team', 'role', 'agent'];
+const DIR_KIND_LABEL = { hub: 'All agents', project: 'Project', team: 'Team', role: 'Role', agent: 'Agent' };
+const DIR_READS = [['', 'Any read state'], ['behind', 'Not read by everyone'], ['old', 'Read an old version'], ['all', 'Read by everyone'], ['new', 'Not reviewed']];
+const DIR_GROUPS = [['', 'Group by scope'], ['cat', 'Group by category'], ['none', 'No grouping']];
+/* The hub's fixed category list (docs/directives.md#categories-and-tags); "none" filters directives without one. */
+const DIR_CATS = [['access', 'Access & security'], ['communication', 'Communication'], ['tokens', 'Token economy'], ['reporting', 'Reporting'], ['sources', 'Sources & quality'], ['process', 'Process & workflow'], ['tooling', 'Tooling']];
+const DIR_CAT_LABEL = Object.fromEntries(DIR_CATS);
+const dirCatOpts = (cur) => [['', 'No category'], ...DIR_CATS].map(([v, l]) => `<option value="${v}"${v === (cur || '') ? ' selected' : ''}>${esc(l)}</option>`).join('');
+const dirCatField = (cur, label = 'Category') => `<label class="fld"><span class="vlabel">${esc(label)}</span><select class="sel fill" id="dsC">${dirCatOpts(cur)}</select></label>`;
+/* Tags typed as a comma-separated list; the hub lowercases them and turns spaces into dashes. */
+const dirTagList = (v) => String(v || '').split(',').map((t) => t.trim()).filter(Boolean);
+const dirWide = () => matchMedia('(min-width: 1024px)').matches;
+/* Route arg → filters, or null when the arg is not one this view writes (ROUTE_OK refuses it). */
+function dirArgs(a = '') {
+  a = String(a ?? '');
+  const f = { st: 'active', q: '', sc: '', rd: '', g: '', c: '', t: '', d: '' };
+  if (a === '') return f;
+  if (a === 'retired') return { ...f, st: 'retired' };
+  if (!a.includes('=')) return null;
+  const p = new URLSearchParams(a);
+  if ([...p.keys()].some((k) => !['s', 'q', 'sc', 'rd', 'g', 'c', 't', 'd'].includes(k))) return null;
+  const x = { st: p.get('s') === 'retired' ? 'retired' : 'active', q: (p.get('q') || '').slice(0, 100), sc: p.get('sc') || '', rd: p.get('rd') || '', g: p.get('g') || '', c: p.get('c') || '', t: p.get('t') || '', d: p.get('d') || '' };
+  if (x.sc && !DIR_KINDS.includes(x.sc)) return null;
+  if (x.c && x.c !== 'none' && !DIR_CAT_LABEL[x.c]) return null;
+  if (x.t && !/^[a-z0-9._-]{1,32}$/.test(x.t)) return null;
+  if (!DIR_READS.some(([k]) => k === x.rd) || !DIR_GROUPS.some(([k]) => k === x.g) || (x.d && !RID.test(x.d))) return null;
+  return x;
+}
+function dirArgStr(f) {
+  const p = new URLSearchParams();
+  if (f.st === 'retired') p.set('s', 'retired');
+  for (const k of ['q', 'sc', 'rd', 'g', 'c', 't', 'd']) if (f[k]) p.set(k, f[k]);
+  const s = p.toString();
+  return s === 's=retired' ? 'retired' : s;
+}
+/* State that is not in the route and must survive the background redraw: ticked rows and folded groups. */
+const DIR_UI = { data: null, checked: new Set(), folded: new Set(), req: 0 };
+const dirFirstLine = (b) => String(b || '').split('\n').map((l) => l.trim()).find(Boolean) || '';
+const dirMatch = (d, f) => {
+  if (f.q) { const hay = [d.title, d.body, d.scope_label, ...(d.tags || [])].join(' ').toLowerCase(); if (!f.q.toLowerCase().split(/\s+/).every((w) => hay.includes(w))) return false; }
+  if (f.sc && d.scope_kind !== f.sc) return false;
+  if (f.rd === 'behind' && !(d.current < d.agents)) return false;
+  if (f.rd === 'old' && !d.outdated) return false;
+  if (f.rd === 'all' && !(d.agents && d.current >= d.agents)) return false;
+  if (f.rd === 'new' && d.reviewed_at) return false;
+  if (f.c && (f.c === 'none' ? !!d.category : d.category !== f.c)) return false;
+  if (f.t && !(d.tags || []).includes(f.t)) return false;
+  return true;
 };
+const dirCatKey = (d) => d.category || 'none';
+/* Category shown on a row: the operator's, or what the agent proposed while the rule waits for review. */
+const dirCatText = (d) => d.category ? DIR_CAT_LABEL[d.category] : d.status === 'active' && !d.reviewed_at && d.proposed_category ? `Proposed: ${DIR_CAT_LABEL[d.proposed_category]}` : '';
+/* Category chips over the list: All, each category and No category, counted under the other filters. */
+function dirCatChips(f) {
+  const base = DIR_UI.data.directives.filter((d) => dirMatch(d, { ...f, c: '' }));
+  const chip = (k, label, n) => `<button type="button" class="btn sm${f.c === k ? ' on' : ''}" data-dcat="${k}" aria-pressed="${f.c === k}">${esc(label)} <span class="fcount">${n}</span></button>`;
+  const tag = f.t ? `<button type="button" class="btn sm on" data-dtagclr aria-label="Remove the tag filter ${esc(f.t)}">#${esc(f.t)}${ic('x')}</button>` : '';
+  return `<div class="dl-cats" role="group" aria-label="Category">${chip('', 'All', base.length)}${[...DIR_CATS, ['none', 'No category']].map(([k, l]) => chip(k, l, base.filter((d) => dirCatKey(d) === k).length)).join('')}${tag}</div>`;
+}
+/* "7/9 read": muted when everyone read the current version, a warn pill when some lag, bad when nobody read it. */
+const dirReadPill = (d) => !d.agents ? '<span class="faint">No agents</span>'
+  : d.current >= d.agents ? `<span class="dl-n">${d.current}/${d.agents} read</span>` : pill(`${d.current}/${d.agents} read`, d.current ? 'warn' : 'bad');
+const dirTarget = (d) => d.scope_kind === 'hub' ? 'All agents' : d.scope_kind === 'role' ? cap(d.scope_label) : String(d.scope_label).replace(/^(project|team|agent) /, '');
+function dirRow(d, f) {
+  const live = d.status === 'active', sel = d.id === f.d;
+  const box = live ? `<label class="dl-hit"><input type="checkbox" class="dl-chk" data-dchk="${esc(d.id)}" aria-label="Select ${esc(d.title)}"${DIR_UI.checked.has(d.id) ? ' checked' : ''}></label>` : '';
+  const where = f.g === '' ? dirTarget(d) : DIR_KIND_LABEL[d.scope_kind] || cap(d.scope_kind);
+  // Grouped by category, the group header already names it (a proposal still shows).
+  const cat = f.g === 'cat' && d.category ? '' : dirCatText(d);
+  // Phones have no room for the scope chip: it moves to the start of the meta line (design guidelines §4).
+  const scope = `<span class="tag txt dl-scope only-d" title="${esc(cap(d.scope_label))}">${esc(where)}</span>`;
+  return row({ as: 'div', cls: 'dl-row' + (sel ? ' on' : ''), lead: box, chev: true,
+    title: raw(`${live && !d.reviewed_at ? pill('New', 'info') : ''}<span class="dl-t">${esc(d.title)}</span>`), meta: raw(`<span class="only-m">${esc(where)} · </span>${cat ? `<span class="dl-cat">${esc(cat)}</span> · ` : ''}${esc(dirFirstLine(d.body))}`),
+    trail: scope + (live ? dirReadPill(d) : ''),
+    attrs: { 'data-dsel': d.id }, extra: `tabindex="0" role="button" aria-label="${esc(d.title)}"${sel ? ' aria-current="true"' : ''}` });
+}
+/* The groups of a list: [fold key, header, rows], by scope or by category (No category last); empty groups left out. */
+const dirGroups = (f, L) => (f.g === 'cat'
+  ? [...DIR_CATS, ['none', 'No category']].map(([k, l]) => ['c:' + k, l, L.filter((d) => dirCatKey(d) === k)])
+  : DIR_KINDS.map((k) => [k, DIR_KIND_LABEL[k], L.filter((d) => d.scope_kind === k)])).filter(([, , g]) => g.length);
+/* Matching directives in display order: by group (unless ungrouped), not reviewed first, then the hub's order. */
+const dirOrdered = (f) => { const L = DIR_UI.data.directives.filter((d) => dirMatch(d, f)).sort((a, b) => !!a.reviewed_at - !!b.reviewed_at);
+  return f.g === 'none' ? L : dirGroups(f, L).flatMap(([, , g]) => g); };
+/* The list pane: summary line with select-all, folding groups, and the bulk bar while rows are ticked. */
+function dirListHtml(f) {
+  const D = DIR_UI.data, all = D.directives, live = f.st === 'active';
+  const L = dirOrdered(f);
+  // Only rows the filters show stay ticked, so a bulk action never reaches a hidden one.
+  const shown = new Set(L.map((d) => d.id)); for (const id of DIR_UI.checked) if (!shown.has(id)) DIR_UI.checked.delete(id);
+  const unrev = L.filter((d) => live && !d.reviewed_at).length, behind = L.filter((d) => live && d.current < d.agents).length;
+  const ticked = L.filter((d) => DIR_UI.checked.has(d.id)).length;
+  const sum = `<div class="dl-sum">${live && L.length ? `<input type="checkbox" class="dl-chk" id="dlAll" aria-label="Select all shown"${ticked && ticked === L.length ? ' checked' : ''}>` : ''}
+    <span class="meta"><b>${L.length}</b> of ${all.length}${unrev ? ` · <span class="info-t">${unrev} not reviewed</span>` : ''}${behind ? ` · <span class="warn-t">${behind} not read by everyone</span>` : ''}</span></div>`;
+  let body;
+  if (!L.length) body = none('sl', all.length ? 'No directive matches these filters' : f.st === 'retired' ? 'No retired directives' : 'No directives yet');
+  else if (f.g === 'none') body = L.map((d) => dirRow(d, f)).join('');
+  else body = dirGroups(f, L).map(([k, label, g]) => {
+    const open = !DIR_UI.folded.has(k);
+    return `<div class="dl-grp"><button type="button" class="dl-gh" data-dgrp="${k}" aria-expanded="${open}">${ic('chev', 'chev')}<span>${esc(label)}</span><span aria-hidden="true">·</span><span>${g.length}</span></button>${open ? g.map((d) => dirRow(d, f)).join('') : ''}</div>`;
+  }).join('');
+  const n = DIR_UI.checked.size, canRev = [...DIR_UI.checked].some((id) => all.find((d) => d.id === id && !d.reviewed_at));
+  const bulk = n ? `<div class="dl-bulk" role="region" aria-label="Selected directives"><span class="dl-bn">${n} selected</span>
+    <button type="button" class="btn sm" id="dlRev"${canRev ? '' : ' disabled'}>${ic('check')}Mark reviewed</button><button type="button" class="btn sm" id="dlCat">${ic('tag')}Set category</button><button type="button" class="btn sm" id="dlRet">${ic('ban')}Retire</button><button type="button" class="btn sm ic ghost" id="dlClr" aria-label="Clear selection">${ic('x')}</button></div>` : '';
+  return (all.length ? dirCatChips(f) : '') + sum + `<div class="dl-rows">${body}</div>` + bulk;
+}
+/* The toolbar: In force / Retired, then search, scope, read state and grouping inline from 768 px; on phones these four are in a filter sheet. */
+function dirToolbar(f) {
+  const n = ['q', 'sc', 'rd', 'g'].filter((k) => f[k]).length;
+  const sel = (id, label, items, cur) => `<select class="sel" id="${id}" aria-label="${esc(label)}">${items.map(([v, l]) => `<option value="${esc(v)}"${v === cur ? ' selected' : ''}>${esc(l)}</option>`).join('')}</select>`;
+  return vtools(subTabs('data-dirs', [['', 'In force'], ['retired', 'Retired']], f.st === 'retired' ? 'retired' : '')
+    + `<div class="srch only-d dl-q">${ic('search')}<input class="inp" id="dlQ" type="search" placeholder="Search title, text, tags" aria-label="Search directives" value="${esc(f.q)}" autocomplete="off"></div>`
+    + `<span class="only-d dl-sels">${sel('dlSc', 'Scope', [['', 'Any scope'], ...DIR_KINDS.map((k) => [k, DIR_KIND_LABEL[k]])], f.sc)}${f.st === 'active' ? sel('dlRd', 'Read state', DIR_READS, f.rd) : ''}${sel('dlG', 'Group by', DIR_GROUPS, f.g)}</span>`
+    + `<span class="only-m">${filterBtn('dlMore', n)}</span>`);
+}
+/* One directive in the side pane: the same parts as its own screen, with the title as the pane heading. */
+const dirPaneHtml = (r) => `<div class="dl-dh"><h3>${r.t}</h3><div class="dact">${r.a || ''}</div></div>${r.b}`;
+async function dirShowPane(id, keepScroll = 0) {
+  const pane = $('#dlDet'); if (!pane) return;
+  const req = ++DIR_UI.req;
+  if (!id) { pane.innerHTML = none('sl', 'Select a directive'); DBAR_MENU = []; return; }
+  let r; try { r = await dirDetail(id); } catch (e) { if (req === DIR_UI.req && pane.isConnected) pane.innerHTML = none('sl', e.status === 404 ? 'This directive no longer exists' : 'Could not load it'); return; }
+  if (req !== DIR_UI.req || !pane.isConnected) return;
+  pane.innerHTML = dirPaneHtml(r); pane.scrollTop = keepScroll;
+  DBAR_MENU = (r.dbar.menu || []).filter(Boolean);
+  r.after(); tipIcons(pane);
+}
+/* Change filters in place: redraw the list pane only, keep the page scroll, and replace the route (no history entry per keystroke). */
+function dirSet(patch) {
+  const f = { ...(dirArgs(DR.arg) || dirArgs('')), ...patch };
+  DR.arg = dirArgStr(f); setRoute('directives', DR.arg, false);
+  const box = $('#dlList'); if (box) { box.innerHTML = dirListHtml(f); dirBindList(f); }
+  setFilterCount('dlMore', ['q', 'sc', 'rd', 'g'].filter((k) => f[k]).length);
+  return f;
+}
+/* Select a row: side by side, show it in the pane; narrower, open its screen (Back returns to the list as it was). */
+function dirSelect(id, { focus = false } = {}) {
+  if (!dirWide()) { openD('directive', id); return; }
+  dirSet({ d: id });
+  const rowEl = $(`.dl-row[data-dsel="${CSS.escape(id)}"]`);
+  if (rowEl) { rowEl.scrollIntoView({ block: 'nearest' }); if (focus) rowEl.focus({ preventScroll: true }); }
+  dirShowPane(id);
+}
+/* j / k: the next or previous visible row. */
+function dirStep(dir) {
+  const rows = $$('.dl-row'); if (!rows.length) return;
+  const f = dirArgs(DR.arg) || dirArgs(''), cur = rows.findIndex((r) => r === document.activeElement || (!rows.includes(document.activeElement) && r.dataset.dsel === f.d));
+  const next = rows[cur < 0 ? 0 : Math.max(0, Math.min(rows.length - 1, cur + dir))];
+  if (dirWide()) dirSelect(next.dataset.dsel, { focus: true });
+  else { next.focus(); next.scrollIntoView({ block: 'nearest' }); }
+}
+/* Run one request per directive, eight at a time. */
+async function dirEach(ids, fn) { for (let i = 0; i < ids.length; i += 8) await Promise.all(ids.slice(i, i + 8).map(fn)); }
+function dirBindList(f) {
+  const box = $('#dlList'); if (!box) return;
+  // Ticking rows and folding groups are not edits: keep them from pausing the background redraw (viewInUse).
+  box.onchange = (e) => e.stopPropagation();
+  box.onclick = (e) => {
+    const t = e.target;
+    if (t.closest('.dl-hit') && !t.matches('input')) return; // the label passes the click on to its box
+    const chk = t.closest('[data-dchk]'); if (chk) { DIR_UI.checked[chk.checked ? 'add' : 'delete'](chk.dataset.dchk); dirSet({}); return; }
+    if (t.id === 'dlAll') { const L = DIR_UI.data.directives.filter((d) => dirMatch(d, f)); L.forEach((d) => DIR_UI.checked[t.checked ? 'add' : 'delete'](d.id)); dirSet({}); return; }
+    const cat = t.closest('[data-dcat]'); if (cat) { dirSet({ c: cat.dataset.dcat }); $(`[data-dcat="${cat.dataset.dcat}"]`)?.focus(); return; }
+    if (t.closest('[data-dtagclr]')) { dirSet({ t: '' }); $('[data-dcat].on')?.focus(); return; }
+    const g = t.closest('[data-dgrp]'); if (g) { const k = g.dataset.dgrp; DIR_UI.folded[DIR_UI.folded.has(k) ? 'delete' : 'add'](k); dirSet({}); $(`[data-dgrp="${k}"]`)?.focus(); return; }
+    const r = t.closest('[data-dsel]'); if (r) { e.preventDefault(); dirSelect(r.dataset.dsel); }
+  };
+  const clr = $('#dlClr'); if (clr) clr.onclick = () => { DIR_UI.checked.clear(); dirSet({}); };
+  const rev = $('#dlRev');
+  if (rev) rev.onclick = () => run(async () => {
+    const ids = [...DIR_UI.checked].filter((id) => DIR_UI.data.directives.some((d) => d.id === id && !d.reviewed_at));
+    await dirEach(ids, (id) => post('/directives/' + encodeURIComponent(id) + '/review', {}));
+    toast(`${fbPlural(ids.length, 'directive', 'directives')} marked as reviewed`); DIR_UI.checked.clear(); await refresh(); reopen();
+  });
+  // Set category: filing only, so no new version and no notice to agents; it replaces what agents proposed.
+  const cat = $('#dlCat');
+  if (cat) cat.onclick = (e) => { const ids = [...DIR_UI.checked], cur = [...new Set(ids.map((id) => DIR_UI.data.directives.find((d) => d.id === id)?.category || ''))];
+    fbSheet({ title: `Set category of ${fbPlural(ids.length, 'directive', 'directives')}`, anchor: e.currentTarget, label: 'Set category', fields: `${dirCatField(cur.length === 1 ? cur[0] : '')}<p class="meta">Agents are not notified; versions stay the same.</p>`,
+      onGo: (s) => { const category = $('#dsC', s).value || null; run(async () => { const r = await post('/directives/categorize', { ids, category }); toast(`${category ? DIR_CAT_LABEL[category] : 'No category'}: ${fbPlural(r.changed, 'directive', 'directives')} changed`); DIR_UI.checked.clear(); await refresh(); reopen(); }); } }); };
+  const ret = $('#dlRet');
+  if (ret) ret.onclick = (e) => { const ids = [...DIR_UI.checked];
+    fbSheet({ title: `Retire ${fbPlural(ids.length, 'directive', 'directives')}`, anchor: e.currentTarget, label: 'Retire', tone: 'bad', fields: `<p class="meta">Agents they reach are told to stop following them.</p>${fbArea('dsN', 'Why (optional, agents see it)', 500, 2)}`,
+      onGo: (s) => { const note = fbVal(s, 'dsN') || null; run(async () => { await dirEach(ids, (id) => post('/directives/' + encodeURIComponent(id) + '/retire', { note })); toast(`${fbPlural(ids.length, 'directive', 'directives')} retired; agents are told`); DIR_UI.checked.clear(); await refresh(); reopen(); }); } }); };
+}
+function dirFilterSheet(btn) {
+  const f = dirArgs(DR.arg) || dirArgs('');
+  const sh = openSheet({ title: 'Filter directives', anchor: btn, html: `<div class="sheet-form">
+    <label class="fld"><span class="vlabel">Search</span><div class="srch">${ic('search')}<input class="inp" id="dlQm" type="search" placeholder="Search title, text, tags" aria-label="Search directives" value="${esc(f.q)}"></div></label>
+    ${selField('dlScm', 'Scope', [['', 'Any scope'], ...DIR_KINDS.map((k) => [k, DIR_KIND_LABEL[k]])], f.sc)}
+    ${f.st === 'active' ? selField('dlRdm', 'Read state', DIR_READS, f.rd) : ''}
+    ${selField('dlGm', 'Group', DIR_GROUPS, f.g)}
+    <div class="sheet-acts"><button type="button" class="btn lg" id="dlClear">Clear</button><button type="button" class="btn pri lg" data-sheet-close>Done</button></div></div>` });
+  onSearch($('#dlQm', sh), (q) => dirSet({ q }));
+  [['#dlScm', 'sc'], ['#dlRdm', 'rd'], ['#dlGm', 'g']].forEach(([s, k]) => { const el = $(s, sh); if (el) el.onchange = () => dirSet({ [k]: el.value }); });
+  $('#dlClear', sh).onclick = () => { dirSet({ q: '', sc: '', rd: '', g: '' }); closeSheet(); };
+}
 
 /* Work → Directives: what agents must follow, at which scope, and who has read the current version. Rules agents
-   registered themselves are in force at once; the ones you have not reviewed come first, the same rule from several
-   agents as one row to merge. #directives or #directives/retired. */
+   registered themselves are in force at once and carry a New pill until you review them (filter: Not reviewed). */
 VIEWS.directives = async (arg = '') => {
-  const st = arg === 'retired' ? 'retired' : 'active', D = await api('/directives?status=' + st), U = st === 'active' ? D.unreviewed : [];
-  const behind = D.directives.filter((d) => d.current < d.agents).length;
-  const reviewed = D.directives.filter((d) => d.status !== 'active' || d.reviewed_at);
-  const queue = U.length ? sec(`Not reviewed · ${U.length}`, dirUnreviewedRows(U) + '<div class="row dir-revall"><button type="button" class="btn sm" id="dirRevAll">Mark all as reviewed</button></div>',
-    info('Rules agents registered as they follow them. They are in force already. Open one to keep it, edit it, widen its scope or retire it; merge the same rule from several agents into one.')) : '';
-  const list = reviewed.length ? reviewed.map((d) => row({ lead: planGlyph(d.status === 'retired' ? '' : d.current < d.agents ? 'unclear' : 'met', ic(d.status === 'retired' ? 'x' : 'sl'), d.status === 'retired' ? 'Retired' : 'In force'),
-      title: d.title, meta: `${cap(d.scope_label)} · v${d.version}${d.status === 'active' ? ' · ' + dirCov(d) : ''}`, chev: true, attrs: { 'data-dir': d.id } })).join('')
-    : none('sl', st === 'retired' ? 'No retired directives' : U.length ? 'Nothing reviewed yet' : 'No directives yet');
+  const f = dirArgs(arg) || dirArgs('');
+  const detScroll = DR.type === 'directives' ? $('#dlDet')?.scrollTop || 0 : 0;
+  DIR_UI.data = await api('/directives?status=' + f.st);
+  if (DR.type !== 'directives') { DIR_UI.checked.clear(); DIR_UI.folded.clear(); }
+  // Side by side, the first row is selected when none is.
+  if (dirWide() && !f.d) { const first = dirOrdered(f)[0]; if (first) f.d = first.id; }
+  const fa = dirArgStr(f);
   return {
-    t: `${ic('sl')}Directives <span class="n">${D.directives.length}</span>`,
+    t: `${ic('sl')}Directives <span class="n">${DIR_UI.data.directives.length}</span>`,
     a: `<button class="btn sm pri" id="dirNew">${ic('plus')}New directive</button>`,
-    b: vtools(subTabs('data-dirs', [['', 'In force'], ['retired', 'Retired']], st === 'retired' ? 'retired' : '') + (behind && st === 'active' ? `<span class="meta warn-t">${behind} not read by everyone</span>` : ''))
-      + queue + sec(st === 'retired' ? 'Retired' : 'Reviewed', list),
+    b: dirToolbar(f) + `<div class="dl"><div class="dl-list pcard" id="dlList">${dirListHtml(f)}</div><div class="dl-det" id="dlDet" aria-live="polite"></div></div>`,
     after() {
+      if (fa !== arg) { DR.arg = fa; setRoute('directives', fa, false); }
       $('#dirNew').onclick = (e) => dirSheet({ anchor: e.currentTarget, onDone: (d) => openD('directive', d.id) });
-      $$('[data-dmerge]').forEach((b) => (b.onclick = (e) => { e.preventDefault(); dirMergeSheet(U.filter((d) => d.key === b.dataset.dmerge), b, (d) => openD('directive', d.id)); }));
-      const all = $('#dirRevAll'); if (all) arm(all, () => run(async () => { const r = await post('/directives/review-all', {}); toast(`${r.reviewed} marked as reviewed`); await refresh(); reopen(); }));
+      dirBindList(f);
+      const q = $('#dlQ'); if (q) { onSearch(q, (v) => dirSet({ q: v })); q.addEventListener('input', (e) => e.stopPropagation()); }
+      [['#dlSc', 'sc'], ['#dlRd', 'rd'], ['#dlG', 'g']].forEach(([s, k]) => { const el = $(s); if (el) el.addEventListener('change', (e) => { e.stopPropagation(); dirSet({ [k]: el.value }); }); });
+      const m = $('#dlMore'); if (m) m.onclick = (e) => dirFilterSheet(e.currentTarget);
+      if (dirWide()) dirShowPane(f.d, detScroll);
     },
   };
 };
 /* One directive: its text, scope and version, who it reaches and whether each agent read the current version, and its
    history. A rule an agent registered shows who and where from, with Keep as is; the same rule from others offers Merge. */
-VIEWS.directive = async (id) => {
+async function dirDetail(id) {
   const dp = '/directives/' + encodeURIComponent(id), x = await api(dp), d = x.directive, active = d.status === 'active';
   const C = x.coverage.slice().sort((a, b) => ({ unread: 0, outdated: 1, current: 2 }[a.read] - { unread: 0, outdated: 1, current: 2 }[b.read]) || a.label.localeCompare(b.label));
   const retire = () => fbSheet({ title: 'Retire directive', label: 'Retire', tone: 'bad', fields: fbArea('dsN', 'Why (optional, agents see it)', 500, 2),
     onGo: (s) => { run(async () => { await post(dp + '/retire', { note: fbVal(s, 'dsN') || null }); toast('Retired; agents are told'); await refresh(); reopen(); }); } });
-  const keep = () => run(async () => { await post(dp + '/review', {}); toast('Kept as it is'); await refresh(); reopen(); });
+  // Keep confirms the category chosen in the review card (preset to what the agent proposed).
+  const keep = () => run(async () => { const c = $('#dirRevCat'); await post(dp + '/review', c ? { category: c.value || null } : {}); toast(c && c.value ? `Kept as ${DIR_CAT_LABEL[c.value]}` : 'Kept as it is'); await refresh(); reopen(); });
   const read = C.filter((c) => c.read === 'current').length, pending = active && !d.reviewed_at;
   const group = [{ ...d, reported_by_label: d.reported_by_label }, ...x.same];
   const review = pending ? `<div class="pcard dir-review">${overline('Not reviewed')}<p class="fb-text">${esc(d.reported_by_label || 'An agent')} registered this rule${d.source ? ` from ${esc(d.source)}` : ''}. It is in force for ${esc(d.scope_label)}.</p>
       ${x.same.length ? `<p class="meta">Also registered by ${esc(x.same.map((s) => s.reported_by_label || '?').join(', '))}.</p>` : ''}
+      <label class="fld dir-revcat"><span class="vlabel">${d.proposed_category && !d.category ? 'Category (proposed by the agent)' : 'Category'}</span><select class="sel fill" id="dirRevCat">${dirCatOpts(d.category || d.proposed_category)}</select></label>
       <div class="row">${x.same.length ? `<button class="btn" id="dirMerge">${ic('link')}Merge the ${x.same.length + 1} into one</button>` : ''}<button class="btn" id="dirEditR">${ic('edit')}Edit or widen</button><button class="btn pri" id="dirKeep">${ic('check')}Keep as is</button></div></div>` : '';
   return {
     t: `${ic('sl')}<span class="ellip">${esc(d.title)}</span>${active ? (pending ? pill('Not reviewed', 'idle') : '') : pill('Retired', 'idle')}`,
@@ -1828,7 +2339,7 @@ VIEWS.directive = async (id) => {
     dbar: { title: d.title, meta: `${cap(d.scope_label)} · v${d.version}${active ? ` · ${read} of ${C.length} read` : ' · retired'}`,
       menu: [pending ? { label: 'Keep as is', icon: 'check', fn: keep } : null, active ? { label: 'Edit', icon: 'edit', fn: () => dirSheet({ title: 'Edit directive', d, onDone: async () => { await refresh(); reopen(); } }) } : null, active ? { label: 'Retire', icon: 'ban', bad: true, fn: retire } : null] },
     b: review + sec('Text', `<p class="fb-text">${esc(d.body)}</p>`)
-      + `<div class="pcard kvc">${kv('Applies to', esc(cap(d.scope_label)))}${kv('Version', esc(`v${d.version} · ${dt(d.updated_at)}`))}${d.source ? kv('Source', esc(d.source)) : ''}${d.reported_by_label ? kv('Registered by', esc(d.reported_by_label)) : ''}</div>`
+      + `<div class="pcard kvc">${kv('Applies to', esc(cap(d.scope_label)))}${kv('Version', esc(`v${d.version} · ${dt(d.updated_at)}`))}${d.category ? kv('Category', `<a href="#directives/c=${d.category}" data-dirs="c=${d.category}">${esc(DIR_CAT_LABEL[d.category])}</a>`) : pending && d.proposed_category ? kv('Category', esc(`Proposed: ${DIR_CAT_LABEL[d.proposed_category]}`)) : ''}${d.tags?.length ? kv('Tags', `<span class="dir-tags">${d.tags.map((t) => `<a class="tag txt" href="#directives/t=${encodeURIComponent(t)}" data-dirs="t=${encodeURIComponent(t)}">#${esc(t)}</a>`).join('')}</span>`) : ''}${d.source ? kv('Source', esc(d.source)) : ''}${d.reported_by_label ? kv('Registered by', esc(d.reported_by_label)) : ''}</div>`
       + (active ? sec(`Agents · ${read} of ${C.length} read`, C.map((c) => row({ lead: `<span class="av lg">${esc(initials(c.label))}</span>`, title: c.label,
           meta: c.acked_at ? `Confirmed v${c.version} ${ago(c.acked_at)} ago` : 'Has not confirmed it', trail: dirRead(c.read, c.version), chev: true, attrs: { 'data-ses': c.agent_id } })).join('') || none('user', 'It reaches no agent right now'),
           info('Agents confirm a version with directive_ack after reading it. Out of date: they read an older version.')) : '')
@@ -1841,7 +2352,8 @@ VIEWS.directive = async (id) => {
       const m = $('#dirMerge'); if (m) m.onclick = () => dirMergeSheet(group.map((g) => ({ ...g, body: g.body ?? d.body })), m, (nd) => openD('directive', nd.id, true));
     },
   };
-};
+}
+VIEWS.directive = dirDetail;
 /* One settings row: label with an info button for the explanation, control on the right. Shared by the team page and the new-team form. */
 const twRow = (label, tip, ctrl, cls = '') => `<div class="tw-row${cls ? ' ' + cls : ''}"><div class="tw-l"><b>${label}</b>${tip ? info(tip) : ''}</div>${ctrl}</div>`;
 /* How the team works: delivery mode, close on approval, coordinator review, check-in/lease time, recruiting. */
@@ -3577,6 +4089,7 @@ function openFbFilters(btn, tools, draw) {
 }
 VIEWS.feedback = async (arg) => {
   const bucket = ['new', 'open', 'closed'].includes(arg) ? arg : 'new';
+  FB_Q.bucket = bucket; // a report opened from here steps through this list
   const [d, set] = await Promise.all([api('/feedback?' + fbQuery(bucket)), api('/feedback/settings')]);
   S.fbc = { ...(S.fbc || {}), ...d.counts };
   const seg = [['new', 'New'], ['open', 'Open'], ['closed', 'Closed']];
@@ -3608,22 +4121,45 @@ const fbVal = (sh, id) => $('#' + id, sh).value.trim();
 const FB_FIELD = { status: 'Status', title: 'Title', severity: 'Severity', hidden: 'Visibility', merged_from: 'Merged from' };
 const fbWho = (id, label) => (AG(id) ? `<a href="#" data-ses="${esc(id)}">${esc(label)}</a>` : esc(label));
 const fbLinkH = (l) => (l.startsWith('/') ? vaultFileLink(l) : l.startsWith('share:') ? `<a href="#" data-share="${esc(l.slice(6))}">${esc(l)}</a>` : esc(l));
+/* The report queue beside a report (from 1024 px) and the ‹ n of N › stepper: the reports of the list the operator came from
+   (its bucket and filters), in the queue's own order. Impact = agents × (minutes lost + extra calls), from the agents' estimates. */
+const FB_Q = { sort: 'impact', bucket: null, ids: [], scroll: 0 };
+const FB_QSORT = [['impact', 'Impact'], ['new', 'Newest'], ['backed', 'Most backed']];
+const fbImpact = (r) => r.backers * ((r.cost_sum?.minutes_lost || 0) + (r.cost_sum?.extra_calls || 0));
+const fbQueueOrder = (L) => L.slice().sort((a, b) => FB_Q.sort === 'new' ? b.created_at - a.created_at : FB_Q.sort === 'backed' ? b.backers - a.backers : fbImpact(b) - fbImpact(a));
+const fbBucketOf = (st) => (st === 'new' ? 'new' : ['needs_info', 'accepted'].includes(st) ? 'open' : 'closed');
+const FB_BUCKET = { new: 'New', open: 'Open', closed: 'Closed' };
+/* j / k and the stepper: the next or previous report in the queue. Replaces the route, so Back still returns to the list. */
+function fbStep(dir) {
+  const L = FB_Q.ids; if (!L.length || DR.type !== 'fbr') return;
+  const i = L.indexOf(DR.arg), next = i < 0 ? L[0] : L[i + dir];
+  if (next && next !== DR.arg) openD('fbr', next, true);
+}
+const FB_SEV_TONE = { blocking: 'bad', costly: 'warn', minor: 'idle' };
+const FB_HIST = { title: 'Changed the title', severity: 'Changed the severity', hidden: 'Changed visibility', guidance: 'Changed the guidance', merged_from: 'Merged a report into this one', note: 'Note' };
 VIEWS.fbr = async (id) => {
   const u = encodeURIComponent(id), fp = '/feedback/' + u;
+  FB_Q.scroll = DR.type === 'fbr' ? $('#fbQ')?.scrollTop || 0 : 0;
   const [d, set] = await Promise.all([api(fp), api('/feedback/settings')]);
   const r = d.report, kindL = (FB_KIND[r.kind] || [r.kind])[0], isOpen = FB_OPEN.includes(r.status), canSet = isOpen || ['fixed', 'wont_fix'].includes(r.status);
+  const bucket = (FB_Q.bucket ||= fbBucketOf(r.status)); // kept while stepping, so a report that changes status does not switch the queue
+  const Q = fbQueueOrder((await api('/feedback?' + fbQuery(bucket)).catch(() => ({ reports: [] }))).reports);
+  FB_Q.ids = Q.map((x) => x.id);
+  const pos = FB_Q.ids.indexOf(id);
+  // The sheets' guidance field: empty keeps the current guidance (edit or clear it in place on the report).
+  const gLbl = (l) => (r.guidance ? 'New guidance (empty keeps the current one)' : l);
   const re = async () => { await refresh(); openD('fbr', id, true); };
   const setStatus = (body) => run(async () => { await post(fp + '/status', body); toast('Saved'); await re(); });
   const patch = (body) => run(async () => { await api(fp, 'PATCH', body); toast('Saved'); await re(); });
-  const accept = (anchor) => fbSheet({ title: 'Accept report', anchor, label: 'Accept', fields: fbArea('fbN', 'Note for the agents (optional)', 2000) + fbArea('fbGd', 'Guidance: a workaround or the right way to do it (optional)', 2000),
-    onGo: (sh) => { setStatus({ status: 'accepted', note: fbVal(sh, 'fbN') || null, guidance: fbVal(sh, 'fbGd') || null }); } });
+  const accept = (anchor) => fbSheet({ title: 'Accept report', anchor, label: 'Accept', fields: fbArea('fbN', 'Note for the agents (optional)', 2000) + fbArea('fbGd', gLbl('Guidance: a workaround or the right way to do it (optional)'), 2000),
+    onGo: (sh) => { setStatus({ status: 'accepted', note: fbVal(sh, 'fbN') || null, guidance: fbVal(sh, 'fbGd') || undefined }); } });
   const fixed = (anchor) => fbSheet({ title: 'Mark fixed', anchor, label: 'Mark fixed', fields: fbArea('fbN', 'What changed', 2000)
-      + `<label class="fld"><span class="vlabel">Hub version (optional)</span><input class="inp mono" id="fbV" maxlength="40" value="${esc(r.fixed_in || set.hub_version || '')}" autocomplete="off"></label>` + fbArea('fbGd', 'Guidance (optional)', 2000),
-    onGo: (sh) => { const note = fbVal(sh, 'fbN'); if (!note) return 'Say what changed.'; setStatus({ status: 'fixed', note, fixed_in: fbVal(sh, 'fbV') || null, guidance: fbVal(sh, 'fbGd') || null }); } });
+      + `<label class="fld"><span class="vlabel">Hub version (optional)</span><input class="inp mono" id="fbV" maxlength="40" value="${esc(r.fixed_in || set.hub_version || '')}" autocomplete="off"></label>` + fbArea('fbGd', gLbl('Guidance (optional)'), 2000),
+    onGo: (sh) => { const note = fbVal(sh, 'fbN'); if (!note) return 'Say what changed.'; setStatus({ status: 'fixed', note, fixed_in: fbVal(sh, 'fbV') || null, guidance: fbVal(sh, 'fbGd') || undefined }); } });
   const ask = () => fbSheet({ title: 'Ask a question', label: 'Ask', fields: fbArea('fbN', 'Your question for the filing agent', 2000),
     onGo: (sh) => { const note = fbVal(sh, 'fbN'); if (!note) return 'Write the question.'; setStatus({ status: 'needs_info', note }); } });
-  const wont = () => fbSheet({ title: "Won't fix", label: "Won't fix", fields: fbArea('fbN', 'Reason', 2000) + fbArea('fbGd', 'Guidance: what to do instead (optional)', 2000),
-    onGo: (sh) => { const note = fbVal(sh, 'fbN'); if (!note) return 'Give a reason.'; setStatus({ status: 'wont_fix', note, guidance: fbVal(sh, 'fbGd') || null }); } });
+  const wont = () => fbSheet({ title: "Won't fix", label: "Won't fix", fields: fbArea('fbN', 'Reason', 2000) + fbArea('fbGd', gLbl('Guidance: what to do instead (optional)'), 2000),
+    onGo: (sh) => { const note = fbVal(sh, 'fbN'); if (!note) return 'Give a reason.'; setStatus({ status: 'wont_fix', note, guidance: fbVal(sh, 'fbGd') || undefined }); } });
   const dup = async () => {
     const all = (await api('/feedback?sort=recent&limit=500')).reports.filter((x) => x.id !== id && !['duplicate', 'withdrawn'].includes(x.status));
     if (!all.length) return toast('No other report to merge into', true);
@@ -3634,64 +4170,108 @@ VIEWS.fbr = async (id) => {
   const title = () => fbSheet({ title: 'Edit title', label: 'Save', fields: `<label class="fld"><span class="vlabel">Title (one line, at most 120 characters)</span><input class="inp" id="fbTi" maxlength="120" value="${esc(r.title)}" autocomplete="off"></label>`,
     onGo: (sh) => { const t = fbVal(sh, 'fbTi'); if (!t) return 'The title cannot be empty.'; patch({ title: t }); } });
   const del = () => run(async () => { await api(fp, 'DELETE'); toast('Deleted'); await refresh(); DR.stack.length ? back() : openD('feedback', undefined, true); });
-  const prim = (sm) => {
-    const b = (key, label) => `<button type="button" class="btn${sm ? ' sm' : ''} pri" data-fba="${key}">${ic('check')}${label}</button>`;
-    return r.status === 'new' ? b('accept', 'Accept') : r.status === 'accepted' ? b('fixed', 'Mark fixed') : '';
-  };
-  const menu = [
-    r.status !== 'needs_info' && ['new', 'accepted'].includes(r.status) ? { label: 'Ask a question', icon: 'chat', fn: ask } : null,
+  // The primary action follows the status; the other statuses and Merge sit in its menu (a split button), the rest in the overflow.
+  const prim = r.status === 'new' ? ['accept', 'Accept'] : r.status === 'accepted' ? ['fixed', 'Mark fixed'] : null;
+  const statusMenu = [
+    r.status === 'new' ? { label: 'Accept', icon: 'check', fn: () => accept(null) } : null,
+    ['new', 'accepted'].includes(r.status) ? { label: 'Ask a question', icon: 'chat', fn: ask } : null,
     isOpen ? { label: "Won't fix", icon: 'ban', fn: wont } : null,
     !isOpen && canSet ? { label: 'Reopen as new', icon: 'rot', fn: () => setStatus({ status: 'new' }) } : null,
-    r.status !== 'duplicate' ? { label: 'Mark duplicate of…', icon: 'link', fn: () => run(dup) } : null,
+    r.status !== 'duplicate' && r.status !== 'withdrawn' ? { label: 'Merge into another report…', icon: 'link', fn: () => run(dup) } : null,
+  ].filter((m) => m && !(prim && m.label === prim[1]));
+  const otherMenu = [
     { label: 'Change severity', icon: 'warn', fn: severity },
     { label: 'Edit title', icon: 'edit', fn: title },
     { label: r.hidden ? 'Show to other agents' : 'Hide from other agents', icon: 'eye', fn: () => patch({ hidden: !r.hidden }) },
     ...fbExportItems({ ids: id }),
     { label: 'Delete report', icon: 'trash', bad: true, confirm: 'Tap again to delete', fn: del },
   ];
-  const c = r.cost, kvs = [
-    kv('Status', fbStatus(r.status) + (r.reopen_count ? ' ' + pill(`Reopened ${r.reopen_count}×`, 'warn') : '')),
-    kv('Kind', esc(kindL)), r.tool ? kv('Tool', esc(r.tool), { id: true }) : '', kv('Area', esc(r.area)), r.error_code ? kv('Error code', esc(r.error_code), { id: true }) : '',
-    kv('Severity', r.severity === 'blocking' ? pill('Blocking', 'bad') : esc(FB_SEV[r.severity] || r.severity)),
-    kv('Filed by', fbWho(r.filer_agent_id, d.filer.label)), kv('Client', esc(d.filer.client || 'Not reported')), kv('Hub version', esc(r.hub_version), { id: true }), kv('Filed', esc(dt(r.created_at))),
-    r.fixed_in ? kv('Fixed in', esc(r.fixed_in), { id: true }) : '', r.hidden ? kv('Visibility', pill('Hidden from other agents', 'idle')) : '',
-    d.notices.notified ? kv(raw(`Last decision ${info('How many agents received the latest status notice, and how many have confirmed it.')}`), `Notified ${d.notices.notified} · seen ${d.notices.seen}`) : '',
-  ].join('');
-  const decision = r.status_note || r.guidance ? (r.status_note ? `${overline('Note')}<p class="fb-text">${esc(r.status_note)}</p>` : '') + (r.guidance ? `${overline('Guidance for agents')}<p class="fb-text">${esc(r.guidance)}</p>` : '') : '';
-  const account = [['Tried', r.tried], ['Happened', r.happened], ['Expected', r.expected], ['Workaround', r.workaround]].filter(([, v]) => v).map(([k, v]) => `${overline(k)}<p class="fb-text">${esc(v)}</p>`).join('');
+  const split = prim
+    ? `<span class="split"><button type="button" class="btn sm pri" data-fba="${prim[0]}">${ic('check')}${prim[1]}</button>${statusMenu.length ? `<button type="button" class="btn sm pri ic" data-fbsm aria-label="Other statuses" aria-haspopup="dialog">${ic('chev', 'dn')}</button>` : ''}</span>`
+    : statusMenu.length ? `<button type="button" class="btn sm" data-fbsm aria-haspopup="dialog">Status${ic('chev', 'dn')}</button>` : '';
+  const stepper = (cls = '') => FB_Q.ids.length ? `<span class="fb-step${cls}" role="group" aria-label="Reports in ${FB_BUCKET[bucket]}"><button type="button" class="btn sm ic" data-fstep="-1" aria-label="Previous report"${pos > 0 ? '' : ' disabled'}>${ic('back')}</button>`
+    + `<span class="meta">${pos < 0 ? `${FB_Q.ids.length} in ${FB_BUCKET[bucket]}` : `${pos + 1} of ${FB_Q.ids.length}`}</span><button type="button" class="btn sm ic" data-fstep="1" aria-label="Next report"${pos < FB_Q.ids.length - 1 ? '' : ' disabled'}>${ic('chev')}</button></span>` : '';
+
+  // Impact strip: what this costs, from the agents' own estimates summed over the report and its entries. Zeros are left out.
+  const c = r.cost;
   const sums = d.entries.reduce((a, e) => ({ extra_calls: a.extra_calls + (e.cost?.extra_calls || 0), extra_tokens: a.extra_tokens + (e.cost?.extra_tokens || 0), minutes_lost: a.minutes_lost + (e.cost?.minutes_lost || 0) }), { extra_calls: c?.extra_calls || 0, extra_tokens: c?.extra_tokens || 0, minutes_lost: c?.minutes_lost || 0 });
-  const costRows = fbCost(sums) ? `${overline('Cost estimates', null, info('The agents\' own estimates, summed over the report and its entries.'))}${kv('Extra calls', fmt(sums.extra_calls))}${kv('Extra tokens', fmt(sums.extra_tokens))}${kv('Minutes lost', fmt(sums.minutes_lost))}` : '';
-  const E = d.hub_evidence, callRow = (x) => row({ cls: 'aud', attrs: { 'data-go': 'log', 'data-arg': `calls|agent:${x.agent_id}` }, lead: auTime(x.created_at), title: x.tool, metaId: true, meta: `${x.invocation_id} · ${x.agent_label}`,
-    trail: `${x.result === 'ok' ? '' : pill(x.result + (x.error_code && x.result !== 'denied' ? ' · ' + x.error_code : ''), x.result === 'denied' ? 'bad' : 'warn')}<span class="aud-d">${esc(x.duration_ms)} ms${x.result_bytes ? ' · ' + esc(fmtB(x.result_bytes)) : ''}</span>`, chev: true });
+  const fig = (v, label, f = fmt) => (v ? `<span class="fbi"><b>${f(v)}</b><span>${label}</span></span>` : '');
+  const others = d.backers.filter((b) => !b.filer).length;
+  const impact = `<div class="fb-impact">${pill(FB_SEV[r.severity] || r.severity, FB_SEV_TONE[r.severity] || 'idle')}${fig(d.backers.length, d.backers.length === 1 ? 'agent' : 'agents')}${fig(sums.extra_calls, 'extra calls')}${fig(sums.extra_tokens, 'extra tokens', kTok)}${fig(sums.minutes_lost, 'min lost')}${fig(others, 'backed')}`
+    + `${r.tool || r.area ? `<span class="tag">${esc(r.tool || r.area)}</span>` : ''}${info("The agents' own estimates, summed over the report and its entries.")}</div>`;
+
+  // Decision: the note and the guidance agents see. Guidance edits in place.
+  const decision = `<section class="pcard fb-sec fb-guide">${overline('Guidance for agents', null, info("Agents see it with the report once it is accepted, fixed, answered, won't fix or a duplicate, and in the hint on the same error only while it is accepted or won't fix. On a new report it stays hidden until you decide."))}
+    <div class="fb-gview">${r.guidance ? `<p class="fb-text">${esc(r.guidance)}</p>` : '<p class="faint">No guidance yet.</p>'}<button type="button" class="btn sm" id="fbGEdit">${ic('edit')}${r.guidance ? 'Edit' : 'Write guidance'}</button></div>
+    <div class="fb-gedit" hidden><textarea class="inp" id="fbGTxt" rows="3" maxlength="2000" aria-label="Guidance for agents">${esc(r.guidance || '')}</textarea><div class="row"><button type="button" class="btn sm" id="fbGCancel">Cancel</button><button type="button" class="btn sm pri" id="fbGSave">Save guidance</button></div></div>
+    ${r.status_note ? `${overline(r.status === 'needs_info' ? 'Your question' : 'Note')}<p class="fb-text">${esc(r.status_note)}</p>` : ''}</section>`;
+  const cells = [['Tried', r.tried], ['Happened', r.happened], ['Expected', r.expected], ['Workaround', r.workaround]].filter(([, v]) => v);
+  const account = cells.length ? `<section class="pcard fb-sec">${overline("Agent's account", null, info('Written by the agent that filed it, shown as plain text.'))}<div class="fb-acct">${cells.map(([k, v]) => `<div class="fb-cell">${overline(k)}<p class="fb-text">${esc(v)}</p></div>`).join('')}</div></section>` : '';
+
+  // Side: the facts, who is affected, and the hub's own evidence. Empty fields are left out.
+  const kvs = [
+    kv('Status', fbStatus(r.status) + (r.reopen_count ? ' ' + pill(`Reopened ${r.reopen_count}×`, 'warn') : '')),
+    kv('Severity', pill(FB_SEV[r.severity] || r.severity, FB_SEV_TONE[r.severity] || 'idle')),
+    kv('Kind', esc(kindL)), r.tool ? kv('Tool', esc(r.tool), { id: true }) : '', r.area && r.area !== r.tool ? kv('Area', esc(r.area)) : '', r.error_code ? kv('Error code', esc(r.error_code), { id: true }) : '',
+    kv('Filed by', fbWho(r.filer_agent_id, d.filer.label)), kv('Filed', esc(dt(r.created_at))), d.filer.client ? kv('Client', esc(d.filer.client)) : '', r.hub_version ? kv('Hub version', esc(r.hub_version), { id: true }) : '',
+    r.fixed_in ? kv('Fixed in', esc(r.fixed_in), { id: true }) : '', r.hidden ? kv('Visibility', pill('Hidden', 'idle')) : '',
+    d.notices.notified ? kv(raw(`Last decision ${info('How many agents received the latest status notice, and how many have confirmed it.')}`), `${d.notices.seen} of ${d.notices.notified} seen`) : '',
+  ].join('');
+  const bkRow = (b) => row({ as: 'div', one: true, lead: `<span class="av">${esc(initials(b.label))}</span>`, title: raw(fbWho(b.agent_id, b.label)), trail: b.filer ? '<span>Filer</span>' : `<span title="${esc([b.teams.map((t) => t.name).join(', '), b.app, b.client].filter(Boolean).join(' · '))}">${ago(b.since)}</span>` });
+  const E = d.hub_evidence;
+  const callRow = (x) => row({ one: true, cls: 'aud', attrs: { 'data-go': 'log', 'data-arg': `calls|agent:${x.agent_id}`, title: `${x.tool} · ${x.invocation_id} · ${x.agent_label}` }, title: raw(`<time title="${esc(new Date(x.created_at).toLocaleString())}">${esc(dt(x.created_at))}</time>`),
+    trail: x.result === 'ok' ? `<span>${esc(x.duration_ms)} ms</span>` : pill(x.result + (x.error_code && x.result !== 'denied' ? ' · ' + x.error_code : ''), x.result === 'denied' ? 'bad' : 'warn'), chev: true });
   const same = E.same_error_7d ? kv(raw(`Same error, 7 days ${info('Calls to this tool that failed with this error code, across all agents.')}`), `${fbPlural(E.same_error_7d.calls, 'call', 'calls')} · ${fbPlural(E.same_error_7d.agents, 'agent', 'agents')}`) : '';
-  const evidence = `<div class="pcard">${overline('Hub evidence', null, info('Recorded by the hub, not written by an agent: the filer\'s calls to this tool in the 30 minutes before it filed. Arguments are not copied; open a call in Calls.'))}${same}${E.calls.map(callRow).join('') || none('bolt', 'No calls recorded')}</div>`;
-  const bkRow = (b) => row({ as: 'div', lead: `<span class="av lg">${esc(initials(b.label))}</span>`, title: raw(fbWho(b.agent_id, b.label)), meta: [b.teams.map((t) => t.name).join(', '), b.app, b.client].filter(Boolean).join(' · ') || 'No team', trail: b.filer ? `<span class="tag">Filer</span>` : `<span>${ago(b.since)}</span>` });
-  const plusBare = d.entries.filter((e) => e.kind === 'plus_one' && !e.text), shown = d.entries.filter((e) => !(e.kind === 'plus_one' && !e.text));
-  const ENTRY = { plus_one: 'Backed it', evidence: 'Evidence', answer: 'Answer', still_happening: 'Still happening', withdraw: 'Withdrawn' };
-  const entryH = (e) => `<div class="fb"><div class="rq-hd"><span class="rq-who">${fbWho(e.agent_id, e.agent_label)}</span><span class="meta">${esc(ENTRY[e.kind] || e.kind)} · ${esc(dt(e.created_at))}${e.hub_version ? ' · hub ' + esc(e.hub_version) : ''}${e.from_report ? ' · from ' + esc(e.from_report) : ''}</span></div>${e.text ? `<p class="fb-text">${esc(e.text)}</p>` : ''}${fbCost(e.cost) ? `<span class="meta">Estimate: ${esc(fbCost(e.cost))}</span>` : ''}${e.links.length ? `<span class="meta">${e.links.map(fbLinkH).join(', ')}</span>` : ''}</div>`;
-  const plusGroup = plusBare.length ? `<div class="vgroup">${row({ as: 'div', group: true, expanded: false, cls: 'vg-head', extra: 'role="button" tabindex="0" data-gtoggle', title: raw(`${plusBare.length} backed this${info('Agents that added a +1. Each is counted once, whatever key or login it used.')}`), trail: `<span>${ago(plusBare[0].created_at)}</span>` })}<div class="vg-rows" hidden>${plusBare.map((e) => row({ one: true, as: 'div', title: raw(fbWho(e.agent_id, e.agent_label)), trail: `<span>${esc(dt(e.created_at))}</span>` })).join('')}</div></div>` : '';
-  let plusDone = false;
-  const entriesH = d.entries.length ? d.entries.map((e) => (e.kind === 'plus_one' && !e.text ? (plusDone ? '' : ((plusDone = true), plusGroup)) : entryH(e))).join('') : none('note', 'No entries yet');
-  const hist = (h) => { const f = FB_FIELD[h.field] || h.field, v = h.field === 'status' ? `${h.old_value ? fbStatusName(h.old_value) + ' → ' : ''}${fbStatusName(h.new_value)}` : h.field === 'merged_from' ? h.new_value : h.field === 'hidden' ? h.new_value : `${h.old_value ?? '—'} → ${h.new_value ?? '—'}`;
-    return row({ as: 'div', title: `${f}: ${v}`, meta: `${h.actor_kind === 'admin' ? 'You' : h.actor_label}${h.note ? ' · ' + trunc(h.note.replace(/\s+/g, ' '), 90) : ''}`, trail: `<span>${esc(dt(h.created_at))}</span>` }); };
+  const evidence = same || E.calls.length ? `<section class="pcard fb-sec">${overline('Hub evidence', E.calls.length || null, info("Recorded by the hub, not written by an agent: the filer's calls to this tool in the 30 minutes before it filed. Open one in Calls."))}${same}${E.calls.slice(0, 12).map(callRow).join('')}</section>` : '';
+  const side = `<aside class="fb-side" aria-label="Details"><section class="pcard fb-sec kvc">${kvs}</section>
+    <section class="pcard fb-sec">${overline('Affected', d.backers.length)}${d.backers.map(bkRow).join('')}</section>${evidence}</aside>`;
+
+  // One timeline: filed, backed, entries, status changes, edits and your notes, in time order. Bare +1s in a row fold into one line.
+  const ENTRY = { plus_one: 'Backed it', evidence: 'Added evidence', answer: 'Answered', still_happening: 'Still happening', withdraw: 'Withdrew it' };
+  const ev = [
+    ...d.entries.map((e) => ({ at: e.created_at, bare: e.kind === 'plus_one' && !e.text, who: fbWho(e.agent_id, e.agent_label), what: (ENTRY[e.kind] || e.kind) + (e.from_report ? ` · from ${e.from_report}` : ''),
+      body: `${e.text ? `<p class="fb-text">${esc(e.text)}</p>` : ''}${fbCost(e.cost) ? `<span class="meta">Estimate: ${esc(fbCost(e.cost))}</span>` : ''}${e.links.length ? `<span class="meta">${e.links.map(fbLinkH).join(', ')}</span>` : ''}` })),
+    ...d.history.map((h) => {
+      const who = h.actor_kind === 'admin' ? 'You' : h.actor_kind === 'agent' && h.actor_id ? fbWho(h.actor_id, h.actor_label) : esc(cap(h.actor_label));
+      const what = h.field === 'status' ? (h.old_value ? `${fbStatusName(h.old_value)} → ${fbStatusName(h.new_value)}` : 'Filed the report')
+        : h.field === 'merged_from' ? `Merged ${h.new_value} into this one` : h.field === 'guidance' ? (h.new_value ? 'Changed the guidance' : 'Removed the guidance')
+        : h.field === 'note' ? 'Note' : `${FB_HIST[h.field] || h.field}${h.field === 'severity' ? `: ${FB_SEV[h.old_value] || h.old_value} → ${FB_SEV[h.new_value] || h.new_value}` : ''}`;
+      const text = h.field === 'guidance' ? h.new_value : h.note;
+      return { at: h.created_at, who, what, body: text ? `<p class="fb-text">${esc(text)}</p>` : '', note: h.field === 'note' };
+    }),
+  ].sort((a, b) => a.at - b.at);
+  const evH = (e) => `<div class="fb${e.note ? ' fb-mine' : ''}"><div class="rq-hd"><span class="rq-who">${e.who}</span><span class="meta">${esc(e.what)} · ${esc(dt(e.at))}</span></div>${e.body}</div>`;
+  const timeline = groupRuns(ev, (e) => e.bare, (e) => e.at, 3).map((x) => x.group
+    ? `<div class="vgroup">${row({ as: 'div', group: true, expanded: false, cls: 'vg-head', extra: 'role="button" tabindex="0" data-gtoggle', title: `${x.group.length} agents backed it`, trail: `<span>${esc(dt(x.group[0].at))}</span>` })}<div class="vg-rows" hidden>${x.group.map(evH).join('')}</div></div>`
+    : evH(x)).join('');
+  const noteForm = `<form class="fb-note" id="fbNoteF"><input class="inp" id="fbNote" maxlength="2000" placeholder="Add a note (only you see it)" aria-label="Add a note to the timeline" autocomplete="off"><button type="submit" class="btn sm">Add</button></form>`;
   const dupNote = r.status === 'duplicate' && r.duplicate_of ? vnote(`Merged into <a href="#" data-fb="${esc(r.duplicate_of)}">${esc(r.duplicate_of)}</a>. Its backers and entries moved there.`) : '';
-  const dups = d.duplicates.length ? `<div class="pcard">${overline('Merged into this report', d.duplicates.length)}${d.duplicates.map((x) => row({ title: x.title, meta: x.id, metaId: true, chev: true, attrs: { 'data-fb': x.id } })).join('')}</div>` : '';
+  const links = d.links.length ? `<section class="pcard fb-sec">${overline('Links', d.links.length)}${d.links.map((l) => row({ one: true, as: 'div', title: raw(`<span class="mono">${fbLinkH(l)}</span>`) })).join('')}</section>` : '';
+  const dups = d.duplicates.length ? `<section class="pcard fb-sec">${overline('Merged into this report', d.duplicates.length)}${d.duplicates.map((x) => row({ title: x.title, meta: x.id, metaId: true, chev: true, attrs: { 'data-fb': x.id } })).join('')}</section>` : '';
+
+  const queue = `<nav class="fb-queue" id="fbQ" aria-label="Reports in ${FB_BUCKET[bucket]}"><div class="fbq-hd">${overline(FB_BUCKET[bucket], Q.length)}<select class="sel" id="fbQs" aria-label="Order of the queue">${FB_QSORT.map(([v, l]) => `<option value="${v}"${v === FB_Q.sort ? ' selected' : ''}>${l}</option>`).join('')}</select></div>`
+    + (Q.map((x) => row({ cls: 'fbq-row' + (x.id === id ? ' on' : ''), title: x.title, meta: [x.severity === 'blocking' ? 'Blocking' : '', x.tool || x.area, fbPlural(x.backers, 'agent', 'agents'), ago(x.created_at)].filter(Boolean).join(' · '),
+      attrs: { 'data-fbq': x.id, title: x.title }, extra: x.id === id ? 'aria-current="true"' : '' })).join('') || none('wish', FB_EMPTY[bucket])) + '</nav>';
   return {
     t: `${fbGlyph(r.kind)}<span class="ellip">${esc(r.title)}</span>${fbStatus(r.status)}`,
-    a: prim(true) + moreBtn(),
-    dbar: { title: r.title, meta: `${kindL} · ${fbStatusName(r.status)} · ${fbPlural(r.backers, 'agent', 'agents')}`, menu },
-    b: dupNote
-      + `<div class="pcard">${overline('Report')}${kvs}${decision}</div>`
-      + `<div class="pcard">${overline("Agent's account", null, info("Written by the agent that filed it. Shown as plain text; cost figures are the agent's own estimates."))}${account}${costRows}</div>`
-      + evidence
-      + `<div class="pcard">${overline('Affected', d.backers.length)}${d.backers.map(bkRow).join('')}</div>`
-      + `<div class="pcard">${overline('Entries', d.entries.length)}${entriesH}</div>`
-      + (d.links.length ? `<div class="pcard">${overline('Links', d.links.length)}${d.links.map((l) => row({ one: true, as: 'div', title: raw(`<span class="mono">${fbLinkH(l)}</span>`) })).join('')}</div>` : '')
-      + dups
-      + `<div class="pcard">${overline('History', d.history.length)}${d.history.map(hist).join('')}</div>`
-      + (prim(false) ? `<div class="actionbar only-m">${prim(false)}</div>` : ''),
+    a: stepper() + split + `<button type="button" class="btn ic" id="fbMore" aria-label="More actions" aria-haspopup="dialog">${ic('more')}</button>`,
+    dbar: { title: r.title, meta: `${kindL} · ${fbStatusName(r.status)} · ${fbPlural(r.backers, 'agent', 'agents')}`, menu: [...statusMenu, ...otherMenu] },
+    b: `<div class="fbx">${queue}<div class="fb-rep">${stepper(' only-m')}${dupNote}${impact}<div class="fb-cols"><div class="fb-main">${decision}${account}
+      <section class="pcard fb-sec fb-tl">${overline('Timeline', ev.length)}${timeline}${noteForm}</section>${links}${dups}</div>${side}</div></div></div>`
+      + (prim ? `<div class="actionbar only-m"><button type="button" class="btn pri" data-fba="${prim[0]}">${ic('check')}${prim[1]}</button></div>` : ''),
     after() {
       $$('[data-fba]').forEach((b) => (b.onclick = () => (b.dataset.fba === 'accept' ? accept(b) : fixed(b))));
+      $$('[data-fbsm]').forEach((b) => (b.onclick = () => openMenu(statusMenu, b)));
+      $('#fbMore').onclick = (e) => openMenu(otherMenu, e.currentTarget);
+      $$('[data-fstep]').forEach((b) => (b.onclick = () => fbStep(+b.dataset.fstep)));
+      const qs = $('#fbQs'); if (qs) qs.addEventListener('change', (e) => { e.stopPropagation(); FB_Q.sort = qs.value; openD('fbr', id, true); });
+      $$('[data-fbq]').forEach((b) => (b.onclick = () => { if (b.dataset.fbq !== id) openD('fbr', b.dataset.fbq, true); }));
+      const q = $('#fbQ'); if (q) { q.scrollTop = FB_Q.scroll; const on = q.querySelector('.fbq-row.on'); if (on) { const qr = q.getBoundingClientRect(), orr = on.getBoundingClientRect(); if (orr.top < qr.top + 44 || orr.bottom > qr.bottom) on.scrollIntoView({ block: 'center' }); } }
+      const gv = $('.fb-gview'), ge = $('.fb-gedit');
+      $('#fbGEdit').onclick = () => { gv.hidden = true; ge.hidden = false; $('#fbGTxt').focus(); };
+      $('#fbGCancel').onclick = () => { $('#fbGTxt').value = r.guidance || ''; ge.hidden = true; gv.hidden = false; viewEdited = false; $('#fbGEdit').focus(); };
+      $('#fbGSave').onclick = () => patch({ guidance: $('#fbGTxt').value.trim() || null });
+      $('#fbNoteF').onsubmit = (e) => { e.preventDefault(); const t = $('#fbNote').value.trim(); if (!t) return; run(async () => { await post(fp + '/notes', { text: t }); toast('Note added'); openD('fbr', id, true); }); };
     },
   };
 };
@@ -3766,12 +4346,17 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
     // Escape while typing leaves the field; it must not navigate away and drop a drafted directive or form.
     if (e.target.matches?.('input,select,textarea')) { e.target.blur(); return; }
+    if (DR.type === 'topology' && EGO.focus) { egoSet(null); return; }
     if (DR.type === 'topology' && TG_S.focus) { topoFocus(null); return; } back(); return;
   }
   if (e.target.matches?.('input,select,textarea') || e.metaKey || e.ctrlKey || e.altKey) return;
-  if ((e.key === 'Enter' || e.key === ' ') && e.target.matches?.('[role=button],tr[data-key],tr[data-ses],.ev[data-df]')) { e.preventDefault(); e.target.dispatchEvent(new MouseEvent('click', { bubbles: true })); return; }
+  if ((e.key === 'Enter' || e.key === ' ') && e.target.matches?.('[role=button],tr[data-key],tr[data-ses],.ev[data-df],.tm-row[tabindex]')) { e.preventDefault(); e.target.dispatchEvent(new MouseEvent('click', { bubbles: true })); return; }
   // Some layouts report Shift+/ as "/" with Shift held rather than "?".
   const key = e.key === '/' && e.shiftKey ? '?' : e.key.toLowerCase();
+  // In Work → Directives, j and k move through the list (k is Keys elsewhere).
+  if (DR.type === 'directives' && !$('#workspaceView').hidden && (key === 'j' || key === 'k')) { e.preventDefault(); dirStep(key === 'j' ? 1 : -1); return; }
+  // On a feedback report, j and k step through the queue (k is Keys elsewhere).
+  if (DR.type === 'fbr' && !$('#workspaceView').hidden && (key === 'j' || key === 'k')) { e.preventDefault(); fbStep(key === 'j' ? 1 : -1); return; }
   const m = { s: 'sessions', m: 'teams', c: 'chats', k: 'keys', p: 'pcs', v: 'vault', r: 'req', h: 'shares', o: 'lock', g: 'agents', l: 'log', t: 'theme', '?': 'shortcuts' }[key];
   if (m) { e.preventDefault(); closeMe(); go(m); }
 });

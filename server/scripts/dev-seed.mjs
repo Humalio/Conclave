@@ -150,11 +150,21 @@ async function seedDecisions() {
   });
 }
 
+// ── large seed (--scale or SEED_SCALE=1): volume on top of this one, see dev-seed-scale.mjs ──
+const SCALE = process.argv.includes('--scale') || /^(1|true|yes)$/i.test(process.env.SEED_SCALE ?? '');
+async function seedScaleIf() {
+  if (!SCALE) return;
+  const { seedScale } = await import('./dev-seed-scale.mjs');
+  await step('scale', () => seedScale({ get, post, put, patch, mcpClient, state, save, step, log, sleep }));
+}
+
 // ── already done? ──
 if (state.done && (await get('/api/teams')).teams.some((t) => t.name === TEAM_NAME)) {
   log('Already seeded (state in .dev/seed-state.json). Use `npm run dev:hub -- --reset` for a clean start.');
   await seedFeedback();
   await seedDecisions();
+  await seedScaleIf();
+  if (failures.length) { log(`${failures.length} step(s) failed:`); for (const f of failures) log(` - ${f}`); }
   await sleep(100); process.exit(0);
 }
 
@@ -436,6 +446,7 @@ if (!overdue) failures.push('overdue alert did not appear within 72 s');
 state.done = failures.length === 0; save();
 await seedFeedback();
 await seedDecisions();
+await seedScaleIf();
 
 // ── summary ──
 const n = async (p, k) => ((await get(p))[k] ?? []).length;

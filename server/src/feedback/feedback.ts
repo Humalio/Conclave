@@ -636,7 +636,7 @@ export class Feedback {
     return { report: next, target: this.mustReport(targetId), moved };
   }
 
-  edit(id: string, p: { title?: string; severity?: Severity; hidden?: boolean }, actor: Actor): ReportRow {
+  edit(id: string, p: { title?: string; severity?: Severity; hidden?: boolean; guidance?: string | null }, actor: Actor): ReportRow {
     const r = this.mustReport(id);
     const now = Date.now();
     if (p.title !== undefined && p.title !== r.title) {
@@ -655,7 +655,26 @@ export class Feedback {
       this.history(id, actor, 'hidden', r.hidden ? 'hidden' : 'visible', p.hidden ? 'hidden' : 'visible');
       this.audit.event(actor, 'feedback.edit', { kind: 'feedback', id }, { field: 'visibility' });
     }
+    // Guidance without a status change: agents see it in the report's decision and in the hint after the same error (knownHint).
+    if (p.guidance !== undefined) {
+      const g = p.guidance?.trim() || null;
+      if (g !== null && g.length > 2000) throw new FeedbackError('invalid_argument', 'Guidance is at most 2000 characters.');
+      if (g !== r.guidance) {
+        this.db.prepare('UPDATE feedback_reports SET guidance=?, updated_at=? WHERE id=?').run(g, now, id);
+        this.history(id, actor, 'guidance', r.guidance, g);
+        this.audit.event(actor, 'feedback.edit', { kind: 'feedback', id }, { field: 'guidance' });
+      }
+    }
     return this.mustReport(id);
+  }
+  /** An operator's note on the report's timeline. Only the console and the JSON export show it; agents never read the history. */
+  note(id: string, text: string, actor: Actor): void {
+    this.mustReport(id);
+    const t = text.trim();
+    if (!t || t.length > 2000) throw new FeedbackError('invalid_argument', 'A note is 1 to 2000 characters.');
+    this.history(id, actor, 'note', null, null, t);
+    this.db.prepare('UPDATE feedback_reports SET updated_at=? WHERE id=?').run(Date.now(), id);
+    this.audit.event(actor, 'feedback.note', { kind: 'feedback', id }, {});
   }
 
   delete(id: string, actor: Actor): void {

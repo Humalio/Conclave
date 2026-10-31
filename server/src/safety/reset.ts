@@ -20,7 +20,7 @@ export const RESET_PARTS: ResetPart[] = [
   { key: 'activity', label: 'Activity logs', detail: 'Tool calls, file access log, sign-in events, alerts and rate-limit counters. The audit trail is kept.',
     seeds: ALL(['authentication_events', 'tool_invocations', 'resource_access_events', 'security_alerts', 'usage_counters']) },
   { key: 'conversations', label: 'Conversations', detail: 'Direct and group chats with their messages.',
-    seeds: ALL(['rooms', 'room_memberships', 'messages', 'message_delivery_cursors']) },
+    seeds: ALL(['rooms', 'room_memberships', 'messages', 'message_delivery_cursors', 'message_ack_snapshots']) },
   { key: 'teams', label: 'Teams and tasks', detail: 'Teams, members, roles, task boards, work queues, decisions and team rooms.',
     seeds: [...ALL(['teams', 'team_members', 'team_roles', 'tasks', 'task_events', 'work_items', 'decisions']), { table: 'rooms', where: "kind='team'" }] },
   { key: 'agents', label: 'Agents, keys and permissions', detail: 'Agents, session and app keys, logins, rules and versions, links, notices, access requests and temporary grants.',

@@ -36,12 +36,16 @@ export class Vault {
     for (const s of rel) {
       if (s === '..') throw new VaultError('invalid_path', '".." is not allowed');
       if (/^[a-zA-Z]:$/.test(s) || s.includes(':')) throw new VaultError('invalid_path', 'drive letters and ":" are not allowed');
+      // Windows drops trailing dots and spaces, so ".obsidian." or "secret.md " would reach ".obsidian" or "secret.md"
+      // past the hidden-folder check and path rules. Refused on every platform so a path means the same everywhere.
+      if (/[. ]$/.test(s)) throw new VaultError('invalid_path', 'a name cannot end with a dot or a space');
       if (this.isHidden(s)) throw new VaultError('denied', 'not allowed, or does not exist');
     }
     return { path: '/' + [this.alias, ...rel].join('/'), rel };
   }
 
-  isHidden(segment: string): boolean { return this.hidden.includes(segment) || this.hiddenLower.has(segment.toLowerCase()) || segment.endsWith('.hub-tmp'); }
+  /** Hidden from agents: configured names, hub temp files, and names ending in a dot or space (unreachable by path, see normalise). */
+  isHidden(segment: string): boolean { return this.hidden.includes(segment) || this.hiddenLower.has(segment.toLowerCase()) || segment.endsWith('.hub-tmp') || /[. ]$/.test(segment); }
   private readonly hiddenLower: Set<string>;
 
   /** Resolve to a real absolute path inside the root, following symlinks safely. */
@@ -52,6 +56,9 @@ export class Vault {
     const r = relative(this.root, real);
     if (r !== '' && (r.startsWith('..') || isAbsolute(r) || r.split(sep).includes('..'))) throw new VaultError('denied', 'not allowed, or does not exist');
     for (const s of r.split(sep)) if (s && this.isHidden(s)) throw new VaultError('denied', 'not allowed, or does not exist');
+    // On a case-insensitive file system "SECRET.md" opens "secret.md", but path rules compare names exactly. A path
+    // that reaches a file only through a case difference is refused, so a rule on the real name cannot be sidestepped.
+    if (real !== abs && real.toLowerCase() === abs.toLowerCase()) throw new VaultError('denied', 'not allowed, or does not exist');
     return real;
   }
 

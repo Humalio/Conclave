@@ -6,7 +6,8 @@ expired). It prints {"Authorization": "Bearer <app key>", "X-Agent-Hub-Session":
 calls session_login and neither the key nor the token appears in its transcript.
 
 Configuration, all outside the model:
-  .agent-hub.json in the folder that declares the server (Claude Code runs the helper there), no secrets:
+  .agent-hub.json in the agent's folder, no secrets. Pass the folder as the first argument
+  (agent-hub-headers.py /path/to/agent); without it the working folder is used. Contents:
       {"url": "http://127.0.0.1:8080/mcp", "session_var": "BIRAZ_LEAD_SESSION_KEY"}
       optional "keys_file" (default ~/.config/conclave/keys.env) and "app_var" (default AGENT_HUB_APP_KEY)
   keys file (mode 600): AGENT_HUB_APP_KEY=ah_app_… and the session key variable named above.
@@ -83,11 +84,14 @@ def call(url: str, headers: dict, name: str, args: dict) -> tuple:
 
 
 def main() -> None:
+    # The agent's folder: the first argument if given (Claude Code does not always run the helper in the folder that
+    # declares the server), else the working folder.
+    folder = os.path.abspath(os.path.expanduser(sys.argv[1]) if len(sys.argv) > 1 else '.')
     try:
-        with open('.agent-hub.json', encoding='utf-8') as f:
+        with open(os.path.join(folder, '.agent-hub.json'), encoding='utf-8') as f:
             cfg = json.load(f)
     except (OSError, ValueError) as e:
-        fail(f'cannot read .agent-hub.json in {os.getcwd()}: {e}')
+        fail(f'cannot read .agent-hub.json in {folder}: {e}')
     if not isinstance(cfg, dict):
         fail('.agent-hub.json must be a JSON object')
     var = cfg.get('session_var')

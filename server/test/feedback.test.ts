@@ -619,6 +619,28 @@ describe('operator routes', () => {
     expect(after.new).toBe(before.new - 1);
   });
 
+  it('guidance can be edited without a status change, and operator notes stay in the console', async () => {
+    const a = await agentSession('gd-a');
+    const id = (await file(a.S, uniq({ title: 'guidance heron probe' }))).structuredContent.report_id;
+    await api('POST', `/feedback/${id}/status`, { status: 'accepted' });
+    const g = await api('PATCH', `/feedback/${id}`, { guidance: '  Use the offset argument.  ' });
+    expect(g.status).toBe(200);
+    expect(g.body.report).toMatchObject({ status: 'accepted', guidance: 'Use the offset argument.' });
+    expect(g.body.history.filter((h: any) => h.field === 'status')).toHaveLength(2); // filed, accepted: no new status row
+    expect(g.body.history.find((h: any) => h.field === 'guidance')).toMatchObject({ old_value: null, new_value: 'Use the offset argument.', actor_kind: 'admin' });
+    expect((await a.S('feedback_find', { query: 'heron' })).structuredContent.reports[0].decision).toMatchObject({ trust: 'L0', guidance: 'Use the offset argument.' });
+    expect((await api('PATCH', `/feedback/${id}`, { guidance: 'x'.repeat(2001) })).status).toBe(400);
+    expect((await api('PATCH', `/feedback/${id}`, { guidance: null })).body.report.guidance).toBeNull();
+
+    const n = await api('POST', `/feedback/${id}/notes`, { text: 'Asked the vault team about it.' });
+    expect(n.status).toBe(200);
+    expect(n.body.history.at(-1)).toMatchObject({ field: 'note', note: 'Asked the vault team about it.', actor_kind: 'admin' });
+    expect((await api('POST', `/feedback/${id}/notes`, { text: '' })).status).toBe(400);
+    expect((await api('POST', '/feedback/fb_missing/notes', { text: 'x' })).status).toBe(404);
+    expect(JSON.stringify((await a.S('feedback_read', { report_id: id })).structuredContent)).not.toContain('vault team');
+    expect((app.db.prepare("SELECT COUNT(*) n FROM audit_events WHERE action='feedback.note' AND target_id=?").get(id) as any).n).toBe(1);
+  });
+
   it('settings round-trip and are audited', async () => {
     const s = (await api('GET', '/feedback/settings')).body;
     expect(s).toMatchObject({ enabled: true, own_only: false });

@@ -41,8 +41,8 @@ const sha = (b: Buffer) => `sha256:${sha256Hex(b)}`;
 
 export class VaultStore {
   readonly blobsDir: string;
-  /** Test seam: runs after the temp file is written, before the final re-hash. */
-  hooks: { afterTmp?: (abs: string) => void | Promise<void> } = {};
+  /** Test seams around staging a write: just before the temporary file is opened, and just after it is written. */
+  hooks: { beforeTmp?: (abs: string) => void | Promise<void>; afterTmp?: (abs: string) => void | Promise<void> } = {};
   /** Resolves when the startup recovery and first scan are done. */
   ready: Promise<void> = Promise.resolve();
   /** Listeners must not throw into the writer; errors are logged and swallowed. */
@@ -184,6 +184,40 @@ export class VaultStore {
     return { abs: cur, st };
   }
   private async safeStat(rel: string[]): Promise<Stat> { try { return (await this.safeAbs(rel)).st; } catch { return null; } }
+  /**
+   * On a case-insensitive file system, an existing file can be reached under a name that differs only by case
+   * ("NOTE.md" for "Note.md"). Returns the names on disk when rel is such an alias, else null. Call only when rel exists.
+   */
+  private async caseAlias(rel: string[]): Promise<string[] | null> {
+    let cur = this.vault.root, differs = false;
+    const real: string[] = [];
+    for (const seg of rel) {
+      let names: string[];
+      try { names = await fs.readdir(cur); } catch { return null; }
+      const name = names.includes(seg) ? seg : names.find((n) => n.toLowerCase() === seg.toLowerCase());
+      if (name === undefined) return null;
+      if (name !== seg) differs = true;
+      real.push(name);
+      cur = join(cur, name);
+    }
+    return differs ? real : null;
+  }
+  private async refuseCaseAlias(rel: string[]): Promise<void> {
+    const real = await this.caseAlias(rel);
+    if (real) throw new VaultError('conflict', `The file exists as ${this.vault.virtual(real)}; use that name.`, { reason: 'case_mismatch', path: this.vault.virtual(real) });
+  }
+  /**
+   * Just before touching the disk: the parent folders of rel are still real folders, not a symlink or junction swapped in
+   * since safeAbs. This narrows the window to the operation itself; Node has no openat/O_NOFOLLOW to close it entirely.
+   */
+  private async assertConfined(rel: string[]): Promise<void> {
+    let cur = this.vault.root;
+    for (const seg of rel.slice(0, -1)) {
+      cur = join(cur, seg);
+      const st = await fs.lstat(cur).catch(() => null);
+      if (!st || st.isSymbolicLink() || !st.isDirectory()) throw new VaultError('denied', 'not allowed, or does not exist');
+    }
+  }
 
   /** Is there a sibling whose name differs only by case (case-insensitive file systems)? */
   private async clash(abs: string, exceptName?: string): Promise<boolean> {
@@ -203,6 +237,10 @@ export class VaultStore {
   fileById(id: string): FileRow | undefined { return this.db.prepare('SELECT * FROM files WHERE id=?').get(id) as FileRow | undefined; }
   revisions(fileId: string, limit = 200): RevisionRow[] {
     return this.db.prepare('SELECT * FROM file_revisions WHERE file_id=? ORDER BY created_at DESC, rowid DESC LIMIT ?').all(fileId, limit) as unknown as RevisionRow[];
+  }
+  /** Paths a file had at the revisions with this content hash (one hash can recur, A->B->A). */
+  revisionPaths(fileId: string, revision: string): string[] {
+    return (this.db.prepare('SELECT DISTINCT path_at_revision p FROM file_revisions WHERE file_id=? AND revision=?').all(fileId, revision) as { p: string }[]).map((r) => r.p);
   }
   hasRevision(fileId: string, revision: string): boolean {
     return !!this.db.prepare('SELECT 1 x FROM file_revisions WHERE file_id=? AND revision=? LIMIT 1').get(fileId, revision);
@@ -258,6 +296,7 @@ export class VaultStore {
       return 'absent';
     }
     if (st.size > MAX_TRACK) return 'absent';
+    if (!row && await this.caseAlias(rel)) return 'absent'; // the file is tracked under its own name, not this alias
     const mtime = Math.round(st.mtimeMs);
     if (!known && row?.current_revision && row.size === st.size && row.mtime === mtime) return row.current_revision;
     const bytes = known?.bytes ?? await fs.readFile(abs);
@@ -428,6 +467,7 @@ export class VaultStore {
       if (bytes.length > MAX_CONTENT && op !== 'restore' && !(who.allowLarge && bytes.length <= MAX_BLOB)) throw new VaultError('too_large', `content is larger than ${MAX_CONTENT} bytes`);
       const { abs, st } = await this.safeAbs(rel);
       if (st && !st.isFile()) throw new VaultError('invalid_argument', 'this is a folder');
+      if (st) await this.refuseCaseAlias(rel);
       let curBytes: Buffer | null = null;
       if (st) {
         if (st.size > MAX_BLOB) throw new VaultError('too_large', 'the existing file is too large to replace through the hub');
@@ -452,6 +492,8 @@ export class VaultStore {
         .run(intent, 'write', path, cur, newHash, tmpName, who.agentId ?? null, who.credentialId ?? null, op, op === 'restore' ? 'restore' : 'platform', Date.now());
       const abort = async () => { await fs.unlink(tmp).catch(() => undefined); this.db.prepare('DELETE FROM write_intents WHERE id=?').run(intent); };
       try {
+        await this.hooks.beforeTmp?.(abs);
+        try { await this.assertConfined(rel); } catch (e) { await abort(); throw e; }
         const fh = await fs.open(tmp, 'wx');
         try { await fh.writeFile(bytes); await fh.sync(); } finally { await fh.close(); }
         await this.hooks.afterTmp?.(abs);
@@ -467,7 +509,7 @@ export class VaultStore {
           this.audit.alert('warning', 'vault_conflict', f.id, { path, source: 'external_during_commit', conflict: id });
           throw new VaultError('conflict', 'The file was changed by someone else while writing. Nothing was overwritten; both versions are kept.', { current_revision: cur2, base_revision: base, conflict_id: id });
         }
-        try { this.assertWritable(); who.recheck?.(); } catch (e) { await abort(); throw e; }
+        try { this.assertWritable(); who.recheck?.(); await this.assertConfined(rel); } catch (e) { await abort(); throw e; }
         await fs.rename(tmp, abs);                              // commit point
         try { const dh = await fs.open(dirname(abs), 'r'); try { await dh.sync(); } finally { await dh.close(); } } catch { /* not supported (Windows) */ }
       } catch (e) {
@@ -494,6 +536,7 @@ export class VaultStore {
       const { abs, st } = await this.safeAbs(rel);
       if (!st) throw new VaultError('not_found', 'not allowed, or does not exist');
       if (!st.isFile()) throw new VaultError('invalid_argument', 'this is a folder; only files can be deleted');
+      await this.refuseCaseAlias(rel);
       if (st.size > MAX_BLOB) throw new VaultError('too_large', 'the file is too large to delete through the hub (it could not be kept for recovery)');
       const bytes = await fs.readFile(abs);
       const cur = sha(bytes);
@@ -509,7 +552,7 @@ export class VaultStore {
           await this.observeLocked(rel, again ? { bytes: again, st: await fs.stat(abs) } : undefined, 'external_observed');
           throw new VaultError('conflict', 'The file was changed by someone else while deleting. Nothing was deleted.', { current_revision: again ? sha(again) : 'absent', base_revision: base });
         }
-        who.recheck?.(); this.assertWritable();
+        who.recheck?.(); this.assertWritable(); await this.assertConfined(rel);
         await fs.unlink(abs);
       } catch (e) { this.db.prepare('DELETE FROM write_intents WHERE id=?').run(intent); throw e; }
       tx(this.db, () => {
@@ -531,14 +574,17 @@ export class VaultStore {
       const src = await this.safeAbs(from);
       if (!src.st) throw new VaultError('not_found', 'not allowed, or does not exist');
       if (!src.st.isFile()) throw new VaultError('invalid_argument', 'only files can be renamed');
+      await this.refuseCaseAlias(from);
       const bytes = await fs.readFile(src.abs);
       const cur = sha(bytes);
       await this.observeLocked(from, { bytes, st: src.st });
       const file = this.fileByPath(a)!;
       if (cur !== base) throw this.conflict(file.id, cur, base);
       const dst = await this.safeAbs(to);
-      await this.observeLocked(to);
       const caseOnly = dirname(src.abs) === dirname(dst.abs) && basename(src.abs).toLowerCase() === basename(dst.abs).toLowerCase();
+      // On a case-insensitive file system the destination of a case-only rename is the source itself; observing it
+      // under the new name would record a second active row for the same file.
+      if (!caseOnly) await this.observeLocked(to);
       if ((dst.st && !caseOnly) || await this.clash(dst.abs, caseOnly ? basename(src.abs) : undefined)) {
         throw new VaultError('conflict', 'The destination already exists.', { reason: 'destination_exists' });
       }
@@ -552,7 +598,7 @@ export class VaultStore {
           await this.observeLocked(from, again ? { bytes: again, st: await fs.stat(src.abs) } : undefined, 'external_observed');
           throw new VaultError('conflict', 'The file was changed by someone else while renaming. Nothing was renamed.', { current_revision: again ? sha(again) : 'absent', base_revision: base });
         }
-        who.recheck?.(); this.assertWritable();
+        who.recheck?.(); this.assertWritable(); await this.assertConfined(from); await this.assertConfined(to);
         await fs.rename(src.abs, dst.abs);
       } catch (e) { this.db.prepare('DELETE FROM write_intents WHERE id=?').run(intent); throw e; }
       const nst = await fs.stat(dst.abs);
