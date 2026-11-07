@@ -684,7 +684,9 @@ details.cf summary::-webkit-details-marker{display:none}
   .ws-tabs button{flex:none}
 }
 /* agents topology */
+/* Beside the graph, the feed takes the graph card's height and scrolls inside it (size containment: its content never stretches the row). */
 .tg-wrap{display:grid;grid-template-columns:minmax(0,1fr) 290px;gap:var(--s4);align-items:start}
+@media (min-width:1180px){.tg-wrap>.tg-feed{align-self:stretch;contain:size}}
 @media (max-width:1179.98px){
   .tg-wrap{grid-template-columns:minmax(0,1fr)}
 }
@@ -696,17 +698,20 @@ details.cf summary::-webkit-details-marker{display:none}
 .tg-e.k-link{stroke:var(--faint);stroke-dasharray:3 6}
 .tg-e.r-old{opacity:.4}
 .tg-e.k-team.r-rec{stroke:var(--muted)}
-.tg-e.r-act{stroke:var(--ok);stroke-dasharray:7 6;animation:flow .7s linear infinite;opacity:1}
+/* Activity motion is stepped (about 8 repaints a second, not 60) and pauses while nodes move: on SVG every animated frame repaints
+   the whole graph, which made the view slow with many active agents. */
+.tg-e.r-act{stroke:var(--ok);stroke-dasharray:7 6;animation:flow .78s steps(6) infinite;opacity:1}
+.tg.moving .tg-e.r-act,.tg.moving .halo{animation-play-state:paused}
 .tg-hit{fill:none;stroke:transparent;stroke-width:14;pointer-events:stroke}
 .tg-eg[data-room],.tg-eg[data-team]{cursor:pointer}
-.tg-node{cursor:pointer;transition:opacity .2s}
+.tg-node{cursor:pointer}
 .tg-node:focus{outline:none}
 .tg-agent .core{fill:var(--panel-2);stroke:var(--line-2);stroke-width:1.5}
 .tg-agent.live .core{stroke:var(--ok);stroke-width:2.5}
 .tg-agent.r-act .core{fill:var(--ok-soft)}
 .tg-agent .ini{fill:var(--text);font:var(--t-meta);font-weight:600}
-.tg-agent .halo{fill:none;stroke:var(--ok);stroke-width:2;transform-box:fill-box;transform-origin:center;animation:halo 1.6s ease-out infinite}
-@keyframes halo{0%{transform:scale(1);opacity:.8}100%{transform:scale(1.6);opacity:0}}
+.tg-agent .halo{fill:none;stroke:var(--ok);stroke-width:2;animation:halo 1.6s steps(10) infinite}
+@keyframes halo{0%{stroke-width:2;stroke-opacity:.8}100%{stroke-width:24;stroke-opacity:0}}
 .tg-agent:hover .core,.tg-agent:focus-visible .core{stroke:var(--accent);stroke-width:2.5}
 .tg-den circle{fill:var(--bad);stroke:var(--panel);stroke-width:2}
 .tg-den text{fill:var(--accent-ink);font:var(--t-cap)}
@@ -721,7 +726,6 @@ details.cf summary::-webkit-details-marker{display:none}
 .tg-node.busy rect{stroke:var(--ok);stroke-width:2.5}
 .tg-node:hover rect,.tg-node:focus-visible rect{stroke:var(--accent);stroke-width:2.5}
 /* focus view: the focused node in the centre, its connections on a ring, everything else faded to a ghost */
-.tg .tg-eg{transition:opacity .25s}
 .tg:not(.ego) .tg-sub,.tg:not(.ego) .tg-agent:not(.hov) .tg-lbl,.tg.narrow:not(.ego) .tg-prog{display:none}
 .tg.ego .tg-node.ego-out{opacity:.07;pointer-events:none}
 .tg.ego .tg-node.ego-out text{display:none}
@@ -733,7 +737,7 @@ details.cf summary::-webkit-details-marker{display:none}
 .tg-node.focus .core{fill:var(--accent-soft);stroke:var(--accent);stroke-width:3}
 .tg-node.focus>rect:first-of-type{stroke:var(--accent);stroke-width:3}
 .tg-node.hov .core,.tg-node.hov>rect:first-of-type{stroke:var(--accent);stroke-width:2.5}
-@media (prefers-reduced-motion: reduce){.tg .tg-node,.tg .tg-eg,.tg .tg-e{transition:none}}
+@media (prefers-reduced-motion: reduce){.tg .tg-e,.tg .tg-cap{transition:none}}
 .tg-trail{display:flex;align-items:center;gap:var(--s2);flex-wrap:wrap;min-height:var(--s8);margin-bottom:var(--s2)}
 .tg-crumbs{display:flex;align-items:center;gap:var(--s1);flex-wrap:wrap;min-width:0}
 .tg-crumbs .sep{width:14px;height:14px;color:var(--faint);flex:none}
@@ -769,7 +773,9 @@ details.cf summary::-webkit-details-marker{display:none}
 /* topology: project breadcrumb, outside agents */
 .tg-crumb{display:flex;align-items:center;gap:var(--s2);flex-wrap:wrap;font:var(--t-title)}
 .tg-crumb .sep{width:14px;height:14px;color:var(--faint)}
-.tg-crumb b{font:var(--t-title)}
+.tg-crumb b{display:inline-flex;align-items:center;gap:var(--s2);font:var(--t-title)}
+.tg-cap{fill:var(--muted);font:var(--t-cap);letter-spacing:.04em;text-transform:uppercase;transition:opacity .2s}
+.tg.ego .tg-cap{opacity:0}
 .tg-agent.ext{opacity:.55}
 .tg-agent.ext .core{stroke-dasharray:3 3}
 /* auditing: alert triage */
@@ -1183,18 +1189,36 @@ button.av{cursor:pointer}
 .av .st.warn{background:var(--warn)}
 .kvc{padding-top:0;padding-bottom:0}
 .kv-sub{font:var(--t-meta);color:var(--muted)}
-/* Teams list (Work → Teams): one grouped table. Project group headers fold; team rows share the column tracks,
-   so status, progress, attention, members and activity line up across projects. Phones: two-line rows, no table. */
-.tm-card{padding-top:0;padding-bottom:0}
+/* Teams: a card per project (header band + team rows on shared column tracks), agents in no team as the last card */
+.tm-stack{display:flex;flex-direction:column;gap:var(--stack)}
 .tm-q{flex:1;min-width:160px;max-width:320px;margin:0}
 .tm-tools{display:inline-flex;align-items:center;gap:var(--s2);flex-wrap:wrap}
 .tm-tools .seg{height:var(--h-ctl)}
 .tm-tools .sel{max-width:none}
 .tm-tools .seg .faint{font-variant-numeric:tabular-nums}
-.tm-row{display:grid;grid-template-columns:minmax(160px,1.6fr) 88px 136px minmax(140px,1.4fr) 120px 48px var(--icon);gap:var(--s3);align-items:center;width:calc(100% + var(--s4));height:56px;padding:7px var(--s2) 8px;margin-inline:calc(var(--s2) * -1);border-top:1px solid var(--line);border-radius:var(--r-md);cursor:pointer;min-width:0}
+.tm-proj{background:var(--panel);border:1px solid var(--line);border-radius:var(--r-lg);min-width:0} /* a section inside the workspace card on desktop, like the team dashboard's; a card of its own on phones */
+.tm-band{display:flex;align-items:center;gap:var(--s3);padding:var(--s3) var(--card-pad) calc(var(--s3) - 1px);background:var(--panel-2);border-bottom:1px solid var(--line);border-radius:calc(var(--r-lg) - 1px) calc(var(--r-lg) - 1px) 0 0}
+.tm-proj.folded .tm-band{border-bottom:0;border-radius:calc(var(--r-lg) - 1px)}
+.tm-ico{display:grid;place-items:center;flex:none;width:var(--s8);height:var(--s8);border-radius:var(--r-md);background:var(--panel-2);border:1px solid var(--line);color:var(--muted)}
+.tm-ico.proj{background:var(--accent-soft);border-color:transparent;color:var(--accent)}
+.tm-ico.agent{border-radius:var(--r-full)}
+.tm-band .tm-ico.agent{background:var(--panel)}
+.tm-pn{display:flex;flex-direction:column;min-width:0;margin:0;flex:none;max-width:40%}
+.tm-ov{font:var(--t-cap);text-transform:uppercase;letter-spacing:var(--track-cap);color:var(--faint)}
+.tm-gn{font:var(--t-head);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tm-gf{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tm-pacts{display:flex;align-items:center;gap:var(--s2);flex:none;margin-left:auto}
+.tm-den{display:inline-flex;align-items:center;gap:var(--s1)}
+.tm-den .i{width:var(--s3);height:var(--s3)}
+.tm-fold .i{width:var(--icon);height:var(--icon)}
+.tm-row{display:grid;grid-template-columns:var(--s8) minmax(160px,1.6fr) 88px 136px minmax(140px,1.4fr) 120px 48px 104px;gap:var(--s3);align-items:center;height:56px;padding:7px var(--card-pad) 8px;border-top:1px solid var(--line);cursor:pointer;min-width:0}
+.tm-tbl>.tm-row:first-child{border-top:0;padding-top:var(--s2)}
+.tm-tbl>.tm-row:last-child{border-radius:0 0 calc(var(--r-lg) - 1px) calc(var(--r-lg) - 1px)}
 .tm-row:hover{background:var(--panel-2)}
-.tm-head{height:44px;padding-block:0;border-top:0;cursor:default;font:var(--t-cap);letter-spacing:var(--track-cap);text-transform:uppercase;color:var(--faint)}
+.tm-head{height:44px;padding-block:0;cursor:default;font:var(--t-cap);letter-spacing:var(--track-cap);text-transform:uppercase;color:var(--faint)}
+.tm-tbl>.tm-head:first-child{padding-top:0}
 .tm-head:hover{background:none}
+.tm-head .sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
 .tm-c{min-width:0;display:flex;align-items:center}
 .tm-name{flex-direction:column;align-items:stretch}
 .tm-name b{font:var(--t-title);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -1207,28 +1231,34 @@ button.av{cursor:pointer}
 .tm-attn{flex-wrap:wrap;gap:0 var(--s1);height:var(--s5);overflow:hidden} /* pills that do not fit wrap out of sight; the cell title lists them all */
 .tm-attn .pill{flex:none}
 .tm-avs{display:flex;gap:var(--s1)}
-.tm-when{justify-content:flex-end;text-align:right;font:var(--t-meta);color:var(--muted);font-variant-numeric:tabular-nums}
+.tm-when{justify-content:flex-end;gap:var(--s1);text-align:right;font:var(--t-meta);color:var(--muted);font-variant-numeric:tabular-nums}
 .tm-head .tm-when{font:var(--t-cap)}
-.tm-chev .chev{color:var(--faint)}
-.tm-gh{display:flex;align-items:center;gap:var(--s2);height:44px;border-top:1px solid var(--line-2)}
-.tm-head+.tm-grp .tm-gh{border-top:0}
-.tm-fold{display:flex;align-items:center;gap:var(--s2);min-width:0;height:44px;padding:0;border:0;background:none;color:var(--text);font:var(--t-title);cursor:pointer;text-align:left}
-.tm-fold .chev{flex:none;width:var(--icon);height:var(--icon);color:var(--faint);transform:rotate(90deg);transition:transform .15s}
-.tm-fold[aria-expanded=false] .chev{transform:none}
-.tm-gn{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.tm-gf{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tm-when .chev,.tm-open .chev{flex:none;width:var(--icon);height:var(--icon)}
+.tm-when .chev{color:var(--faint)}
+.tm-open{justify-content:flex-end;gap:var(--s1);font:var(--t-label);color:var(--accent);white-space:nowrap}
+.tm-row:hover .tm-open,.tm-row:focus-visible .tm-open{text-decoration:underline}
 @media (max-width:1179.98px){
-  .tm-row{grid-template-columns:minmax(140px,1.6fr) 88px 136px minmax(120px,1.4fr) 48px var(--icon)}
+  .tm-row{grid-template-columns:var(--s8) minmax(140px,1.6fr) 88px 136px minmax(120px,1.4fr) 48px 104px}
   .tm-mem{display:none}
+  .tm-band .tm-gf{display:none}
 }
 @media (max-width:767.98px){
+  .tm-band{display:grid;grid-template-columns:var(--s8) minmax(0,1fr);gap:var(--s2) var(--s3)}
+  .tm-pn{max-width:none}
+  .tm-band .tm-gf{display:block;grid-column:1 / -1}
+  .tm-pacts{grid-column:1 / -1;flex-wrap:wrap;margin-left:0}
+  .tm-pacts>.btn{flex:1}
+  .tm-pacts .btn{height:calc(var(--s8) + var(--s1))}
+  /* the denied pill is a full-size button on phones: same height and share of the row as Graph and Collapse */
+  .tm-pacts>.tm-den{flex:1;justify-content:center;height:calc(var(--s8) + var(--s1))}
   .tm-head{display:none}
-  .tm-head+.tm-grp .tm-gh,.tm-grp:first-child .tm-gh{border-top:0}
-  .tm-row{grid-template-columns:minmax(0,1fr) auto;grid-template-areas:"n s" "n w";row-gap:0}
+  .tm-head+.tm-row{border-top:0;padding-top:var(--s2)}
+  .tm-row{grid-template-columns:var(--s8) minmax(0,1fr) auto;grid-template-areas:"l n s" "l n w";row-gap:0}
+  .tm-lead{grid-area:l}
   .tm-name{grid-area:n}
   .tm-st{grid-area:s;justify-content:flex-end}
   .tm-when{grid-area:w}
-  .tm-prog,.tm-attn,.tm-mem,.tm-chev{display:none}
+  .tm-prog,.tm-attn,.tm-mem,.tm-open{display:none}
 }
 .stat{display:flex;flex-direction:column;gap:var(--s1);min-width:0}
 /* Activity graph */

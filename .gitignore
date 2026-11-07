@@ -13,3 +13,4 @@ dist/
 
 # Local design review hub (server/scripts/dev-hub.mjs)
 /.dev/
+docs/plans/

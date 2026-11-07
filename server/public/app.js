@@ -961,7 +961,7 @@ const TCOL = { open: 'idle', assigned: 'info', in_progress: 'accent', in_review:
 const TSTC = { running: 'ok', paused: 'warn', draft: 'idle', stopped: 'bad', done: 'accent' }; // tone classes (.tg-pbf.<tone>)
 const ring = (p, sz = 36, col = 'var(--ok)') => { const r = sz / 2 - 3, c = 2 * Math.PI * r, h = sz / 2; return `<svg class="rg" width="${sz}" height="${sz}" viewBox="0 0 ${sz} ${sz}" aria-hidden="true"><circle cx="${h}" cy="${h}" r="${r}" fill="none" stroke-width="3.5" class="rg-trk"/><circle cx="${h}" cy="${h}" r="${r}" fill="none" stroke-width="3.5" stroke-linecap="round" stroke-dasharray="${(c * p / 100).toFixed(1)} ${c.toFixed(1)}" transform="rotate(-90 ${h} ${h})" style="stroke:${col}"/><text x="50%" y="50%" dominant-baseline="central" text-anchor="middle" class="rt${sz > 44 ? ' big' : ''}">${p}</text></svg>`; };
 const agLabel = (id) => (id === 'hub' ? 'hub' : AG(id)?.label || SESA(id)?.agent.label || trunc(String(id || '—'), 12));
-/* Agents topology (Work → Activity): agents, team hubs and group chats; Teams → Activity scopes it to one project.
+/* Agents topology (Work → Activity): agents, team hubs and group chats; Teams → Connections graph scopes it to one project.
    Edges are coloured by how recently they carried activity. The focus view is described above EGO. */
 const ACT_MS = 30_000, REC_MS = 300_000;
 const TGW = [['5m', 300_000], ['1h', 3600_000], ['24h', 86400_000], ['7d', 7 * 86400_000]];
@@ -1000,7 +1000,7 @@ function topoModel() {
   const proj = new Map(agents.map((a) => [a.id, projectOf(a)]));
   return { agents, act, live, rooms, proj, edges: [...edges.values()].filter((e) => TG_S.layers[e.kind === 'room' ? 'msg' : e.kind]) };
 }
-/* Which part of the model a project focus shows (Teams → Activity). Without one, the whole hub. */
+/* Which part of the model a project focus shows (Teams → Connections graph). Without one, the whole hub. */
 function topoScope(M) {
   const f = TG_S.focus;
   if (f?.kind === 'project') {
@@ -1022,48 +1022,96 @@ const denTarget = (i) => { try { const a = JSON.parse(i.args_summary || '{}') ||
    refresh: one element per node and edge id, positions interpolated with requestAnimationFrame, so the 4 s poll keeps the focus,
    the pin and keyboard focus. */
 const SVGNS = 'http://www.w3.org/2000/svg';
-const EGO = { focus: null, pinned: false, trail: [], hov: null, dwell: 0, anim: 0, lock: null, px: null, cur: new Map(), G: null, ring: [], nb: new Map(), role: new Map(), only: null, W: 0 };
+const EGO = { focus: null, pinned: false, trail: [], hov: null, dwell: 0, anim: 0, lock: null, px: null, cur: new Map(), G: null, ring: [], nb: new Map(), role: new Map(), only: null, W: 0, avail: 0, vk: '', sig: '' };
 const EGO_DWELL = 250, EGO_MS = 380, EGO_TRAIL = 6, EGO_RANK = { team: 0, msg: 1, room: 1, link: 2 };
-function egoReset() { clearTimeout(EGO.dwell); cancelAnimationFrame(EGO.anim); Object.assign(EGO, { focus: null, pinned: false, trail: [], hov: null, lock: null, cur: new Map(), G: null, W: 0 }); }
+function egoReset() { clearTimeout(EGO.dwell); cancelAnimationFrame(EGO.anim); Object.assign(EGO, { focus: null, pinned: false, trail: [], hov: null, lock: null, cur: new Map(), G: null, W: 0, vk: '', sig: '' }); }
 /* Nodes, edges and the resting layout for the current scope. Team hubs appear with the Teams layer; clusters always follow teams. */
-function topoGraph(M, scope, W, H) {
+function topoGraph(M, scope, W, avail) {
   const nodes = new Map(), narrow = W < 560;
   for (const a of M.agents) if (scope.ids.has(a.id)) nodes.set(a.id, { id: a.id, kind: 'agent', label: a.label || a.id, a, ext: scope.ext.has(a.id) });
   const teams = S.teams.map((t) => ({ t, members: (t.agent_ids || []).filter((id) => nodes.has(id) && !scope.ext.has(id)) })).filter((x) => x.members.length);
   if (TG_S.layers.team) for (const { t, members } of teams) nodes.set('team:' + t.id, { id: 'team:' + t.id, kind: 'team', label: t.name, t, members });
   for (const e of scope.edges) if (e.kind === 'room' && !nodes.has(e.b)) nodes.set(e.b, { id: e.b, kind: 'room', label: M.rooms.get(e.b.slice(5)) || 'Room', room: e.b.slice(5) });
   const edges = scope.edges.filter((e) => nodes.has(e.a) && nodes.has(e.b)).map((e) => ({ ...e, key: e.kind + ':' + e.a + '|' + e.b }));
-  const G = { M, nodes, edges, teams, W, H, narrow };
-  G.base = topoBase(G);
+  const G = { M, nodes, edges, teams, W, narrow };
+  Object.assign(G, topoBase(G, avail));
   return G;
 }
-function topoBase({ nodes, teams, W, H, narrow }) {
-  const P = new Map(), cx = W / 2, cy = H / 2, rx = W / 2 - (narrow ? 40 : 96), ry = H / 2 - (narrow ? 44 : 64), T = teams.length;
+/* Rows of boxes ({w, h}) no wider than maxW, each row centred (across and on its middle line); returns the offsets and the size. */
+function shelfPack(items, maxW, gap) {
+  const at = [], rows = []; let x = 0, y = 0, rowH = 0, row = [], w = 0;
+  const close = () => { row.forEach((i) => (at[i].y += (rowH - items[i].h) / 2)); rows.push({ row, rw: x - gap }); y += rowH + gap; rowH = 0; row = []; x = 0; };
+  items.forEach((b, i) => {
+    if (row.length && x + b.w > maxW) close();
+    at[i] = { x, y }; row.push(i); x += b.w + gap; rowH = Math.max(rowH, b.h); w = Math.max(w, x - gap);
+  });
+  if (row.length) close();
+  rows.forEach(({ row, rw }) => row.forEach((i) => (at[i].x += (w - rw) / 2)));
+  return { at, w, h: Math.max(0, y - gap) };
+}
+/* The packing (of every row width worth trying) that fits the target box best: least shrinking first (the width must fit; the
+   height may scroll, so shrinking for it stops at floor), then the most compact block whose shape is nearest the target's. */
+function bestPack(items, gap, TW, TH, floor) {
+  let best = null; const seen = new Set();
+  for (let k = 1; k <= items.length; k++) {
+    const sorted = items.map((b) => b.w).sort((a, b) => b - a), maxW = sorted.slice(0, k).reduce((s, w) => s + w, 0) + gap * (k - 1);
+    if (seen.has(maxW)) continue; seen.add(maxW);
+    const p = shelfPack(items, maxW, gap), s = Math.min(1, TW / p.w, Math.max(TH / p.h, floor));
+    const score = Math.round(s * 50) * 1e9 - p.w * p.h * (1 + Math.abs(Math.log(p.w / p.h / (TW / TH))));
+    if (!best || score > best.score) best = { ...p, score };
+  }
+  return best;
+}
+/* Resting layout. Each team is a cluster: members on an arc around the hub, leaving the space under it for the hub's name and
+   progress bar (sized to the member count). A project's clusters, and its agents in no team, are packed into one block; blocks
+   are packed in rows with a modest gap, then scaled (positions only, never the nodes) to the graph's width and the height left
+   in the window. Returns the positions, the graph height H (the content plus padding) and the project captions. */
+function topoBase(G, avail) {
+  const { nodes, teams, W, narrow } = G, M = G.M;
+  const rr = narrow ? 14 : 19, hs = narrow ? 15 : 21, lblW = narrow ? 100 : 150, gap = narrow ? 14 : 24, pgap = narrow ? 26 : 48, pad = narrow ? 18 : 28, capH = narrow ? 20 : 24;
   const home = new Map(); teams.forEach(({ t, members }) => members.forEach((id) => { if (!home.has(id)) home.set(id, t.id); }));
+  const cl = (P, n, extra = []) => {
+    const pts = [...P].flatMap(([id, p]) => { const r = id.includes(':') ? hs : rr; return [{ x: p.x - r, y: p.y - r }, { x: p.x + r, y: p.y + r }]; }).concat(extra);
+    const x0 = Math.min(...pts.map((p) => p.x)), y0 = Math.min(...pts.map((p) => p.y)), x1 = Math.max(...pts.map((p) => p.x)), y1 = Math.max(...pts.map((p) => p.y));
+    return { P, n, x0, y0, w: x1 - x0, h: y1 - y0 };
+  };
+  const groups = new Map(), put = (g, c) => { if (!groups.has(g)) groups.set(g, []); groups.get(g).push(c); };
+  for (const { t, members } of teams) {
+    const mem = members.filter((id) => home.get(id) === t.id), m = mem.length, P = new Map([['team:' + t.id, { x: 0, y: 0 }]]);
+    const r = Math.max(narrow ? 34 : 54, m * (narrow ? 8 : 11)), arc = (narrow ? 140 : 160) * Math.PI / 180;
+    mem.forEach((id, j) => { const b = Math.PI / 2 + arc / 2 + ((2 * Math.PI - arc) * (m === 1 ? 0.5 : j / (m - 1))); P.set(id, { x: r * Math.cos(b), y: r * Math.sin(b) }); });
+    put(tmProject(t), cl(P, m + 1, [{ x: -lblW / 2, y: 0 }, { x: lblW / 2, y: hs + 34 }]));
+  }
+  // Agents in no team (in a project view, also the outside agents it talks to) in a small grid with their project.
   const free = [...nodes.values()].filter((n) => n.kind === 'agent' && !home.has(n.id)).sort((x, y) => x.ext - y.ext || x.label.localeCompare(y.label));
-  // One team: its cluster on the left and the agents in no team on the right, instead of a lone hub at the top.
-  const one = T === 1, mid = { x: one && free.length ? cx + rx * 0.45 : cx, y: cy };
-  // Each team gets a slice of the ellipse in proportion to the agents clustered around it (a team whose members all sit with
-  // an earlier team needs room for its hub only).
-  const homed = teams.map(({ t, members }) => members.filter((id) => home.get(id) === t.id)), wt = homed.map((m) => 1.2 + m.length), sum = wt.reduce((s, w) => s + w, 0);
-  let acc = 0;
-  teams.forEach(({ t }, i) => {
-    const a = -Math.PI / 2 + (2 * Math.PI * (acc + wt[i] / 2)) / sum; acc += wt[i];
-    const hx = one ? (free.length ? cx - rx * 0.4 : cx) : cx + rx * Math.cos(a), hy = one ? cy : cy + ry * Math.sin(a);
-    P.set('team:' + t.id, { x: hx, y: hy });
-    // Members on an arc around the hub that leaves the space under it free for the hub's name and progress bar.
-    const mem = homed[i], m = mem.length, r = Math.max(narrow ? 32 : 60, m * (narrow ? 7 : 10)), gap = (narrow ? 140 : 160) * Math.PI / 180;
-    mem.forEach((id, j) => { const b = Math.PI / 2 + gap / 2 + ((2 * Math.PI - gap) * (m === 1 ? 0.5 : j / (m - 1))); P.set(id, { x: hx + r * Math.cos(b), y: hy + r * Math.sin(b) }); });
-  });
-  // Agents in no team (and, in a project view, outside agents) in the middle; with no teams at all they take the whole ellipse.
-  const k = free.length, fr = T ? Math.min(Math.max(34, (k * 44) / (2 * Math.PI)), Math.min(rx, ry) * 0.34) : 0;
-  free.forEach((n, i) => {
-    const a = -Math.PI / 2 + (2 * Math.PI * i) / k;
-    P.set(n.id, k === 1 ? { ...mid } : T ? { x: mid.x + fr * Math.cos(a), y: mid.y + fr * Math.sin(a) } : { x: cx + rx * Math.cos(a), y: cy + ry * Math.sin(a) });
-  });
+  const grid = (list, g) => {
+    const k = list.length, cols = Math.ceil(Math.sqrt(k * 1.5)), sp = narrow ? 40 : 54, P = new Map();
+    list.forEach((n, i) => P.set(n.id, { x: (i % cols) * sp, y: Math.floor(i / cols) * sp }));
+    put(g, cl(P, k));
+  };
+  const byProj = new Map(); for (const n of free) { const p = M.proj.get(n.id); if (!byProj.has(p)) byProj.set(p, []); byProj.get(p).push(n); }
+  byProj.forEach(grid);
   const rooms = [...nodes.values()].filter((n) => n.kind === 'room');
-  rooms.forEach((n, i) => { const a = -Math.PI / 2 + (2 * Math.PI * (i + 0.5)) / Math.max(rooms.length, T, 1); P.set(n.id, { x: cx + rx * 0.62 * Math.cos(a), y: cy + ry * 0.62 * Math.sin(a) }); });
-  return P;
+  if (rooms.length) grid(rooms, '');
+  // Blocks: biggest clusters first inside a project; projects by name, No project and group chats last.
+  const multi = groups.size > 1, TW = W - 2 * pad, TH = Math.max(avail - 2 * pad, 200), floor = narrow ? 0.9 : 0.8;
+  const blocks = [...groups].sort(([a], [b]) => (a === '') - (b === '') || (a === NO_PROJECT) - (b === NO_PROJECT) || a.localeCompare(b)).map(([name, cs]) => {
+    cs.sort((x, y) => y.n - x.n);
+    const area = cs.reduce((s, c) => s + c.w * c.h, 0), side = Math.sqrt(area * (TW / TH));
+    const p = bestPack(cs, gap, groups.size <= 2 ? TW : Math.min(TW, side * 1.15), TH, floor), top = multi ? capH : 0;
+    return { name, cs, p, w: Math.max(p.w, multi ? Math.min(TW, name.length * 7.5) : 0), h: p.h + top, top };
+  });
+  const outer = bestPack(blocks, pgap, TW, TH, floor), cw = outer.w + 2 * pad, ch = outer.h + 2 * pad;
+  // Shrink (positions only) to the width, and to the window height down to a floor that keeps nodes apart; never grow.
+  let s = Math.min(1, W / cw); if (ch * s > avail) s = Math.min(s, Math.max(avail / ch, floor));
+  const H = Math.round(Math.max(ch * s, Math.min(avail, narrow ? 380 : 440))), ox = (W - cw * s) / 2, oy = (H - ch * s) / 2;
+  const base = new Map(), caps = [], at = (x, y) => ({ x: ox + (pad + x) * s, y: oy + (pad + y) * s });
+  blocks.forEach((b, i) => {
+    const bo = outer.at[i];
+    if (multi && b.name) caps.push({ name: b.name, ...at(bo.x, bo.y + capH - 8) });
+    b.cs.forEach((c, j) => { const co = b.p.at[j]; c.P.forEach((p, id) => base.set(id, at(bo.x + co.x + p.x - c.x0, bo.y + b.top + co.y + p.y - c.y0))); });
+  });
+  return { base, H, caps };
 }
 /* Direct connections of a node, one edge per neighbour (the strongest kind wins). */
 function egoNbrs(G, id) {
@@ -1112,12 +1160,14 @@ function egoEdgeParts(e, G) {
     : `${name(e.a)} ${e.kind === 'room' ? '→' : '↔'} ${name(e.b)} · ${e.count} message${e.count === 1 ? '' : 's'} · last ${ago(e.last)} ago`;
   return `<title>${esc(tip)}</title><path class="tg-e k-${e.kind} r-${rc}" style="stroke-width:${edgeWidth(e)}"/><path class="tg-hit"/>`;
 }
+/* Writes markup only when it differs from what the element last got here (a refresh mostly brings the same). */
+const htmlIf = (el, html) => { if (el._h === html && el.innerHTML) return false; el.innerHTML = html; el._h = html; return true; };
 const egoEl = (cls) => { const g = document.createElementNS(SVGNS, 'g'); g.setAttribute('class', cls); return g; };
 /* The SVG for #agentGraph, created once per visit to the view; later renders only reconcile it. */
 function egoSvg(graph) {
   let svg = graph.querySelector('svg.tg');
   if (svg) return svg;
-  graph.innerHTML = `<div class="tg-trail" id="tgTrail"></div><svg class="tg" role="group" aria-label="Agent topology"><g class="tg-edges"></g><g class="tg-nodes"></g></svg>`;
+  graph.innerHTML = `<div class="tg-trail" id="tgTrail"></div><svg class="tg" role="group" aria-label="Agent topology"><g class="tg-caps" aria-hidden="true"></g><g class="tg-edges"></g><g class="tg-nodes"></g></svg>`;
   svg = graph.querySelector('svg.tg'); svg._n = new Map(); svg._e = new Map(); EGO.cur = new Map();
   egoBind(svg);
   graph.querySelector('#tgTrail').addEventListener('click', (e) => {
@@ -1153,25 +1203,33 @@ function egoSync(svg, G) {
   }
 }
 function egoDraw(svg) {
-  svg._n.forEach((g, id) => { const p = EGO.cur.get(id); if (p) g.setAttribute('transform', `translate(${p.x.toFixed(1)} ${p.y.toFixed(1)})`); });
+  // Only what moved is written: nodes that stay put (the faded rest during a focus move) cost nothing per frame.
+  svg._n.forEach((g, id) => { const p = EGO.cur.get(id); if (!p) return; const t = `translate(${p.x.toFixed(1)} ${p.y.toFixed(1)})`; if (g._t !== t) { g.setAttribute('transform', t); g._t = t; } });
   svg._e.forEach((g) => {
     const p = EGO.cur.get(g._e.a), q = EGO.cur.get(g._e.b); if (!p || !q) return;
     const d = `M${p.x.toFixed(1)} ${p.y.toFixed(1)}L${q.x.toFixed(1)} ${q.y.toFixed(1)}`;
-    g._p.forEach((x) => x.setAttribute('d', d));
+    if (g._d !== d || g._p[0].getAttribute('d') !== d) { g._p.forEach((x) => x.setAttribute('d', d)); g._d = d; }
   });
 }
-/* Moves every node from where it is drawn now to P: 380 ms ease-out, or at once (first draw, resize, reduced motion). */
-function egoAnimate(svg, P, instant) {
+/* Moves every node from where it is drawn now to P, and fades what changes role: 380 ms ease-out, or at once (first draw,
+   resize, reduced motion). The fade runs in the same frames as the move (inline opacity, cleared at the end so the classes
+   rule again): CSS opacity transitions on every node and edge gave each its own compositor layer and halved the frame rate. */
+function egoAnimate(svg, P, instant, fades = []) {
   cancelAnimationFrame(EGO.anim);
+  const keep = new Set(fades.map((x) => x.el));
+  (EGO.fades || []).forEach(({ el }) => { if (!keep.has(el)) { el.style.opacity = ''; el._cur = undefined; } });
   const from = new Map(EGO.cur); let far = 0;
   P.forEach((p, id) => { const a = from.get(id); if (a) far = Math.max(far, Math.hypot(a.x - p.x, a.y - p.y)); });
-  if (instant || RM() || far < 0.5) { EGO.cur = new Map(P); egoDraw(svg); return; }
+  const end = () => { fades.forEach(({ el }) => { el.style.opacity = ''; el._cur = undefined; }); EGO.fades = []; svg.classList.remove('moving'); };
+  if (instant || RM() || (far < 0.5 && !fades.length)) { EGO.cur = new Map(P); egoDraw(svg); end(); return; }
   const t0 = performance.now(), ease = (t) => 1 - Math.pow(1 - t, 3);
+  EGO.fades = fades; svg.classList.add('moving');
   const step = (now) => {
     const k = ease(Math.min(1, (now - t0) / EGO_MS)), cur = new Map();
     P.forEach((p, id) => { const a = from.get(id) || p; cur.set(id, { x: a.x + (p.x - a.x) * k, y: a.y + (p.y - a.y) * k }); });
     EGO.cur = cur; egoDraw(svg);
-    if (k < 1) EGO.anim = requestAnimationFrame(step);
+    fades.forEach((x) => { x.el._cur = x.from + (x.to - x.from) * k; x.el.style.opacity = x.el._cur.toFixed(3); });
+    if (k < 1) EGO.anim = requestAnimationFrame(step); else end();
   };
   EGO.anim = requestAnimationFrame(step);
 }
@@ -1183,16 +1241,24 @@ function egoApply(instant) {
   const { P, role, nb, ring } = egoLayout(G), f = EGO.focus;
   Object.assign(EGO, { role, nb, ring });
   svg.classList.toggle('ego', !!f); svg.classList.toggle('narrow', G.narrow);
+  // Attributes are written only when they change, so a redraw with the same focus costs no style work.
+  const set = (g, k, v) => { if (g.getAttribute(k) !== v) { if (v === null) g.removeAttribute(k); else g.setAttribute(k, v); } };
+  // Each element's resting opacity for its role (what the classes give), so the move can fade from where it is drawn now.
+  const fades = [], fade = (g, to) => { const from = g._cur ?? g._op; g._op = to; if (from !== undefined && Math.abs(from - to) > 0.005) fades.push({ el: g, from, to }); };
   svg._n.forEach((g, id) => {
-    const r = role.get(id);
-    g.setAttribute('class', g._base + (r === 'focus' ? ' focus' : r === 'n1' ? ' n1' : r === 'out' ? ' ego-out' : ''));
-    g.setAttribute('tabindex', r === 'out' ? '-1' : '0');
-    if (r === 'focus') g.setAttribute('aria-current', 'true'); else g.removeAttribute('aria-current');
+    const r = role.get(id), hov = g.classList.contains('hov') ? ' hov' : '';
+    fade(g, r === 'out' ? 0.07 : G.nodes.get(id)?.ext ? 0.55 : 1);
+    set(g, 'class', g._base + (r === 'focus' ? ' focus' : r === 'n1' ? ' n1' : r === 'out' ? ' ego-out' : '') + hov);
+    set(g, 'tabindex', r === 'out' ? '-1' : '0');
+    set(g, 'aria-current', r === 'focus' ? 'true' : null);
   });
   const near = (id) => role.get(id) === 'focus' || role.get(id) === 'n1';
-  svg._e.forEach((g) => { const e = g._e; g.setAttribute('class', 'tg-eg' + (!f ? '' : e.a === f || e.b === f ? ' on' : near(e.a) && near(e.b) ? ' mid' : ' off')); });
+  svg._e.forEach((g) => {
+    const e = g._e, k = !f ? '' : e.a === f || e.b === f ? ' on' : near(e.a) && near(e.b) ? ' mid' : ' off';
+    set(g, 'class', 'tg-eg' + k + (g.classList.contains('hl') ? ' hl' : '')); fade(g, k === ' off' ? 0.04 : k === ' mid' ? 0.4 : 1);
+  });
   egoHov(EGO.hov);
-  egoAnimate(svg, P, instant);
+  egoAnimate(svg, P, instant, fades);
   egoChrome(); egoPanels();
 }
 function egoSet(id, walk) {
@@ -1254,9 +1320,9 @@ function egoChrome() {
     : touch ? 'Tap the background to go back' : EGO.pinned ? 'Pinned · Esc or a click on the background goes back' : 'Move off the graph or press Esc to go back · click to pin';
   const keep = bar.contains(document.activeElement) ? document.activeElement.getAttribute('data-tg-crumb') ?? (document.activeElement.hasAttribute('data-tg-pin') ? 'pin' : null) : null;
   bar.classList.toggle('has', !!f);
-  bar.innerHTML = (f ? `<nav class="tg-crumbs" aria-label="Focus trail">${EGO.trail.map((id, i) => `<button type="button" class="btn sm" data-tg-crumb="${i}">${esc(trunc(lab(id), 18))}</button>${ic('chev', 'sep')}`).join('')}`
+  if (!htmlIf(bar, (f ? `<nav class="tg-crumbs" aria-label="Focus trail">${EGO.trail.map((id, i) => `<button type="button" class="btn sm" data-tg-crumb="${i}">${esc(trunc(lab(id), 18))}</button>${ic('chev', 'sep')}`).join('')}`
     + `<button type="button" class="btn sm${EGO.pinned ? ' on' : ''}" data-tg-pin aria-pressed="${EGO.pinned}" title="${EGO.pinned ? 'Pinned: click to unpin' : 'Click to pin'}">${esc(trunc(lab(f), 22))}</button></nav>` : '')
-    + `<span class="tg-hint">${esc(hint)}</span>`;
+    + `<span class="tg-hint">${esc(hint)}</span>`)) return;
   if (keep !== null) bar.querySelector(keep === 'pin' ? '[data-tg-pin]' : `[data-tg-crumb="${keep}"]`)?.focus();
 }
 /* The side panel (desktop) and the list under the graph (phones) show the focused node's connections by kind. */
@@ -1294,12 +1360,11 @@ function egoPanels() {
   const G = EGO.G; if (!G) return;
   if (!EGO.focus) { renderTopoFeed(G.M, EGO.only); renderTgRank(G.M); return; }
   const html = egoPanelHtml();
-  for (const box of [$('#topoFeed'), $('#tgRank')]) {
+  for (const box of [tgShown($('#topoFeed')), tgShown($('#tgRank'))]) {
     if (!box) continue;
     // Keep keyboard focus on the same control across a redraw.
     const a = box.contains(document.activeElement) ? document.activeElement : null, sel = a?.dataset.tgGo ? `[data-tg-go="${CSS.escape(a.dataset.tgGo)}"]` : a?.hasAttribute('data-tg-pin') ? '[data-tg-pin]' : a?.dataset.ses ? '[data-ses]' : null;
-    box.innerHTML = html;
-    if (sel) box.querySelector(sel)?.focus();
+    if (htmlIf(box, html) && sel) box.querySelector(sel)?.focus();
   }
   egoHov(EGO.hov);
 }
@@ -1312,25 +1377,47 @@ function egoPanelBind(box) {
   });
   box.addEventListener('pointerover', (e) => { if (EGO.focus) egoHov(e.target.closest('[data-tg-go]')?.dataset.tgGo || null); });
 }
+/* What the graph is drawn from. The 4 s refresh redraws only when this changes; the 10 s bucket keeps "12s ago" labels and the
+   30 s activity colours current without redrawing on every poll. */
+function topoSig() {
+  const inv = S.inv, i0 = inv[0] || {}, f = TG_S.focus;
+  return [EGO.vk, TG_S.win, TG_S.layers.team, TG_S.layers.msg, TG_S.layers.link, f ? f.kind + f.id : '', Math.floor(Date.now() / 10_000),
+    S.agents.map((a) => a.id + a.status + a.label + a.project + a.role).join(), S.keys.length, inv.length, i0.id, i0.created_at, i0.result,
+    S.ses.map((s) => (s.live ? s.agent.id : '')).join(), S.teams.map((t) => [t.id, t.name, t.status, t.members, t.lead_id, t.room_id, t.progress?.pct, (t.agent_ids || []).join()].join('/')).join(),
+    (S.top?.comm_edges || []).map((e) => e.from + e.to + e.room_id + e.count + e.last_at).join(), S.links.map((l) => l.id || l.from_agent_id + l.to_agent_id).join(), S.convs.length].join('|');
+}
 function renderAgentGraph() {
   const graph = $('#agentGraph');
   if (!graph) return;
-  syncTopoBar();
+  const fresh = !graph.querySelector('svg.tg'), vk = innerWidth + 'x' + innerHeight + (TG_S.focus ? 'p' : '');
+  // Measure only when the window or the level changed: reading the layout during a refresh, after the rest of the page was
+  // written, forces a reflow. The graph gets the width and the height left in the window under it.
+  if (fresh || EGO.vk !== vk) {
+    syncTopoBar();
+    const r = graph.getBoundingClientRect(), narrow = r.width < 560;
+    EGO.vk = vk; EGO.W = Math.max(Math.round(r.width), 240);
+    EGO.avail = Math.max(Math.round(innerHeight - (r.top + scrollY) - 44 - (narrow ? 104 : 40)), 300);
+  }
+  const sig = topoSig();
+  if (!fresh && sig === EGO.sig) return;
+  EGO.sig = sig;
   const M = topoModel();
   if (!M.agents.length) { graph.innerHTML = none('ses', 'No agents'); EGO.G = null; renderTopoFeed(M, null); renderTgRank(M); return; }
-  const scope = topoScope(M), W = Math.max(graph.clientWidth, 240), narrow = W < 560;
-  const H = narrow ? Math.round(Math.min(W * 1.9, 760)) : Math.round(Math.min(Math.max(W * 0.7, 480), 760));
-  const fresh = !graph.querySelector('svg.tg'), svg = egoSvg(graph), resized = EGO.W !== W;
-  EGO.W = W; EGO.G = topoGraph(M, scope, W, H);
+  const scope = topoScope(M), W = EGO.W, svg = egoSvg(graph), resized = EGO.G?.W !== W;
+  const G = (EGO.G = topoGraph(M, scope, W, EGO.avail));
   EGO.only = TG_S.focus ? new Set([...scope.ids].filter((id) => !scope.ext.has(id))) : null;
-  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
-  egoSync(svg, EGO.G);
+  svg.setAttribute('viewBox', `0 0 ${W} ${G.H}`);
+  const caps = G.caps.map((c) => `<text class="tg-cap" x="${c.x.toFixed(1)}" y="${c.y.toFixed(1)}">${esc(trunc(c.name, G.narrow ? 22 : 34))}</text>`).join('');
+  const cg = svg.querySelector('.tg-caps'); if (cg._html !== caps) { cg.innerHTML = caps; cg._html = caps; }
+  egoSync(svg, G);
   egoApply(fresh || resized);
-  fitTopoFeed(graph);
 }
 /* Phones: a ranked list under the graph ("Most active · last 24 h"), because a node diagram is a poor way to read who is busy. */
+/* The feed shows from 768 px, the ranked list below it; only the one on screen is drawn (a resize redraws). */
+const TG_PHONE = matchMedia('(max-width:767.98px)');
+const tgShown = (box) => (box && (box.id === 'tgRank') === TG_PHONE.matches ? box : null);
 function renderTgRank(M) {
-  const box = $('#tgRank'); if (!box) return;
+  const box = tgShown($('#tgRank')); if (!box) return;
   const now = Date.now(), keyAgent = new Map(S.keys.map((k) => [k.id, k.agent_id])), ids = new Set(M.agents.map((a) => a.id)), by = new Map();
   for (const i of S.inv) {
     if (now - i.created_at > TG_S.win) continue;
@@ -1341,31 +1428,26 @@ function renderTgRank(M) {
   }
   const win = (TGW.find(([, ms]) => ms === TG_S.win) || ['24h'])[0].replace(/(\d)([a-z])/, '$1 $2');
   const L = [...by].sort((x, y) => y[1].calls - x[1].calls).slice(0, 8);
-  box.innerHTML = overline('Most active', 'last ' + win) + (L.map(([aid, o]) => row({
+  htmlIf(box, overline('Most active', 'last ' + win) + (L.map(([aid, o]) => row({
     lead: `<span class="av lg">${esc(initials(agLabel(aid)))}<i class="st${M.live.has(aid) ? ' on' : ''}"></i></span>`, title: agLabel(aid),
-    meta: raw(`<span class="tid">${esc(o.tool)}</span> · ${o.calls} call${o.calls === 1 ? '' : 's'}`), trail: `<span>${ago(o.last)}</span>`, attrs: { 'data-ses': aid } })).join('') || none('pulse', 'No calls in this window'));
-}
-function fitTopoFeed(graph) {
-  // Beside the graph, the feed scrolls within the graph height instead of stretching the card.
-  const feed = $('#topoFeed'), side = getComputedStyle(graph.closest('.tg-wrap') || graph.parentElement).gridTemplateColumns.split(' ').length > 1;
-  if (feed) feed.style.maxHeight = side ? graph.offsetHeight + 'px' : '';
+    meta: raw(`<span class="tid">${esc(o.tool)}</span> · ${o.calls} call${o.calls === 1 ? '' : 's'}`), trail: `<span>${ago(o.last)}</span>`, attrs: { 'data-ses': aid } })).join('') || none('pulse', 'No calls in this window')));
 }
 function renderTopoFeed(M, only) {
-  const box = $('#topoFeed'); if (!box) return;
+  const box = tgShown($('#topoFeed')); if (!box) return;
   const keyAgent = new Map(S.keys.map((k) => [k.id, k.agent_id])), now = Date.now(), inScope = (id) => id && (!only || only.has(id));
   const recent = S.inv.filter((i) => now - i.created_at < REC_MS && inScope(keyAgent.get(i.credential_id))), L = recent.slice(0, 14);
   const agents = M ? M.agents.filter((a) => inScope(a.id)) : [];
   const liveN = agents.filter((a) => M.live.has(a.id)).length, activeN = agents.filter((a) => recency(M.act.get(a.id).last) === 'act').length;
-  box.innerHTML = `<div class="tg-kpis"><div><b>${liveN}</b><small>Live</small></div><div><b${activeN ? ' class="ok-t"' : ''}>${activeN}</b><small>Active 30s</small></div><div><b>${recent.length}</b><small>Calls 5m</small></div></div>
+  htmlIf(box, `<div class="tg-kpis"><div><b>${liveN}</b><small>Live</small></div><div><b${activeN ? ' class="ok-t"' : ''}>${activeN}</b><small>Active 30s</small></div><div><b>${recent.length}</b><small>Calls 5m</small></div></div>
     <h5 class="subh">Last 5 minutes</h5>` + (L.length ? L.map((i) => { const aid = keyAgent.get(i.credential_id);
-      return `<button class="fe" data-ses="${esc(aid)}"><span class="dot${recency(i.created_at) === 'act' ? ' pulse' : ''} ${i.result === 'ok' ? 'ok' : 'bad'}"></span><span class="fe-main"><b>${esc(agLabel(aid))}</b><span class="mono">${esc(i.tool)}${i.result !== 'ok' ? ' · ' + esc(i.result) : ''}</span></span><span class="mono fe-age">${ago(i.created_at)}</span></button>`; }).join('') : none('pulse', 'Quiet'));
+      return `<button class="fe" data-ses="${esc(aid)}"><span class="dot${recency(i.created_at) === 'act' ? ' pulse' : ''} ${i.result === 'ok' ? 'ok' : 'bad'}"></span><span class="fe-main"><b>${esc(agLabel(aid))}</b><span class="mono">${esc(i.tool)}${i.result !== 'ok' ? ' · ' + esc(i.result) : ''}</span></span><span class="mono fe-age">${ago(i.created_at)}</span></button>`; }).join('') : none('pulse', 'Quiet')));
 }
-/* The project breadcrumb (Teams → Activity) lives above the graph; it follows TG_S on every render. */
+/* The project breadcrumb (Teams → Connections graph) lives above the graph; it follows TG_S on every render. */
 function syncTopoBar() {
   const crumb = $('#tgCrumb'); if (!crumb) return;
   const f = TG_S.focus; crumb.hidden = !f; if (!f) { crumb.innerHTML = ''; return; }
   const up = 'Everyone';
-  crumb.innerHTML = `<button class="btn sm" data-tg-up>${ic('back')}${up}</button>${ic('chev', 'sep')}<b>${esc(f.id)}</b>`;
+  crumb.innerHTML = `<button class="btn sm" data-tg-up>${ic('back')}${up}</button>${ic('chev', 'sep')}<b>${f.kind === 'project' ? `${ic('graph')}Connections graph · ${esc(f.id)}` : esc(f.id)}</b>`;
 }
 function topoFocus(f) {
   setRoute('topology', f ? f.kind + ':' + f.id : '');
@@ -1650,8 +1732,8 @@ VIEWS.pcs = async () => {
   };
 };
 
-/* Work → Teams: one grouped table. Projects are folding group headers, teams are 56 px rows with the same columns
-   everywhere (status, progress, needs attention, members, last activity), and agents in no team form the last group.
+/* Work → Teams: a card per project. Its header band says "Project" and holds the project actions; teams are 56 px rows
+   inside it with the same columns in every card, and agents in no team form the last card.
    Filters live in the route (#teams/s=running&n=1&o=act&q=…) so the background redraw and Back keep them. */
 const TM_ST = [['', 'All'], ['running', 'Running'], ['draft', 'Draft'], ['paused', 'Paused'], ['done', 'Done']];
 const TM_SORT = [['', 'Sort: Needs attention'], ['act', 'Sort: Last activity'], ['name', 'Sort: Name']];
@@ -1709,63 +1791,77 @@ function tmGroups(f, D) {
 }
 const tmAvatars = (labels) => `<span class="tm-avs" title="${esc(labels.join(', '))}">${labels.slice(0, 4).map((n) => `<span class="av">${esc(initials(n))}</span>`).join('')}${labels.length > 4 ? `<span class="av more">+${labels.length - 4}</span>` : ''}</span>`;
 const tmPlural = (n, one, many = one + 's') => `${n} ${n === 1 ? one : many}`;
-/* One team: name and lead · status · progress · needs attention · members · last activity · chevron. On phones the
-   cells after the status fold into the second line (lead · progress · what needs attention), and the time stays right. */
+/* One team row: team icon · name and lead · status · progress · needs attention · members · last activity · "Open team".
+   The whole row is the one way to open a team; its trailing words say so. On phones the cells after the status fold
+   into the second line (lead · progress · what needs attention), and the time with an open chevron stays right. */
 function tmRow(x) {
   const { t, attn } = x, done = t.progress?.done || 0, tot = t.progress?.total || 0, pct = t.progress?.pct || 0;
   const at = [attn.asks ? pill(`${attn.asks} waiting on you`, 'bad') : '', attn.blocked ? pill(`${attn.blocked} blocked`, 'warn') : '', attn.stalled ? pill(`${attn.stalled} stalled`, 'warn') : ''].join('');
   const atTxt = [attn.asks ? `<span class="bad-t">${attn.asks} waiting on you</span>` : '', attn.blocked ? `<span class="warn-t">${attn.blocked} blocked</span>` : '', attn.stalled ? `<span class="warn-t">${attn.stalled} stalled</span>` : ''].filter(Boolean);
   const lead = x.lead ? `Lead: ${esc(x.lead)}` : 'No lead';
   const mMeta = [x.lead ? esc(x.lead) : '', tot ? `${done}/${tot}` : 'No tasks', ...atTxt].filter(Boolean).join(' · ');
-  return `<div class="tm-row" role="row" tabindex="0" data-team="${esc(t.id)}" aria-label="${esc(t.name)}">
+  return `<div class="tm-row" role="row" tabindex="0" data-team="${esc(t.id)}" title="Open team ${esc(t.name)}" aria-label="Open team ${esc(t.name)}">
+    <span class="tm-c tm-lead" role="cell" aria-hidden="true"><span class="tm-ico">${ic('team')}</span></span>
     <span class="tm-c tm-name" role="cell"><b>${esc(t.name)}</b><span class="meta"><span class="only-d">${lead}</span><span class="only-m">${mMeta}</span></span></span>
     <span class="tm-c tm-st" role="cell">${pill(cap(t.status), TONE[t.status] || 'idle')}</span>
     <span class="tm-c tm-prog" role="cell"><span class="pb" role="progressbar" aria-label="Task progress" aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100"><i class="s-${esc(t.status)}" style="width:${pct}%"></i></span><span>${tot ? `${done}/${tot}` : '–'}</span></span>
     <span class="tm-c tm-attn" role="cell"${atTxt.length ? ` title="${esc(atTxt.map((h) => h.replace(/<[^>]+>/g, '')).join(', '))}"` : ''}>${at || '<span class="faint">–</span>'}</span>
     <span class="tm-c tm-mem" role="cell">${tmAvatars(x.mem.map((a) => a.label))}</span>
-    <span class="tm-c tm-when" role="cell">${x.last ? ago(x.last) : '–'}</span>
-    <span class="tm-c tm-chev" role="cell" aria-hidden="true">${ic('chev', 'chev')}</span></div>`;
+    <span class="tm-c tm-when" role="cell">${x.last ? ago(x.last) : '–'}${ic('chev', 'chev only-m')}</span>
+    <span class="tm-c tm-open" role="cell" aria-hidden="true">Open team${ic('chev', 'chev')}</span></div>`;
 }
-/* An agent in no team, in the same columns: name and role · Live when logged in · members column shows the agent itself. */
+/* An agent in no team, in the same columns: agent icon · name and role · Live when logged in · itself as the member · "Open agent". */
 function tmPoolRow(p) {
   const { a } = p, meta = [a.role || 'No role', a.project || ''].filter(Boolean).map(esc).join(' · ');
-  return `<div class="tm-row" role="row" tabindex="0" data-ses="${esc(a.id)}" aria-label="${esc(a.label)}">
+  return `<div class="tm-row" role="row" tabindex="0" data-ses="${esc(a.id)}" title="Open agent ${esc(a.label)}" aria-label="Open agent ${esc(a.label)}">
+    <span class="tm-c tm-lead" role="cell" aria-hidden="true"><span class="tm-ico agent">${ic('bot')}</span></span>
     <span class="tm-c tm-name" role="cell"><b>${esc(a.label)}</b><span class="meta">${meta}</span></span>
     <span class="tm-c tm-st" role="cell">${p.live ? pill('Live', 'ok') : ''}</span>
     <span class="tm-c tm-prog" role="cell"><span class="faint">–</span></span>
     <span class="tm-c tm-attn" role="cell"><span class="faint">–</span></span>
     <span class="tm-c tm-mem" role="cell">${tmAvatars([a.label])}</span>
-    <span class="tm-c tm-when" role="cell" title="${p.last ? 'Last seen' : 'Never signed in'}">${p.last ? ago(p.last) : '–'}</span>
-    <span class="tm-c tm-chev" role="cell" aria-hidden="true">${ic('chev', 'chev')}</span></div>`;
+    <span class="tm-c tm-when" role="cell" title="${p.last ? 'Last seen' : 'Never signed in'}">${p.last ? ago(p.last) : '–'}${ic('chev', 'chev only-m')}</span>
+    <span class="tm-c tm-open" role="cell" aria-hidden="true">Open agent${ic('chev', 'chev')}</span></div>`;
 }
-/* A project group header: fold button with the name, then teams · agents · last activity, the denied pill, Activity. */
-function tmGroupHead(g, M) {
-  const now = Date.now(), open = !TM_UI.folded.has(g.name);
+/* Fold button of a card: a caret and a word ("Collapse", "Show 4 teams"); never a right chevron, which only means "open". */
+function tmFoldBtn(key, open, show, name) {
+  const tip = open ? `Collapse ${name}` : `Show ${show} of ${name}`;
+  return `<button type="button" class="btn sm tm-fold" data-tmgrp="${esc(key)}" aria-expanded="${open}" title="${esc(tip)}" aria-label="${esc(tip)}">${ic(open ? "cup" : "cdown")}<span>${open ? "Collapse" : "Show " + show}</span></button>`;
+}
+/* A project card's header band: project icon, the word "Project" and the name, then teams · agents · last activity,
+   the denied-calls pill (opens Audit), Connections graph (who talks to whom in the project) and the fold button. */
+function tmBand(g, open) {
+  const now = Date.now(), noProj = g.name === NO_PROJECT;
   const ids = new Set(g.all.flatMap((x) => x.t.agent_ids || [])), last = Math.max(0, ...g.all.map((x) => x.last));
   const den = S.inv.filter((i) => i.result === 'denied' && !i.now_allowed && now - i.created_at < 3600_000 && ids.has(i.agent_id || keyAgentOf(i.credential_id))).sort((a, b) => b.created_at - a.created_at);
   const denWho = [...new Set(den.map((i) => i.agent_id || keyAgentOf(i.credential_id)))];
-  const denTip = den.length ? `${den.length} denied in the last hour. Latest: ${agLabel(denWho[0])}, ${den[0].tool}${denTarget(den[0]) ? ' on ' + denTarget(den[0]) : ''}, ${ago(den[0].created_at)} ago. Open them in Audit.` : '';
-  const denPill = den.length ? `<button type="button" class="pill bad pill-btn" data-go="log" data-arg="calls|${denWho.length === 1 ? 'agent:' + esc(denWho[0]) : ''}|denied" title="${esc(denTip)}" aria-label="${esc(denTip)}">${den.length} denied</button>` : '';
+  const denCalls = tmPlural(den.length, 'denied call');
+  const denTip = den.length ? `${denCalls} in the last hour. Latest: ${agLabel(denWho[0])}, ${den[0].tool}${denTarget(den[0]) ? ' on ' + denTarget(den[0]) : ''}, ${ago(den[0].created_at)} ago. Open them in Audit.` : '';
+  const denPill = den.length ? `<button type="button" class="pill bad pill-btn tm-den" data-go="log" data-arg="calls|${denWho.length === 1 ? 'agent:' + esc(denWho[0]) : ''}|denied" title="${esc(denTip)}" aria-label="${esc(`${denCalls} in the last hour, open in Audit`)}">${ic('ban')}<span class="only-d">${denCalls} · Open in Audit</span><span class="only-m">${den.length} denied · Audit</span></button>` : '';
   const facts = [tmPlural(g.all.length, 'team'), tmPlural(ids.size, 'agent'), last ? `active ${ago(last)} ago` : 'no activity yet'].join(' · ');
-  const act = g.name === NO_PROJECT ? '' : `<button type="button" class="btn sm only-d" data-go="topology" data-arg="project:${esc(g.name)}" title="Who talks to whom in this project">${ic('pulse')}Activity</button>`;
-  return `<div class="tm-gh"><button type="button" class="tm-fold" data-tmgrp="${esc(g.name)}" aria-expanded="${open}">${ic('chev', 'chev')}<span class="tm-gn">${esc(g.name)}</span></button><span class="meta tm-gf">${facts}</span>${denPill}${act}</div>`;
+  const label = noProj ? 'Teams in no project' : g.name;
+  const act = noProj ? '' : `<button type="button" class="btn sm" data-go="topology" data-arg="project:${esc(g.name)}" title="Open the connections graph for ${esc(g.name)}" aria-label="Open the connections graph for ${esc(g.name)}">${ic('graph')}<span class="only-d">Connections graph</span><span class="only-m">Graph</span></button>`;
+  return `<div class="tm-band"><span class="tm-ico proj" aria-hidden="true">${ic('proj')}</span><h2 class="tm-pn"><span class="tm-ov">${noProj ? 'Not in a project' : 'Project'}</span><span class="tm-gn">${esc(label)}</span></h2>
+    <span class="meta tm-gf">${facts}</span><span class="tm-pacts">${denPill}${act}${tmFoldBtn(g.name, open, tmPlural(g.all.length, 'team'), noProj ? label.toLowerCase() : 'project ' + g.name)}</span></div>`;
 }
+const tmHead = () => `<div class="tm-row tm-head only-d" role="row"><span role="columnheader"><span class="sr">Type</span></span><span role="columnheader">Team</span><span role="columnheader">Status</span><span role="columnheader">Progress</span><span role="columnheader">Needs attention</span><span role="columnheader" class="tm-mem">Members</span><span role="columnheader" class="tm-when">Activity</span><span role="columnheader"><span class="sr">Open</span></span></div>`;
+/* Work → Teams: a card per project (a header band, then its teams as rows), and agents in no team as the last card. */
 function tmTableHtml(f, D) {
-  const head = `<div class="tm-row tm-head only-d" role="row"><span role="columnheader">Team</span><span role="columnheader">Status</span><span role="columnheader">Progress</span><span role="columnheader">Needs attention</span><span role="columnheader" class="tm-mem">Members</span><span role="columnheader" class="tm-when">Activity</span><span></span></div>`;
   const G = tmGroups(f, D);
-  let h = G.map((g) => { const open = !TM_UI.folded.has(g.name);
-    return `<div class="tm-grp" role="rowgroup" aria-label="${esc(g.name)}">${tmGroupHead(g, D.M)}${open ? g.L.map(tmRow).join('') : ''}</div>`; }).join('');
+  let h = G.map((g) => { const open = !TM_UI.folded.has(g.name), label = g.name === NO_PROJECT ? 'Teams in no project' : g.name;
+    return `<section class="tm-proj${open ? '' : ' folded'}" aria-label="${esc(g.name === NO_PROJECT ? label : 'Project ' + g.name)}">${tmBand(g, open)}${open ? `<div class="tm-tbl" role="table" aria-label="Teams in ${esc(label)}">${tmHead()}${g.L.map(tmRow).join('')}</div>` : ''}</section>`; }).join('');
   if (D.pool.length) {
     const open = !TM_UI.folded.has(TM_POOL), L = D.pool.slice().sort(f.o === 'name' ? (a, b) => a.a.label.localeCompare(b.a.label) : (a, b) => b.live - a.live || b.last - a.last);
-    h += `<div class="tm-grp" role="rowgroup" aria-label="${TM_POOL}"><div class="tm-gh"><button type="button" class="tm-fold" data-tmgrp="${TM_POOL}" aria-expanded="${open}">${ic('chev', 'chev')}<span class="tm-gn">${TM_POOL}</span></button><span class="meta tm-gf">${tmPlural(D.pool.length, 'agent')} · ${D.pool.filter((p) => p.live).length} live</span>${info('Agents in no team. Add one to a team to give it work.')}</div>${open ? L.map(tmPoolRow).join('') : ''}</div>`;
+    h += `<section class="tm-proj tm-pool${open ? '' : ' folded'}" aria-label="${TM_POOL}"><div class="tm-band"><span class="tm-ico agent" aria-hidden="true">${ic('bot')}</span><h2 class="tm-pn"><span class="tm-ov">Not in a team</span><span class="tm-gn">${TM_POOL}</span></h2>
+      <span class="meta tm-gf">${tmPlural(D.pool.length, 'agent')} · ${D.pool.filter((p) => p.live).length} live</span><span class="tm-pacts">${info('Agents in no team. Add one to a team to give it work.')}${tmFoldBtn(TM_POOL, open, tmPlural(D.pool.length, 'agent'), 'unassigned agents')}</span></div>${open ? `<div class="tm-tbl" role="table" aria-label="${TM_POOL}">${L.map(tmPoolRow).join('')}</div>` : ''}</section>`;
   }
-  if (!h) return none('team', D.teams.length || D.M.agents.length ? 'No team matches these filters' : 'No teams yet');
-  return `<div class="tm-tbl" role="table" aria-label="Teams">${head}${h}</div>`;
+  if (!h) return `<div class="card">${none('team', D.teams.length || D.M.agents.length ? 'No team matches these filters' : 'No teams yet')}</div>`;
+  return h;
 }
 /* Toolbar: search, status with counts, Needs me and sort inline from 768 px; on phones a filter button opens them in a sheet. */
 function tmTools(f, D) {
   const st =`<div class="seg fit" role="group" aria-label="Status">${TM_ST.map(([k, l]) => `<button type="button" data-tms="${k}" class="${k === f.s ? 'on' : ''}" aria-pressed="${k === f.s}">${l} <span class="faint">${D.counts[k]}</span></button>`).join('')}</div>`;
-  const need = `<button type="button" class="btn${f.n ? ' on' : ''}" id="tmNeed" aria-pressed="${!!f.n}">Needs me <span class="fcount">${D.needN}</span></button>`;
+  const need = `<button type="button" class="btn${f.n ? ' on' : ''}" id="tmNeed" aria-pressed="${!!f.n}" title="Show only teams with questions or approvals waiting on you">Needs me <span class="fcount">${D.needN}</span></button>`;
   const sort = `<select class="sel" id="tmSort" aria-label="Sort">${TM_SORT.map(([k, l]) => `<option value="${k}"${k === f.o ? ' selected' : ''}>${l}</option>`).join('')}</select>`;
   return st + need + sort;
 }
@@ -1812,7 +1908,7 @@ VIEWS.teams = async (arg = '') => {
   return {
     t: `${ic('team')}Teams <span class="n">${S.teams.length}</span>`,
     a: `<button class="btn sm pri" data-go="tbuild">${ic('plus')}Team</button>`,
-    b: `<div id="tmBar">${tmToolbar(f, D)}</div><div class="pcard tm-card" id="tmList">${tmTableHtml(f, D)}</div>`,
+    b: `<div id="tmBar">${tmToolbar(f, D)}</div><div class="tm-stack" id="tmList">${tmTableHtml(f, D)}</div>`,
     after() {
       tmBindBar();
       const box = $('#tmList');
