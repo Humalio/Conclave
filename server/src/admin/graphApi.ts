@@ -27,7 +27,26 @@ export function registerGraphAdmin(api: FastifyInstance, d: { db: Db; audit: Aud
   });
   api.get('/api/graph/entities', async (req) => {
     const q = z.object({ q: z.string().max(200).default(''), limit: z.coerce.number().int().min(1).max(200).optional() }).parse(req.query);
-    return { entities: graph.ext.entities(q.q, q.limit) };
+    if (!req.member) return { entities: graph.ext.entities(q.q, q.limit) };
+    // A member (§2): entities with a live claim sourced in the granted folders of projects granted with the graph
+    // component. The name is matched, not aliases, and descriptions and aliases are left out: they may come from sources
+    // outside the grant. Claims count those sources only.
+    const m = req.member;
+    const gfs = [...new Set(m.projects('graph').flatMap((p) => m.grants.get(p)!.folders))];
+    if (!gfs.length) return { entities: [] };
+    const vis = m.pathSql('f.path');
+    const under = "substr('/' || f.path, 1, length(?)) = ?";
+    const where = `${vis.sql} AND (${gfs.map(() => under).join(' OR ')})`;
+    const args = [...vis.args, ...gfs.flatMap((f) => [f, f])];
+    const live = `JOIN kg_claims c ON (c.subject_id=e.id OR c.object_id=e.id) AND c.status<>'invalidated' JOIN files f ON f.id=c.src_file AND f.deleted_at IS NULL`;
+    const like = `%${q.q.toLowerCase().replace(/[%_]/g, '')}%`;
+    const rows = d.db.prepare(`SELECT e.id, e.name, e.type, e.status, e.merged_into, COUNT(DISTINCT c.id) claims FROM kg_entities e ${live}
+      WHERE lower(e.name) LIKE ? AND ${where} GROUP BY e.id ORDER BY e.name LIMIT ?`).all(like, ...args, Math.min(q.limit ?? 50, 200)) as Record<string, unknown>[];
+    // merged_into only names an entity the member sees too.
+    const targets = [...new Set(rows.map((e) => e.merged_into).filter((x): x is string => typeof x === 'string'))];
+    const seen = new Set(targets.length ? (d.db.prepare(`SELECT DISTINCT e.id FROM kg_entities e ${live} WHERE e.id IN (${targets.map(() => '?').join(',')}) AND ${where}`)
+      .all(...targets, ...args) as { id: string }[]).map((r) => r.id) : []);
+    return { entities: rows.map((e) => ({ ...e, merged_into: typeof e.merged_into === 'string' && seen.has(e.merged_into) ? e.merged_into : null, description: null, aliases: [] })) };
   });
   api.post('/api/graph/refresh', async (req) => {
     const r = graph.ext.refresh();

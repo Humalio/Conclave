@@ -4,6 +4,7 @@
  * the job inputs, validates what curators submit (quote evidence, known ids, look-alike protection) and routes every fix through
  * a task with a reviewer. Curators only ever FLAG; they never edit notes.
  */
+import { NOT_ALLOWED } from '../policy/engine.js';
 import type { Db } from '../db/db.js';
 import { tx } from '../db/db.js';
 import type { Who } from '../teams/teams.js';
@@ -214,7 +215,8 @@ export class GraphExt {
     const team = this.knowledgeTeam(f.raisedBy === 'hub' ? f.teamAgent : f.raisedBy);
     if (team) {
       const t = this.g.teams.hubTask(team, {
-        title: `Review knowledge flag ${id}`,
+        // The kind, never the note's name or path: team-visible titles stay safe when access or app caps change (0011). The id stays in the description.
+        title: `Review knowledge flag: ${f.kind === 'stale' ? 'stale note' : 'contradiction'}`,
         description: `Knowledge flag ${id} requires review. Use graph_stale to retrieve details within your current permissions; if no details are visible, ask the coordinator to assign an authorized worker. Update the affected note with file tools, then submit for independent review.`,
         assignee: this.lastWriter(f.fileId),
       });
@@ -251,7 +253,8 @@ export class GraphExt {
   }
   private flagView(r: Row): Row {
     const f = this.g.fileById(r.file_id), c = this.g.fileById(r.cause_file);
-    return { id: r.id, kind: r.kind, status: r.status, path: f ? this.g.vpath(f.path) : null, anchor: r.anchor, cause_path: c ? this.g.vpath(c.path) : null, cause_revision: r.cause_rev, reason: r.reason,
+    // label (F-18): a contradiction flag is about note claims, never a blueprint paper claim.
+    return { id: r.id, kind: r.kind, label: r.kind === 'contradiction' ? 'note claim contradiction' : 'stale note', status: r.status, path: f ? this.g.vpath(f.path) : null, anchor: r.anchor, cause_path: c ? this.g.vpath(c.path) : null, cause_revision: r.cause_rev, reason: r.reason,
       evidence_claims: JSON.parse(r.evidence_claims), task_id: r.task_id, raised_by: r.raised_by, created_at: r.created_at, resolved_at: r.resolved_at, decided_by: r.decided_by, trust: 'L2' };
   }
   /** graph_stale: open flags on notes the caller may read; mine = notes the caller last wrote. */
@@ -269,11 +272,28 @@ export class GraphExt {
     }
     return out.slice(0, 100);
   }
+  /**
+   * graph_stale's coverage of the same scope: the notes the caller may read there, and how many are indexed at their
+   * current revision. A flag can only be raised on an indexed note, so "no flags" means little where coverage is low.
+   */
+  staleCoverage(s: Session, o: { prefix?: string; mine?: boolean }): { notes_readable: number; notes_indexed: number; coverage_pct: number } {
+    const pfx = o.prefix ? this.g.vault.normalise(o.prefix).path : null;
+    let notes = 0, indexed = 0;
+    for (const f of this.db.prepare("SELECT f.id, f.path, f.current_revision rev, n.coverage, n.indexed_rev FROM files f LEFT JOIN kg_note_state n ON n.file_id=f.id WHERE f.deleted_at IS NULL AND lower(f.path) LIKE '%.md' LIMIT 20000").all() as Row[]) {
+      if (!this.g.canRead(s, f.path as string)) continue;
+      const vp = this.g.vpath(f.path as string);
+      if (pfx && vp !== pfx && !vp.startsWith(pfx.endsWith('/') ? pfx : `${pfx}/`)) continue;
+      if (o.mine && this.lastWriter(f.id as string) !== s.agentId) continue;
+      notes++;
+      if (f.coverage === 'current' && (f.indexed_rev === null || f.indexed_rev === f.rev)) indexed++;
+    }
+    return { notes_readable: notes, notes_indexed: indexed, coverage_pct: notes ? Math.round((indexed / notes) * 1000) / 10 : 100 };
+  }
   /** Close a flag. `fixed` needs a newer revision of the flagged note (the fix was made with the normal file tools). */
   flagFor(s: Session, id: string): Row {
     const r = this.db.prepare('SELECT * FROM kg_flags WHERE id=?').get(id) as Row | undefined;
     const f = r && this.g.fileById(r.file_id);
-    if (!r || !f || f.deleted_at || !this.g.canRead(s, f.path)) throw err('not_found', 'Not allowed, or does not exist.');
+    if (!r || !f || f.deleted_at || !this.g.canRead(s, f.path)) throw err('not_found', NOT_ALLOWED);
     const v = this.flagView(r), c = this.g.fileById(r.cause_file);
     if (!c || c.deleted_at || !this.g.canRead(s, c.path)) {
       v.cause_path = null; v.cause_revision = null; v.reason = 'Review required; supporting details are restricted.'; v.evidence_claims = [];
@@ -293,16 +313,15 @@ export class GraphExt {
     const before = this.sectionText(r.file_rev, r.anchor), after = this.sectionText(f.current_revision, r.anchor);
     return before !== null && before !== after;
   }
-  /** Called inside the task approval transaction. */
-  resolveTaskFlags(taskId: string, reviewerId: string, who: Session): void {
+  /** Called inside the task approval transaction. `who` is null for the operator's approve-without-review (the operator reads every note). */
+  resolveTaskFlags(taskId: string, reviewerId: string, who: Session | null): void {
     const flags = this.db.prepare("SELECT * FROM kg_flags WHERE task_id=? AND status='open'").all(taskId) as Row[];
     const changed = new Set(flags.filter((flag) => this.flagChanged(flag)).map((flag) => flag.id));
     for (const flag of flags) {
       const evidence = (JSON.parse(flag.evidence_claims) as string[]).map((id) => (this.db.prepare('SELECT src_file FROM kg_claims WHERE id=?').get(id) as Row | undefined)?.src_file);
-      if ([flag.file_id, flag.cause_file, ...evidence].some((id) => {
-        const source = id && this.g.fileById(id);
-        return !source || source.deleted_at || !this.g.canRead(who, source.path);
-      })) throw err('denied', 'Review requires access to all supporting notes.');
+      const sources = [flag.file_id, flag.cause_file, ...evidence].map((id) => (id && this.g.fileById(id)) || null);
+      if (who === null && sources.some((source) => !source || source.deleted_at)) throw err('invalid_state', 'A supporting note was deleted; resolve or dismiss the flag first.');
+      if (sources.some((source) => !source || source.deleted_at || (who !== null && !this.g.canRead(who, source.path)))) throw err('denied', 'Review requires access to all supporting notes.');
       const reciprocal = flag.kind === 'contradiction' && flags.some((other) => other.kind === 'contradiction' && other.file_id === flag.cause_file && other.cause_file === flag.file_id && changed.has(other.id));
       if (!changed.has(flag.id) && !reciprocal) throw err('invalid_state', 'The flagged note section has not changed; resolve or dismiss the flag before approving this task.');
     }

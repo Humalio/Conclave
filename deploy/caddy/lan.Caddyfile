@@ -4,6 +4,8 @@
 # The console and admin API are HTTPS only. Plain HTTP also carries machine traffic (MCP, bridge, health)
 # so clients that do not trust the internal CA keep working, but app keys, session tokens, pairing codes
 # and file contents then cross the network in clear text. Kept for compatibility; setup.sh warns about it.
+# Plain HTTP also serves the hash-checked onboarding downloads (see the @onboard_files block); nothing else
+# of onboarding: enrolment, requests and pickup are HTTPS only.
 {
 	auto_https disable_redirects
 	local_certs
@@ -20,6 +22,16 @@ https://{$HUB_HOST}:{$HTTPS_PORT} {
 http://:{$HTTP_PORT} {
 	@machine path /mcp /mcp/* /bridge/* /health
 	handle @machine {
+		reverse_proxy agent-hub:8080
+	}
+	# Onboarding downloads (docs/onboarding.md): a new PC fetches them before it trusts the internal CA,
+	# so they must work over plain HTTP. That is safe because each is public and checked against a hash
+	# the operator copied from the console over HTTPS: setup.mjs and agent-hub-headers.mjs against the
+	# SHA-256 in the prompt, ca.crt against the fingerprint in the prompt. A changed byte stops setup.
+	# Only these paths: enrolment, requests and pickup carry codes and keys, so they keep the redirect
+	# below (and the hub answers 426 on plain HTTP); the script reaches them over HTTPS with the CA pinned.
+	@onboard_files path /onboard/client/* /onboard/ca.crt
+	handle @onboard_files {
 		reverse_proxy agent-hub:8080
 	}
 	# The hub has no OAuth. When a header login fails, an MCP client gets a 401 and falls back to

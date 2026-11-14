@@ -4,6 +4,7 @@
  * agent as a notice (L0, it is the operator's word), the task returns to its assignee, and the answered question
  * stays in the team's decision log. Optionally the answer is also appended to a vault note.
  */
+import { NOT_ALLOWED } from '../policy/engine.js';
 import type { Db } from '../db/db.js';
 import { tx } from '../db/db.js';
 import type { Keys } from '../keys/keys.js';
@@ -14,28 +15,48 @@ import type { VaultStore } from '../vault/store.js';
 import type { Vault } from '../vault/vault.js';
 import { VaultError } from '../vault/vault.js';
 import { randomToken, sha256Hex } from '../util/crypto.js';
+import type { Blueprint } from '../blueprint/blueprint.js';
 
 export type DecisionStatus = 'open' | 'needs_info' | 'answered' | 'declined' | 'withdrawn';
+/** A relayed answer: recorded by the coordinator (L1) until the operator confirms it (L0) or overturns it. */
+export type RelayState = 'pending' | 'confirmed' | 'overturned';
 export interface DecisionOption { key: string; label: string; effect?: string | null }
 export interface DecisionRow {
   id: string; team_id: string; task_id: string | null; blocks_task: number; agent_id: string; credential_id: string | null;
   question: string; context: string | null; options: string; recommended: string | null; refs: string; needed_by: number | null;
   status: DecisionStatus; info_note: string | null; answer_option: string | null; answer_text: string | null;
   answered_by: string | null; answered_at: number | null; log_revision: string | null; created_at: number; updated_at: number;
+  make_decision: number; bp_key: string | null;
+  relayed_by: string | null; relayed_source: string | null; relayed_option: string | null; relayed_text: string | null; relayed_at: number | null;
+  relay_state: RelayState | null; relay_settled_at: number | null;
 }
-export interface DecisionView extends Omit<DecisionRow, 'options' | 'refs' | 'blocks_task'> {
-  options: DecisionOption[]; refs: string[]; blocks_task: boolean; answer_label: string | null;
+export interface DecisionView extends Omit<DecisionRow, 'options' | 'refs' | 'blocks_task' | 'make_decision'> {
+  options: DecisionOption[]; refs: string[]; blocks_task: boolean; make_decision: boolean; answer_label: string | null;
   agent_label: string | null; team_name: string | null; task_title: string | null; answered_by_name: string | null;
+  /** L1 while the answer is relayed and not yet confirmed by the operator; L0 otherwise. */
+  trust: 'L0' | 'L1'; relayed_by_label: string | null; relayed_label: string | null;
 }
 
 /** An agent may have this many questions waiting for the operator at once: questions stay deliberate. */
 export const MAX_OPEN_PER_AGENT = 5;
 const OPEN: DecisionStatus[] = ['open', 'needs_info'];
 const err = (code: string, msg: string) => new KeyError(code, msg);
+/** Where an unblocked task stands now, for its assignee (it returns to the status it was blocked from). */
+const whereNow = (status: string): string => ({
+  assigned: 'assigned to you again: continue with task_start', in_progress: 'back in progress with you: carry on',
+  changes_requested: 'back with changes requested: continue with task_start', in_review: 'back in review: no action until the verdict',
+  approved: 'approved again: the coordinator closes it', open: 'open again: the coordinator assigns it',
+} as Record<string, string>)[status] ?? `now ${status}`;
 
 export class Decisions {
+  /** Set by app.ts: an answer to a question with `decision: true`, or naming a proposed ADR, becomes a decision entry. */
+  blueprint?: Blueprint;
   constructor(private readonly db: Db, private readonly keys: Keys, private readonly teams: Teams, private readonly audit: Audit,
     private readonly store: VaultStore, private readonly vault: Vault) {}
+  /** Told after a question is settled (answered, declined, confirmed or overturned): the vault copy rewrites Decisions.md. */
+  onSettled?: (teamId: string) => void;
+  /** Told about each new question (the decider routing records where it went, docs/multi-user.md §1.3). */
+  onAsked?: (decisionId: string, teamId: string) => void;
 
   private row(id: string): DecisionRow | null { return (this.db.prepare('SELECT * FROM decisions WHERE id=?').get(id) as unknown as DecisionRow) ?? null; }
   private must(id: string): DecisionRow { const d = this.row(id); if (!d) throw err('not_found', 'decision not found'); return d; }
@@ -44,17 +65,21 @@ export class Decisions {
     const options = JSON.parse(d.options) as DecisionOption[];
     const admin = d.answered_by ? (this.db.prepare('SELECT username FROM admin_users WHERE id=?').get(d.answered_by) as { username: string } | undefined)?.username ?? null : null;
     return {
-      ...d, options, refs: JSON.parse(d.refs) as string[], blocks_task: !!d.blocks_task,
+      ...d, options, refs: JSON.parse(d.refs) as string[], blocks_task: !!d.blocks_task, make_decision: !!d.make_decision,
       answer_label: d.answer_option ? options.find((o) => o.key === d.answer_option)?.label ?? d.answer_option : null,
       agent_label: this.keys.agent(d.agent_id)?.label ?? null, team_name: this.teams.team(d.team_id)?.name ?? null,
       task_title: d.task_id ? this.teams.task(d.task_id)?.title ?? null : null, answered_by_name: admin,
+      trust: d.relay_state === 'pending' ? 'L1' : 'L0', relayed_by_label: d.relayed_by ? this.keys.agent(d.relayed_by)?.label ?? d.relayed_by : null,
+      relayed_label: d.relayed_option ? options.find((o) => o.key === d.relayed_option)?.label ?? d.relayed_option : null,
     };
   }
 
   /** The console's list: open questions first (oldest first), then the log (newest first). */
-  list(f: { team?: string; status?: 'open' | 'closed' | 'all'; limit?: number } = {}): DecisionView[] {
+  list(f: { team?: string; teams?: string[]; status?: 'open' | 'closed' | 'all'; limit?: number } = {}): DecisionView[] {
     const where: string[] = [], args: (string | number)[] = [];
     if (f.team) { where.push('team_id=?'); args.push(f.team); }
+    // Only these teams (a member's view): an empty list means none.
+    if (f.teams) { where.push(f.teams.length ? `team_id IN (${f.teams.map(() => '?').join(',')})` : '0'); args.push(...f.teams); }
     if (f.status === 'open') where.push("status IN ('open','needs_info')");
     if (f.status === 'closed') where.push("status IN ('answered','declined','withdrawn')");
     const rows = this.db.prepare(`SELECT * FROM decisions ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
@@ -72,9 +97,19 @@ export class Decisions {
     return Object.fromEntries((this.db.prepare("SELECT task_id, id FROM decisions WHERE team_id=? AND task_id IS NOT NULL AND blocks_task=1 AND status IN ('open','needs_info')").all(teamId) as { task_id: string; id: string }[]).map((r) => [r.task_id, r.id]));
   }
 
+  /** Whether a team question about this task is still open (open or needs info), blocking it or not. */
+  hasOpenQuestion(taskId: string): boolean {
+    return !!this.db.prepare("SELECT 1 FROM decisions WHERE task_id=? AND status IN ('open','needs_info') LIMIT 1").get(taskId);
+  }
+
   // ───── the agent side ─────
-  ask(w: Who, a: { team_id: string; question: string; context?: string; options?: DecisionOption[]; recommended?: string; task_id?: string; refs?: string[]; needed_by?: number }): DecisionView {
+  ask(w: Who, a: { team_id: string; question: string; context?: string; options?: DecisionOption[]; recommended?: string; task_id?: string; refs?: string[]; needed_by?: number; decision?: boolean; project?: string }): DecisionView {
     const team = this.teams.checkAsk(w, a.team_id);
+    // Keys are per project (docs/blueprint.md §3): the team fixes the project its refs resolve in; a project named must be it.
+    const own = this.db.prepare('SELECT p.id, p.key FROM teams t JOIN projects p ON p.id=t.project_id WHERE t.id=?').get(team.id) as { id: string; key: string } | undefined;
+    if (a.project !== undefined && (!own || (a.project !== own.id && a.project !== own.key))) {
+      throw err('invalid_argument', `Team ${team.name} is in project ${own?.key ?? '(none yet)'}, and its refs resolve there. Leave project out${own ? `, or name ${own.key}` : ''}.`);
+    }
     const question = a.question.trim();
     if (!question) throw err('invalid_argument', 'Ask a question.');
     const options = (a.options ?? []).map((o) => ({ key: o.key.trim(), label: o.label.trim(), effect: o.effect?.trim() || null }));
@@ -91,26 +126,29 @@ export class Decisions {
     const refs = this.teams.checkRefsPublic(team.id, a.refs);
     const id = `dec_${randomToken(10)}`, now = Date.now();
     tx(this.db, () => {
-      if (a.task_id) this.teams.blockForDecision(w, team.id, a.task_id, question);
-      this.db.prepare(`INSERT INTO decisions(id,team_id,task_id,blocks_task,agent_id,credential_id,question,context,options,recommended,refs,needed_by,status,created_at,updated_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'open',?,?)`).run(id, team.id, a.task_id ?? null, a.task_id ? 1 : 0, w.agentId, w.credId, question, a.context?.trim() || null,
-        JSON.stringify(options), a.recommended ?? null, JSON.stringify(refs), a.needed_by ?? null, now, now);
+      if (a.task_id) this.teams.blockForDecision(w, team.id, a.task_id, question, id);
+      this.db.prepare(`INSERT INTO decisions(id,team_id,task_id,blocks_task,agent_id,credential_id,question,context,options,recommended,refs,needed_by,status,created_at,updated_at,make_decision,project_id)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'open',?,?,?,?)`).run(id, team.id, a.task_id ?? null, a.task_id ? 1 : 0, w.agentId, w.credId, question, a.context?.trim() || null,
+        JSON.stringify(options), a.recommended ?? null, JSON.stringify(refs), a.needed_by ?? null, now, now, a.decision ? 1 : 0, own?.id ?? null);
     });
     const who = this.keys.agent(w.agentId)?.label ?? w.agentId;
-    this.teams.notifyCoordinators(team.id, 'decision_asked', `${who} asked the operator (${id}): ${question.slice(0, 300)}${a.task_id ? ` It blocks task ${a.task_id} until answered.` : ''}`, w.agentId);
+    // A fixed notice: the question is the agent's words (L1). Coordinators read it with team_decisions.
+    this.teams.notifyCoordinators(team.id, 'decision_asked', `${who} asked the operator question ${id}.${a.task_id ? ` It blocks task ${a.task_id} until answered.` : ''} Read it with team_decisions.`, w.agentId);
     this.audit.event({ kind: 'agent', id: w.agentId }, 'decision.ask', { kind: 'decision', id }, { team: team.name, task: a.task_id ?? null });
+    try { this.onAsked?.(id, team.id); } catch { /* routing records must never fail a question */ }
     return this.get(id);
   }
   /** The asker adds information (also the reply to "needs info") or withdraws the question. */
-  update(w: Who, a: { decision_id: string; context?: string; withdraw?: boolean }): DecisionView {
+  update(w: Who, a: { decision_id: string; context?: string; withdraw?: boolean; relayed_answer?: string; chosen?: string; source?: string }): DecisionView {
     const d = this.must(a.decision_id);
-    if (d.agent_id !== w.agentId) throw err('denied', 'Not allowed, or does not exist.');
+    if (a.relayed_answer !== undefined || a.chosen !== undefined || a.source !== undefined) return this.relay(w, d, a);
+    if (d.agent_id !== w.agentId) throw err('denied', NOT_ALLOWED);
     if (!OPEN.includes(d.status)) throw err('invalid_state', `The question is ${d.status}.`);
     const now = Date.now();
     if (a.withdraw) {
       tx(this.db, () => {
         this.db.prepare("UPDATE decisions SET status='withdrawn', blocks_task=0, updated_at=? WHERE id=?").run(now, d.id);
-        if (d.task_id && d.blocks_task) this.teams.unblockAfterDecision(d.task_id, 'question withdrawn', { kind: 'agent', id: w.agentId });
+        if (d.task_id && d.blocks_task) this.teams.unblockAfterDecision(d.task_id, d.id, 'question withdrawn', { kind: 'agent', id: w.agentId });
       });
       return this.get(d.id);
     }
@@ -120,9 +158,45 @@ export class Decisions {
     this.db.prepare("UPDATE decisions SET context=?, status='open', info_note=NULL, updated_at=? WHERE id=?").run(context, now, d.id);
     return this.get(d.id);
   }
+  /**
+   * The asking team's coordinator records an answer the operator gave outside the hub (docs/decisions.md#relayed-answers).
+   * It counts as an answer (the task is unblocked) but stays L1, "relayed by", until the operator confirms or overturns
+   * it; Blueprint decisions it would record or accept wait for that confirmation.
+   */
+  private relay(w: Who, d: DecisionRow, a: { relayed_answer?: string; chosen?: string; source?: string; context?: string; withdraw?: boolean }): DecisionView {
+    if (this.teams.roleOf(d.team_id, w.agentId) !== 'coordinator') throw err('denied', 'Only the coordinator of the team that asked can relay an answer.');
+    // Team state, pause and the grant, as for any other team action: a paused or ended team cannot relay.
+    this.teams.checkAsk(w, d.team_id);
+    if (a.withdraw || a.context !== undefined) throw err('invalid_argument', 'Relay an answer on its own: no context or withdraw in the same call.');
+    if (!OPEN.includes(d.status)) throw err('invalid_state', `The question is already ${d.status}.`);
+    const options = JSON.parse(d.options) as DecisionOption[];
+    const text = a.relayed_answer?.trim() || null, source = a.source?.trim() || null, option = a.chosen || null;
+    if (!text) throw err('invalid_argument', 'relayed_answer is required: the operator\'s answer in their words.');
+    if (!source) throw err('invalid_argument', 'source is required: where the operator gave the answer (for example "chat with operator").');
+    if (option && !options.some((o) => o.key === option)) throw err('invalid_argument', `chosen must be one of the option keys (${options.map((o) => o.key).join(', ') || 'none: this question has no options'}).`);
+    const now = Date.now(), label = option ? options.find((o) => o.key === option)!.label : null;
+    const answerLine = [label, text].filter(Boolean).join(' — ');
+    const by = this.keys.agent(w.agentId)?.label ?? w.agentId;
+    tx(this.db, () => {
+      this.db.prepare(`UPDATE decisions SET status='answered', answer_option=?, answer_text=?, answered_by=NULL, answered_at=?, blocks_task=0, updated_at=?,
+        relayed_by=?, relayed_source=?, relayed_option=?, relayed_text=?, relayed_at=?, relay_state='pending', relay_settled_at=NULL WHERE id=?`)
+        .run(option, text, now, now, w.agentId, source, option, text, now, d.id);
+      if (d.task_id && d.blocks_task) this.teams.unblockAfterDecision(d.task_id, d.id, `answered (relayed by ${by}): ${answerLine}`, { kind: 'agent', id: w.agentId });
+    });
+    const task = d.task_id ? this.teams.task(d.task_id) : null;
+    // A fixed notice: the answer and its source are the coordinator's words (L1). Agents read them with team_decisions.
+    const what = `${by} relayed an answer from the operator to question ${d.id}. It is relayed (L1) until the operator confirms it. Read it with team_decisions.`;
+    if (d.agent_id !== w.agentId) this.keys.notify(d.agent_id, 'decision', `${what}${task && d.blocks_task ? ` Task ${task.id} is ${whereNow(task.status)}.` : ''}`);
+    if (task?.assignee_agent_id && task.assignee_agent_id !== d.agent_id && task.assignee_agent_id !== w.agentId) {
+      this.keys.notify(task.assignee_agent_id, 'decision', `${what}${d.blocks_task ? ` The task is ${whereNow(task.status)}.` : ''}`);
+    }
+    this.audit.event({ kind: 'agent', id: w.agentId }, 'decision.relay', { kind: 'decision', id: d.id }, { option, text: text.slice(0, 500), source: source.slice(0, 200) });
+    return this.get(d.id);
+  }
+
   /** Decisions of the caller's team, for agents: the log, or only open ones. */
   forAgent(w: Who, teamId: string, status: 'open' | 'closed' | 'all' = 'all', limit = 50): DecisionView[] {
-    if (!this.teams.roleOf(teamId, w.agentId)) throw err('denied', 'Not allowed, or does not exist.');
+    if (!this.teams.roleOf(teamId, w.agentId)) throw err('denied', NOT_ALLOWED);
     return this.list({ team: teamId, status, limit });
   }
 
@@ -137,18 +211,71 @@ export class Decisions {
     const answerLine = [label, text].filter(Boolean).join(' — ');
     tx(this.db, () => {
       this.db.prepare("UPDATE decisions SET status='answered', answer_option=?, answer_text=?, answered_by=?, answered_at=?, blocks_task=0, updated_at=? WHERE id=?").run(option, text, actor.id, now, now, d.id);
-      if (d.task_id && d.blocks_task) this.teams.unblockAfterDecision(d.task_id, `answered: ${answerLine}`, actor);
+      if (d.task_id && d.blocks_task) this.teams.unblockAfterDecision(d.task_id, d.id, `answered: ${answerLine}`, actor);
     });
+    const adr = this.recordInBlueprint(d.id, actor);
     const task = d.task_id ? this.teams.task(d.task_id) : null;
     const mine = task?.assignee_agent_id === d.agent_id, holder = task?.assignee_agent_id ? this.keys.agent(task.assignee_agent_id)?.label ?? task.assignee_agent_id : null;
-    const back = task && d.blocks_task ? ` Task "${task.title}" (${task.id}) is ${task.status === 'assigned' ? (mine ? 'assigned to you again: continue with task_start' : `assigned to ${holder} again`) : `now ${task.status}`}.` : '';
-    this.keys.notify(d.agent_id, 'decision', `The operator answered your question ${d.id} ("${d.question.slice(0, 200)}"): ${answerLine}.${back}`);
-    this.teams.notifyCoordinators(d.team_id, 'decision', `The operator answered ${d.id} ("${d.question.slice(0, 200)}"): ${answerLine}.`, d.agent_id);
+    // The task went back to the status it was blocked from, not always to assigned.
+    const back = task && d.blocks_task ? ` Task "${task.title}" (${task.id}) is ${mine || task.status === 'open' ? whereNow(task.status) : task.status === 'assigned' ? `assigned to ${holder} again` : `back with ${holder} (${task.status.replace('_', ' ')})`}.` : '';
+    const rec = adr ? ` Recorded as ${adr} in the blueprint.` : '';
+    this.keys.notify(d.agent_id, 'decision', `The operator answered your question ${d.id} ("${d.question.slice(0, 200)}"): ${answerLine}.${rec}${back}`);
+    this.teams.notifyCoordinators(d.team_id, 'decision', `The operator answered ${d.id} ("${d.question.slice(0, 200)}"): ${answerLine}.${rec}`, d.agent_id);
     // The worker of the blocked task hears it too when someone else (usually the coordinator) asked for it.
     if (task && task.assignee_agent_id && task.assignee_agent_id !== d.agent_id && this.teams.roleOf(d.team_id, task.assignee_agent_id) !== 'coordinator') {
-      this.keys.notify(task.assignee_agent_id, 'decision', `The operator answered ${d.id} about your task "${task.title}": ${answerLine}.${d.blocks_task ? ' The task is assigned to you again: continue with task_start.' : ''}`);
+      this.keys.notify(task.assignee_agent_id, 'decision', `The operator answered ${d.id} about your task "${task.title}": ${answerLine}.${d.blocks_task ? ` The task is ${whereNow(task.status)}.` : ''}`);
     }
     this.audit.event(actor, 'decision.answer', { kind: 'decision', id: d.id }, { option, text: text?.slice(0, 500) ?? null });
+    await this.mirror(d.id);
+    return this.get(d.id);
+  }
+  /**
+   * The answer as a blueprint decision entry (docs/blueprint.md §4): accepts a proposed ADR named in refs, or records a
+   * new one when the question asked for it. Best effort, like the vault mirror: the answer stands if this fails.
+   */
+  private recordInBlueprint(id: string, actor: Actor): string | null {
+    if (!this.blueprint) return null;
+    const d = this.get(id);
+    try {
+      const key = this.blueprint.recordDecision({ ...d, make_decision: d.make_decision }, { kind: 'operator', id: actor.id });
+      if (key) this.db.prepare('UPDATE decisions SET bp_key=? WHERE id=?').run(key, id);
+      return key;
+    } catch (e) {
+      this.audit.event({ kind: 'system', id: null }, 'blueprint.decision_failed', { kind: 'decision', id }, { error: (e as Error).message.slice(0, 300) });
+      return null;
+    }
+  }
+  /** The operator confirms a relayed answer: it becomes the operator's word (L0), and Blueprint decisions are recorded now. */
+  async confirmRelay(id: string, actor: Actor & { kind: 'admin' }): Promise<DecisionView> {
+    const d = this.must(id);
+    if (d.relay_state !== 'pending') throw err('invalid_state', d.relay_state ? `The relayed answer was already ${d.relay_state}.` : 'This answer was not relayed.');
+    const now = Date.now();
+    this.db.prepare("UPDATE decisions SET relay_state='confirmed', relay_settled_at=?, answered_by=?, updated_at=? WHERE id=?").run(now, actor.id, now, d.id);
+    const adr = this.recordInBlueprint(d.id, actor);
+    const v = this.get(d.id), line = [v.answer_label, v.answer_text].filter(Boolean).join(' — ');
+    const msg = `The operator confirmed the relayed answer to ${d.id} ("${d.question.slice(0, 200)}"): ${line}. It is now the operator's decision (L0).${adr ? ` Recorded as ${adr} in the blueprint.` : ''}`;
+    this.keys.notify(d.agent_id, 'decision', msg);
+    this.teams.notifyCoordinators(d.team_id, 'decision', msg, d.agent_id);
+    this.audit.event(actor, 'decision.relay_confirm', { kind: 'decision', id: d.id }, { relayed_by: d.relayed_by });
+    await this.mirror(d.id);
+    return this.get(d.id);
+  }
+  /** The operator overturns a relayed answer with their own; the relayed one stays on record. The task is not blocked again. */
+  async overturnRelay(id: string, a: { option?: string | null; text?: string | null }, actor: Actor & { kind: 'admin' }): Promise<DecisionView> {
+    const d = this.must(id);
+    if (d.relay_state !== 'pending') throw err('invalid_state', d.relay_state ? `The relayed answer was already ${d.relay_state}.` : 'This answer was not relayed.');
+    const options = JSON.parse(d.options) as DecisionOption[], text = a.text?.trim() || null, option = a.option || null;
+    if (option && !options.some((o) => o.key === option)) throw err('invalid_argument', 'Unknown option.');
+    if (!option && !text) throw err('invalid_argument', 'Choose an option or write an answer.');
+    const now = Date.now(), answerLine = [option ? options.find((o) => o.key === option)!.label : null, text].filter(Boolean).join(' — ');
+    this.db.prepare("UPDATE decisions SET answer_option=?, answer_text=?, answered_by=?, answered_at=?, relay_state='overturned', relay_settled_at=?, updated_at=? WHERE id=?").run(option, text, actor.id, now, now, now, d.id);
+    const adr = this.recordInBlueprint(d.id, actor);
+    const msg = `The operator overturned the relayed answer to ${d.id} ("${d.question.slice(0, 200)}"). The operator's answer: ${answerLine}.${adr ? ` Recorded as ${adr} in the blueprint.` : ''} Undo work done on the relayed answer where it differs.`;
+    this.keys.notify(d.agent_id, 'decision', msg);
+    this.teams.notifyCoordinators(d.team_id, 'decision', msg, d.agent_id);
+    const task = d.task_id ? this.teams.task(d.task_id) : null;
+    if (task?.assignee_agent_id && task.assignee_agent_id !== d.agent_id && this.teams.roleOf(d.team_id, task.assignee_agent_id) !== 'coordinator') this.keys.notify(task.assignee_agent_id, 'decision', msg);
+    this.audit.event(actor, 'decision.relay_overturn', { kind: 'decision', id: d.id }, { option, text: text?.slice(0, 500) ?? null, relayed_by: d.relayed_by });
     await this.mirror(d.id);
     return this.get(d.id);
   }
@@ -169,7 +296,7 @@ export class Decisions {
     const now = Date.now();
     tx(this.db, () => {
       this.db.prepare("UPDATE decisions SET status='declined', answer_text=?, answered_by=?, answered_at=?, blocks_task=0, updated_at=? WHERE id=?").run(note?.trim() || null, actor.id, now, now, d.id);
-      if (d.task_id && d.blocks_task) this.teams.unblockAfterDecision(d.task_id, 'question declined', actor);
+      if (d.task_id && d.blocks_task) this.teams.unblockAfterDecision(d.task_id, d.id, 'question declined', actor);
     });
     this.keys.notify(d.agent_id, 'decision', `The operator declined to decide your question ${d.id} ("${d.question.slice(0, 200)}")${note?.trim() ? `: ${note.trim()}` : '.'} Decide within your role, or ask the coordinator.`);
     this.audit.event(actor, 'decision.decline', { kind: 'decision', id: d.id }, { note: note?.slice(0, 500) ?? null });
@@ -183,6 +310,8 @@ export class Decisions {
    */
   private async mirror(id: string): Promise<void> {
     const d = this.get(id), team = this.teams.team(d.team_id);
+    // The hub's own copy, 99 Conclave/…/Decisions.md (docs/vault.md), after every answer, decline and overturn.
+    if (this.onSettled) setImmediate(() => { try { this.onSettled?.(d.team_id); } catch (e) { console.error('decision copy hook failed', e); } });
     if (!team?.decision_log_path) return;
     try {
       const { rel } = this.vault.normalise(team.decision_log_path);
@@ -210,6 +339,7 @@ export function decisionMarkdown(d: DecisionView): string {
   if (d.options.length) lines.push(`- Options: ${d.options.map((o) => `${o.key}) ${o.label}${o.key === d.recommended ? ' (recommended)' : ''}`).join(' · ')}`);
   if (d.status === 'answered') lines.push(`- **Decision:** ${[d.answer_label, d.answer_text].filter(Boolean).join(' — ')}`);
   else lines.push(`- **Declined**${d.answer_text ? `: ${d.answer_text}` : ''}`);
+  if (d.relay_state) lines.push(`- Relayed by ${d.relayed_by_label ?? d.relayed_by} from ${d.relayed_source}${d.relay_state === 'overturned' ? `; the operator overturned the relayed answer (${[d.relayed_label, d.relayed_text].filter(Boolean).join(' — ')})` : d.relay_state === 'confirmed' ? '; confirmed by the operator' : ''}`);
   lines.push(`- ${d.status === 'answered' ? 'Answered' : 'Declined'} by ${d.answered_by_name ?? 'the operator'} · ${d.id}`, '');
   return lines.join('\n');
 }

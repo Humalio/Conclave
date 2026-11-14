@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { buildApp, type App } from '../src/app.js';
+import { testConfig } from './hub.js';
 
 const sys = { kind: 'system' as const, id: null };
 let app: App, base: string, appKey: string, cappedKey: string;
@@ -36,9 +37,7 @@ const put = async (a: Agent, path: string, content: string) => {
 };
 beforeAll(async () => {
   const root = mkdtempSync(join(tmpdir(), 'ah-graph-security-')), vaultDir = join(root, 'vault'); mkdirSync(vaultDir);
-  app = await buildApp({ dataDir: join(root, 'data'), dbFile: join(root, 'data', 't.db'), vaultDir, vaultAlias: 'vault', host: '127.0.0.1', port: 0,
-    pepper: 'fixture', publicUrl: 'http://fixture.test', production: false, adminUsername: 'admin', adminPassword: 'fixture password', publicDir: join(process.cwd(), 'public'),
-    logLevel: 'silent', allowedOrigins: [], vaultScanSeconds: 0, vaultWatch: false, maintenanceSeconds: 0, graph: { debounceMs: 0, verifyRate: 0 } });
+  app = await buildApp(testConfig(root, { vaultDir, pepper: 'fixture', publicUrl: 'http://fixture.test', adminPassword: 'fixture password', graph: { debounceMs: 0, verifyRate: 0 } }));
   await app.store.ready; await app.fastify.listen({ host: '127.0.0.1', port: 0 });
   base = `http://127.0.0.1:${(app.fastify.server.address() as { port: number }).port}`;
   const pc = app.keys.createMachine('fixture', null, sys);
@@ -65,7 +64,7 @@ describe('graph source boundaries over MCP', () => {
       const flag = result.data.flags.find((x: any) => x.id === id);
       expect(flag).toMatchObject({ cause_path: null, cause_revision: null, evidence_claims: [] });
       for (const name of ['graph_stale', 'task_list', 'session_whoami', 'work_next']) {
-        const text = JSON.stringify(await call(name));
+        const text = JSON.stringify(await call(name, name === 'work_next' ? { wait_seconds: 0 } : {}));
         expect(text).not.toContain('SECRET-CANARY'); expect(text).not.toContain('Private/Secret.md');
       }
     }
@@ -124,9 +123,9 @@ describe('graph source boundaries over MCP', () => {
     await put(worker, 'Fix.md', '# Fact\nThe price is 12.');
     expect((await worker.call('task_submit', { task_id: taskId, summary: 'Aligned the public price with the authority.' })).error).toBeFalsy();
     const capped = await connect(reviewer.key.secret, cappedKey);
-    expect((await capped('task_review', { task_id: taskId, decision: 'approve', comments: 'Looks fine' })).data.error).toBe('denied');
+    expect((await capped('task_review', { task_id: taskId, decision: 'approve', comments: 'Looks fine', version: 1000 })).data.error).toBe('denied');
     expect((app.db.prepare('SELECT status FROM tasks WHERE id=?').get(taskId) as any).status).toBe('in_review');
-    expect((await reviewer.call('task_review', { task_id: taskId, decision: 'approve', comments: 'Read both sources; corrected side is accurate.' })).error).toBeFalsy();
+    expect((await reviewer.call('task_review', { task_id: taskId, decision: 'approve', comments: 'Read both sources; corrected side is accurate.', version: 1000 })).error).toBeFalsy();
     expect((app.db.prepare('SELECT status FROM kg_flags WHERE id=?').get(a) as any).status).toBe('fixed');
     expect((app.db.prepare('SELECT status FROM kg_flags WHERE id=?').get(b) as any).status).toBe('fixed');
   });

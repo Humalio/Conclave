@@ -5,7 +5,9 @@ import { join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { buildApp, type App } from '../src/app.js';
+import { intakeOpen } from './intake.js';
 import { KeyError } from '../src/keys/keys.js';
+import { testConfig } from './hub.js';
 
 const sys = { kind: 'system' as const, id: null };
 let app: App, base: string, appKey: string;
@@ -46,12 +48,15 @@ async function fixture(extraReviewer = true) {
 async function submitted(f: Awaited<ReturnType<typeof fixture>>) {
   const claim = await f.worker.call('task_claim', { task_id: f.task.id, version: f.task.version, start: true });
   expect(claim.data.task.status).toBe('in_progress');
-  expect((await f.worker.call('task_submit', { task_id: f.task.id, summary: 'Completed with evidence' })).data.task.status).toBe('in_review');
+  const s = await f.worker.call('task_submit', { task_id: f.task.id, summary: 'Completed with evidence' });
+  expect(s.data.task.status).toBe('in_review');
+  // A polling reviewer: the result names the hand-off, with no wake text (docs/proposals/console-systems.md §8.4, 8.A9).
+  expect(s.data.handoff).toEqual({ to: f.reviewer.id, to_label: 'reviewer', phase: 'review', on_demand: false, seen: false });
 }
 
 async function nextNonNotice(a: Agent) {
   for (let i = 0; i < 20; i++) {
-    const r = await a.call('work_next');
+    const r = await a.call('work_next', { wait_seconds: 0 });
     if (r.data.status !== 'item' || r.data.item.kind !== 'notice') return r;
     await a.call('work_ack', { item_id: r.data.item.item_id });
   }
@@ -61,9 +66,8 @@ async function nextNonNotice(a: Agent) {
 beforeAll(async () => {
   const dir = mkdtempSync(join(tmpdir(), 'ah-workflow-review-'));
   const vaultDir = join(dir, 'vault'); mkdirSync(vaultDir);
-  app = await buildApp({ dataDir: join(dir, 'data'), dbFile: join(dir, 'data', 'test.db'), vaultDir, vaultAlias: 'vault', host: '127.0.0.1', port: 0,
-    pepper: 'test', publicUrl: 'http://fixture.test', production: false, adminUsername: 'admin', adminPassword: 'fixture password',
-    publicDir: join(process.cwd(), 'public'), logLevel: 'silent', allowedOrigins: [], vaultScanSeconds: 0, vaultWatch: false, maintenanceSeconds: 0 });
+  app = await buildApp(testConfig(dir, { dbFile: join(dir, 'data', 'test.db'), vaultDir, pepper: 'test', publicUrl: 'http://fixture.test', adminPassword: 'fixture password' }));
+  intakeOpen(app);
   await app.store.ready;
   await app.fastify.listen({ host: '127.0.0.1', port: 0 });
   base = `http://127.0.0.1:${(app.fastify.server.address() as { port: number }).port}`;
@@ -79,8 +83,8 @@ describe('authenticated multi-agent workflow regressions', () => {
     expect(results.map((r) => r.error ? r.data.error : r.data.task.status).sort()).toEqual(['conflict', 'in_progress']);
     const winner = results[0]!.error ? f.rival : f.worker;
     expect((await winner.call('task_submit', { task_id: f.task.id, summary: 'Done' })).data.task.status).toBe('in_review');
-    expect((await winner.call('task_review', { task_id: f.task.id, decision: 'approve', comments: 'Self approval' })).data.error).toBe('denied');
-    expect((await f.reviewer.call('task_review', { task_id: f.task.id, decision: 'approve', comments: 'Independent approval' })).data.task.status).toBe('approved');
+    expect((await winner.call('task_review', { task_id: f.task.id, decision: 'approve', comments: 'Self approval', version: 1000 })).data.error).toBe('denied');
+    expect((await f.reviewer.call('task_review', { task_id: f.task.id, decision: 'approve', comments: 'Independent approval', version: 1000 })).data.task.status).toBe('approved');
   });
 
   it('hands a departed reviewer submission to the remaining independent reviewer', async () => {
@@ -89,8 +93,31 @@ describe('authenticated multi-agent workflow regressions', () => {
     expect(app.teams.task(f.task.id)).toMatchObject({ status: 'in_review', reviewer_agent_id: f.backup.id, summary: 'Completed with evidence' });
     const work = await nextNonNotice(f.backup);
     expect(work.data.item).toMatchObject({ kind: 'review_requested', task: { id: f.task.id } });
-    expect((await f.reviewer.call('task_review', { task_id: f.task.id, decision: 'approve', comments: 'Late approval' })).error).toBeTruthy();
-    expect((await f.backup.call('task_review', { task_id: f.task.id, decision: 'approve', comments: 'Checked' })).data.task.status).toBe('approved');
+    expect((await f.reviewer.call('task_review', { task_id: f.task.id, decision: 'approve', comments: 'Late approval', version: 1000 })).error).toBeTruthy();
+    expect((await f.backup.call('task_review', { task_id: f.task.id, decision: 'approve', comments: 'Checked', version: 1000 })).data.task.status).toBe('approved');
+  });
+
+  it('hands the review to an independent coordinator when the only reviewer leaves and coordinators review', async () => {
+    const f = await fixture(false);
+    app.teams.update(f.team.id, { coordinator_reviews: true }, sys);
+    await submitted(f);
+    const before = app.teams.task(f.task.id)!;
+    app.teams.removeMember(f.team.id, f.reviewer.id, sys);
+    const after = app.teams.task(f.task.id)!;
+    expect(after).toMatchObject({ status: 'in_review', assignee_agent_id: f.worker.id, reviewer_agent_id: f.coord.id, summary: 'Completed with evidence', submitted_version: before.submitted_version });
+    const work = await nextNonNotice(f.coord);
+    expect(work.data.item).toMatchObject({ kind: 'review_requested', task: { id: f.task.id } });
+    expect((await f.coord.call('task_review', { task_id: f.task.id, decision: 'approve', comments: 'Checked', version: 1000 })).data.task.status).toBe('approved');
+  });
+
+  it('reopens when the only coordinator who could review is the task\'s own assignee', async () => {
+    // A coordinator holds work only as a hub-raised task (a knowledge flag goes to its owner); it may not review its own submission.
+    const f = await fixture(false);
+    app.teams.update(f.team.id, { coordinator_reviews: true }, sys);
+    await submitted(f);
+    app.db.prepare('UPDATE tasks SET assignee_agent_id=? WHERE id=?').run(f.coord.id, f.task.id);
+    app.teams.removeMember(f.team.id, f.reviewer.id, sys);
+    expect(app.teams.task(f.task.id)).toMatchObject({ status: 'open', assignee_agent_id: null, reviewer_agent_id: null });
   });
 
   it('reopens when the only reviewer leaves and recovers after a reviewer joins', async () => {
@@ -100,8 +127,10 @@ describe('authenticated multi-agent workflow regressions', () => {
     app.teams.addMember(f.team.id, { agent_id: f.backup.id, role: 'reviewer' }, sys);
     const current = app.teams.task(f.task.id)!;
     await f.worker.call('task_claim', { task_id: f.task.id, version: current.version, start: true });
-    expect((await f.worker.call('task_submit', { task_id: f.task.id, summary: 'Resubmission' })).data.task.reviewer).toBe(f.backup.id);
-    expect((await f.backup.call('task_review', { task_id: f.task.id, decision: 'approve', comments: 'Checked' })).data.task.status).toBe('approved');
+    const re = await f.worker.call('task_submit', { task_id: f.task.id, summary: 'Resubmission' });
+    expect(re.data.task.reviewer).toBe(f.backup.id);
+    expect(re.data.handoff).toMatchObject({ to: f.backup.id, phase: 'review', on_demand: false });
+    expect((await f.backup.call('task_review', { task_id: f.task.id, decision: 'approve', comments: 'Checked', version: 1000 })).data.task.status).toBe('approved');
   });
 
   it('keeps approval and graph-side validation atomic when a hook rejects', async () => {
@@ -113,7 +142,7 @@ describe('authenticated multi-agent workflow regressions', () => {
       throw new KeyError('invalid_state', 'The flagged section has not changed.');
     };
     try {
-      const r = await f.reviewer.call('task_review', { task_id: f.task.id, decision: 'approve', comments: 'Premature' });
+      const r = await f.reviewer.call('task_review', { task_id: f.task.id, decision: 'approve', comments: 'Premature', version: 1000 });
       expect(r.data.error).toBe('invalid_state');
       expect(app.teams.task(f.task.id)).toMatchObject({ status: 'in_review', description: null });
       expect(app.teams.taskEvents(f.task.id)).toHaveLength(before);

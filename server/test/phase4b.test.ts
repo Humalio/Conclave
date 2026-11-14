@@ -9,6 +9,7 @@ import { buildApp, type App } from '../src/app.js';
 import type { Config } from '../src/config.js';
 import { mapLine } from '../src/shares/shares.js';
 import { LeakGuard } from '../src/guard/leakGuard.js';
+import { testConfig, adminLogin } from './hub.js';
 
 const sys = { kind: 'system' as const, id: null };
 let app: App, base: string, cookie = '', csrf = '', appKey = '', vaultDir = '';
@@ -47,18 +48,12 @@ beforeAll(async () => {
   const dir = mkdtempSync(join(tmpdir(), 'ah4b-'));
   vaultDir = join(dir, 'vault');
   mkdirSync(vaultDir, { recursive: true });
-  const config: Config = {
-    dataDir: join(dir, 'data'), dbFile: join(dir, 'data', 't.db'), vaultDir, vaultAlias: 'vault', port: 0, host: '127.0.0.1', pepper: 'test-pepper',
-    publicUrl: 'http://hub.test', production: false, adminUsername: 'admin', adminPassword: 'correct horse battery', publicDir: join(process.cwd(), 'public'), logLevel: 'silent', allowedOrigins: [],
-    vaultScanSeconds: 0, vaultWatch: false,
-  };
+  const config: Config = testConfig(dir, { vaultDir, maintenanceSeconds: undefined });
   app = await buildApp(config);
   await app.store.ready;
   await app.fastify.listen({ port: 0, host: '127.0.0.1' });
   base = `http://127.0.0.1:${(app.fastify.server.address() as { port: number }).port}`;
-  const r = await fetch(`${base}/api/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ username: 'admin', password: 'correct horse battery' }) });
-  cookie = r.headers.get('set-cookie')!.split(';')[0]!;
-  csrf = ((await r.json()) as { csrf: string }).csrf;
+  ({ cookie, csrf } = await adminLogin(base));
   const pc = (await api('POST', '/pcs', { name: 'pc' })).body.pc.id;
   appKey = app.keys.createAppKey({ machineId: pc, appName: 'claude-code', maxLiveSessions: 500 }, sys).secret;
 });
@@ -109,7 +104,7 @@ describe('shares', () => {
     expect((await R.call('share_resolve', { feedback_id: c4, status: 'applied' })).structuredContent.error).toBe('denied');
 
     // the author gets the feedback as work items
-    const w = (await A.call('work_next')).structuredContent;
+    const w = (await A.call('work_next', { wait_seconds: 0 })).structuredContent;
     expect(w.status).toBe('item');
     expect(w.item.kind).toBe('share_feedback');
     expect(w.item.feedback.share_id).toBe(sid);
@@ -117,7 +112,7 @@ describe('shares', () => {
     const seen = new Set<string>([w.item.feedback.feedback_id]);
     await A.call('work_ack', { item_id: w.item.item_id });
     for (let i = 0; i < 2; i++) {
-      const n = (await A.call('work_next')).structuredContent;
+      const n = (await A.call('work_next', { wait_seconds: 0 })).structuredContent;
       seen.add(n.item.feedback.feedback_id);
       await A.call('work_ack', { item_id: n.item.item_id });
     }
@@ -222,7 +217,7 @@ describe('inline channels', () => {
     // not accepted yet
     expect((await A.call('channel_send', { channel_id: cid, seq: 0, data: b64(chunks[0]!) })).structuredContent.error).toBe('invalid_state');
     // the offer arrives as a work item
-    const w = (await R.call('work_next')).structuredContent;
+    const w = (await R.call('work_next', { wait_seconds: 0 })).structuredContent;
     expect(w.item).toMatchObject({ kind: 'channel_offer', trust: 'L2' });
     expect(w.item.channel.channel_id).toBe(cid);
     expect((await A.call('channel_accept', { channel_id: cid })).structuredContent.error).toBe('invalid_state');
@@ -265,7 +260,7 @@ describe('inline channels', () => {
     expect((await X.call('channel_status', { channel_id: cid })).structuredContent.error).toBe('denied');
     // both sides learn the result
     const events: string[] = [];
-    for (let i = 0; i < 3; i++) { const n = (await A.call('work_next')).structuredContent; if (n.status !== 'item') break; events.push(n.item.content); await A.call('work_ack', { item_id: n.item.item_id }); }
+    for (let i = 0; i < 3; i++) { const n = (await A.call('work_next', { wait_seconds: 0 })).structuredContent; if (n.status !== 'item') break; events.push(n.item.content); await A.call('work_ack', { item_id: n.item.item_id }); }
     expect(events.some((e) => e.includes('done') && e.includes('sha256 ok'))).toBe(true);
   });
 

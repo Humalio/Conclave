@@ -12,10 +12,10 @@ export const LOCK_KINDS: LockKind[] = ['writes', 'vault', 'agent', 'pc', 'team']
  */
 export const OPEN_TOOLS = new Set(['session_login', 'session_help', 'session_logout', 'session_whoami', 'session_describe', 'session_ack',
   'setup_pc', 'setup_status', 'access_list', 'access_request', 'access_status', 'access_check',
-  'agent_list', 'message_read', 'message_ack', 'message_history', 'room_list', 'team_info', 'team_plan', 'work_next', 'work_ack', 'task_list',
+  'agent_list', 'message_read', 'message_ack', 'message_history', 'room_list', 'team_info', 'work_next', 'work_ack', 'task_list',
   'file_list', 'file_read', 'file_stat', 'file_search', 'file_download', 'file_history', 'file_diff', 'file_conflicts',
   'share_list', 'share_info', 'share_read', 'share_diff', 'share_feedback', 'share_download', 'channel_list', 'channel_receive', 'channel_status',
-  'feedback_find', 'feedback_read', 'team_decisions', 'directives_list', 'directives_read', 'directive_ack', 'graph_related', 'graph_impact', 'graph_query', 'graph_context', 'graph_summary', 'graph_stale', 'graph_health']);
+  'feedback_find', 'feedback_read', 'team_decisions', 'bp_read', 'bp_proposals', 'directives_list', 'directives_read', 'graph_related', 'graph_impact', 'graph_query', 'graph_context', 'graph_summary', 'graph_stale', 'graph_health', 'checkout_status']);
 /** Does this tool change shared state? A lockdown on the agent, its PC or all writes refuses these. */
 export const isWriteTool = (tool: string): boolean => !OPEN_TOOLS.has(tool);
 /** Tools that write into the vault. */

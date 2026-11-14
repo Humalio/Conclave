@@ -23,11 +23,97 @@ export interface Rule {
   not_after?: number;
 }
 
-export type DecisionSource = 'session_key' | 'app_key_cap' | 'default' | 'link' | 'paused';
+export type DecisionSource = 'session_key' | 'app_key_cap' | 'owner_grant' | 'default' | 'link' | 'paused' | 'reserved';
+
+/**
+ * An owner's delegated grant as a ceiling on an agent (docs/authorization.md#owner-enforcement), built by OwnerScope
+ * from the owner's project grants and their agent delegation. Like the app key cap, a ceiling only narrows: an action
+ * must be allowed by the session key, the app key cap and every ceiling. A ceiling holds allow rules only, and an
+ * action it does not name is refused (fail closed). `paths`, when set, must also accept a vault path (the owner's
+ * visible folders: restricted folders stay out). `basis` says why it applies: the agent's own owner, or the owner of
+ * the agent that handed over work the agent is doing (`task`), and `via` how that owner is involved in the task: its
+ * origin (the owner of the agent that created it), the reviewer's owner or the assignee's owner.
+ */
+export interface OwnerLayer {
+  owner: string | null; label: string; basis: 'owner' | 'task'; task?: string; via?: 'origin' | 'reviewer' | 'assignee';
+  rules: Rule[]; paths?: (path: string) => boolean;
+}
+/**
+ * An app key cap, carrying the owner ceilings of the session it decides for. The ceilings ride on the cap so that every
+ * decision that applies the cap applies them too; a cap without them (owner enforcement off) is a plain rule list.
+ */
+export type Cap = Rule[] & { readonly owners?: readonly OwnerLayer[] };
+export function withOwners(cap: Rule[], owners: readonly OwnerLayer[] | null): Cap {
+  if (!owners) return cap;
+  const c = [...cap] as Cap;
+  Object.defineProperty(c, 'owners', { value: owners, enumerable: false });
+  return c;
+}
+/** The ceiling that refuses this action on this resource, or null when every ceiling allows it. */
+function ceilingRefusal(cap: Cap, action: string, resource: string): { layer: OwnerLayer; reason: string } | null {
+  for (const l of cap.owners ?? []) {
+    if (l.paths && resource.startsWith('path:') && !l.paths(resource.slice(5))) return { layer: l, reason: `outside the folders ${l.label} may see` };
+    if (evalList(l.rules, action, resource).effect !== 'allow') return { layer: l, reason: l.basis === 'task' ? `outside the grant of ${l.label}, whose agent handed over this work` : `outside the grant ${l.label} delegated to this agent` };
+  }
+  return null;
+}
+/**
+ * For operations the rule engine does not decide (Blueprint): does every owner ceiling on the cap allow this action on
+ * this resource? A cap without ceilings allows it; the operation's own checks still apply.
+ */
+export function ownerAllows(cap: Cap, action: string, resource: string): boolean { return !ceilingRefusal(cap, action, resource); }
+
+/**
+ * Reserved folders (docs/vault.md, "99 Conclave"): path prefixes such as "/vicomtech/99 Conclave" that only the hub
+ * writes. Every fs.* write under one is refused for every key; any other action under one needs an allow rule whose
+ * own path pattern names the folder (its segments up to the folder are literal). A wildcard such as /<alias>/** does
+ * not count. Set once at boot (app.ts); the engine stays a function of its inputs and this list.
+ */
+let RESERVED: string[] = [];
+export function setReserved(prefixes: string[]): void { RESERVED = prefixes.map((p) => '/' + segments(p).join('/')); }
+export function reservedPrefixes(): readonly string[] { return RESERVED; }
+/**
+ * The generic refusal where the hub must not reveal whether a thing exists (files, shares, channels, feedback, blueprint
+ * items): the same words for "not allowed" and "does not exist", plus where to look next.
+ */
+export const NOT_ALLOWED = 'Not allowed, or does not exist. If you think you should have access, check `access_list` or ask with `access_request`.';
+/** A tool call the policy engine refused: which tools exist is no secret, so the refusal names the missing grant. */
+export const missingGrant = (action: string, resource: string): string =>
+  `Not allowed, missing grant: \`${action}\` on \`${resource}\`. Check \`access_list\`, or ask for it with \`access_request\`.`;
+/** The refusal an agent sees for a write under a reserved folder. */
+export const RESERVED_WRITE = '99 Conclave is written by the hub; write your documents in your project folder.';
+const RESERVED_WRITES = /^fs\.(create|update|patch|delete|rename|restore)$/;
+/** Is this one of the writes a reserved folder always refuses? */
+export const reservedWrite = (action: string): boolean => RESERVED_WRITES.test(action);
+/** The reserved prefix a concrete path lies in (the folder itself or below), or null. */
+export function reservedOf(path: string, reserved: readonly string[] = RESERVED): string | null {
+  const xs = segments(path);
+  for (const r of reserved) {
+    const rs = segments(r);
+    // Case-folded: on a case-insensitive file system "/vault/99 conclave/x.md" is a path in the same folder.
+    if (xs.length >= rs.length && rs.every((s, i) => s.toLowerCase() === xs[i]!.toLowerCase())) return r;
+  }
+  return null;
+}
+/** Does this path pattern name the reserved folder (its segments up to the folder are literal, no "*")? */
+function namesReserved(pattern: string, prefix: string): boolean {
+  const ps = segments(pattern), rs = segments(prefix);
+  return ps.length >= rs.length && rs.every((s, i) => ps[i] === s);
+}
+/** Inside a reserved folder only deny rules and allow rules that name the folder count for the session key. */
+const forReserved = (rules: Rule[], prefix: string) => rules.filter((r) => r.effect === 'deny' || (r.resource.startsWith('path:') && namesReserved(r.resource.slice(5), prefix)));
 
 /** Actions that change state; a paused team's resources refuse them. */
-const PAUSABLE = /^(message.send|room.post|channel.|share.(create|upload|comment|suggest|promote)|fs.(create|update|rename|delete|restore)|task.|team.(report|complete|recruit|plan|ask)|graph.(write|review))/;
+const PAUSABLE = /^(message.send|room.post|channel.|share.(create|upload|comment|suggest|promote)|fs.(create|update|rename|delete|restore)|task.|team.(report|complete|recruit|ask)|graph.(write|review))/;
+/**
+ * Whether a pause refuses this action. checkout.* is not in PAUSABLE: a checkout pauses the team at ready, and its agents
+ * must still finish the move (docs/checkout.md §7). The checkout tools skip Teams.act(), which requires a running team,
+ * and go through Teams.checkoutGate.
+ */
+export function pausable(action: string): boolean { return PAUSABLE.test(action); }
 export interface AuthorizeOpts { isPaused?: (resource: string, rule: Rule) => boolean }
+/** The reserved folder a path resource lies in; other kinds never do. */
+const reservedPath = (resource: string): string | null => resource.startsWith('path:') ? reservedOf(resource.slice(5)) : null;
 
 export interface Decision {
   allowed: boolean;
@@ -37,6 +123,8 @@ export interface Decision {
   rule: Rule | null;
   source: DecisionSource;
   reason: string;
+  /** For source owner_grant: the owner ceiling that refused it (the access inspector names it). */
+  owner?: Pick<OwnerLayer, 'owner' | 'label' | 'basis' | 'task' | 'via'>;
 }
 
 export const RESOURCE_KINDS = ['path', 'tool', 'agent', 'room', 'team', 'share', 'channel', 'graph'] as const;
@@ -199,17 +287,27 @@ function evalList(rules: Rule[], action: string, resource: string): { effect: 'a
  * @param sessionRules the session key's rules
  * @param capRules the app key's rules; an empty list means "no cap"
  */
-export function authorize(sessionRules: Rule[], capRules: Rule[], action: string, resource: string, opts?: AuthorizeOpts): Decision {
+export function authorize(sessionRules: Rule[], capRules: Cap, action: string, resource: string, opts?: AuthorizeOpts): Decision {
   parseResource(resource);
+  const reserved = reservedPath(resource);
+  if (reserved) {
+    if (RESERVED_WRITES.test(action)) return { allowed: false, action, resource, rule: null, source: 'reserved', reason: RESERVED_WRITE };
+    sessionRules = forReserved(sessionRules, reserved); // the app key cap may stay a wildcard
+  }
   const s = evalList(sessionRules, action, resource);
   if (s.effect === 'deny') return { allowed: false, action, resource, rule: s.rule, source: 'session_key', reason: `denied by rule ${s.rule!.id}` };
-  if (s.effect === 'none') return { allowed: false, action, resource, rule: null, source: 'default', reason: 'no rule allows it (default deny)' };
+  if (s.effect === 'none') return reserved
+    ? { allowed: false, action, resource, rule: null, source: 'reserved', reason: 'a folder written by the hub: only a rule that names it allows reading it' }
+    : { allowed: false, action, resource, rule: null, source: 'default', reason: 'no rule allows it (default deny)' };
   if (capRules.length > 0) {
     const c = evalList(capRules, action, resource);
     if (c.effect === 'deny') return { allowed: false, action, resource, rule: c.rule, source: 'app_key_cap', reason: `denied by the app key's cap, rule ${c.rule!.id}` };
     if (c.effect === 'none') return { allowed: false, action, resource, rule: null, source: 'app_key_cap', reason: "outside the app key's cap" };
   }
-  if (opts?.isPaused && PAUSABLE.test(action) && opts.isPaused(resource, s.rule!)) return { allowed: false, action, resource, rule: s.rule, source: 'paused', reason: 'the team is paused' };
+  const o = ceilingRefusal(capRules, action, resource);
+  if (o) return { allowed: false, action, resource, rule: null, source: 'owner_grant', reason: o.reason,
+    owner: { owner: o.layer.owner, label: o.layer.label, basis: o.layer.basis, ...(o.layer.task ? { task: o.layer.task } : {}), ...(o.layer.via ? { via: o.layer.via } : {}) } };
+  if (opts?.isPaused && pausable(action) && opts.isPaused(resource, s.rule!)) return { allowed: false, action, resource, rule: s.rule, source: 'paused', reason: 'the team is paused' };
   return { allowed: true, action, resource, rule: s.rule, source: s.rule!.id.startsWith('link:') ? 'link' : 'session_key', reason: `allowed by rule ${s.rule!.id}` };
 }
 
@@ -224,8 +322,14 @@ export function explicitlyDenied(sessionRules: Rule[], capRules: Rule[], action:
  * something below it (so the directory may be shown in listings). Denies on the
  * directory subtree ("dir/**") still win.
  */
-export function canReach(sessionRules: Rule[], capRules: Rule[], action: string, dirPath: string): boolean {
+export function canReach(sessionRules: Rule[], capRules: Cap, action: string, dirPath: string): boolean {
   if (authorize(sessionRules, capRules, action, `path:${dirPath}`).allowed) return true;
+  // Inside a reserved folder only rules that name it reach anything, as authorize() decides it.
+  const reserved = reservedOf(dirPath);
+  if (reserved) {
+    if (RESERVED_WRITES.test(action)) return false;
+    sessionRules = forReserved(sessionRules, reserved);
+  }
   // A temporary grant counts only inside its window, as authorize() decides it.
   const now = Date.now();
   const live = (r: Rule) => r.not_after === undefined || (now < r.not_after && (r.not_before === undefined || now >= r.not_before));
@@ -235,6 +339,13 @@ export function canReach(sessionRules: Rule[], capRules: Rule[], action: string,
     && r.resource.startsWith('path:') && pathMatches(r.resource.slice(5), dirPath) && r.resource.endsWith('/**'));
   if (!reaches(sessionRules) || subtreeDenied(sessionRules)) return false;
   if (capRules.length > 0 && (!(reaches(capRules) || authorize(capRules, [], action, `path:${dirPath}`).allowed) || subtreeDenied(capRules))) return false;
+  // Every owner ceiling must reach the folder too (a ceiling's deny rules, a deeper Read share inside a Contribute one,
+  // refuse the action on the file itself, in authorize()).
+  // A folder the owner may not see (a restricted folder inside a delegated one) is never reached, not even by name.
+  for (const l of capRules.owners ?? []) {
+    if (l.paths && !l.paths(dirPath)) return false;
+    if (!reaches(l.rules) && evalList(l.rules, action, `path:${dirPath}`).effect !== 'allow') return false;
+  }
   return true;
 }
 

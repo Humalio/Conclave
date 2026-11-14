@@ -76,6 +76,3 @@ export function totp(secretB32: string, atMs: number, stepOffset = 0): string {
   const code = (mac.readUInt32BE(off) & 0x7fffffff) % 1_000_000;
   return code.toString().padStart(6, '0');
 }
-export function verifyTotp(secretB32: string, code: string, atMs: number): boolean {
-  return [-1, 0, 1].some((o) => totp(secretB32, atMs, o) === code.trim());
-}

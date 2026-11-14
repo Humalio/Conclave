@@ -5,15 +5,17 @@
  * are thin layers over it. What a reader may see is decided here (summary and detail layers), except link access, which
  * depends on the reader's current permissions and is passed in as a callback.
  */
+import { NOT_ALLOWED } from '../policy/engine.js';
 import type { Db } from '../db/db.js';
 import { tx } from '../db/db.js';
 import { RateLimit } from '../db/rateLimit.js';
 import type { Audit, Actor } from '../audit/audit.js';
 import type { Keys } from '../keys/keys.js';
 import { KeyError } from '../keys/keys.js';
-import type { Teams } from '../teams/teams.js';
+import type { Teams, TaskRow } from '../teams/teams.js';
 import { sha256Hex } from '../util/crypto.js';
 import { newId } from '../util/ids.js';
+import { parseRef, RefError, forms } from '../util/refs.js';
 import { HUB_VERSION, compareVersions } from '../version.js';
 
 export const KINDS = ['bug', 'limitation', 'wish'] as const;
@@ -33,7 +35,12 @@ const OPEN_SQL = "('new','needs_info','accepted')";
 const BACKING_SQL = "('plus_one','evidence','still_happening')";
 const SEV_RANK = "CASE r.severity WHEN 'blocking' THEN 0 WHEN 'costly' THEN 1 ELSE 2 END";
 const HOUR = 3_600_000, DAY = 24 * HOUR, MIN = 60_000;
-const DENIED = 'Not allowed, or does not exist.';
+const DENIED = NOT_ALLOWED;
+const SYSTEM: Actor = { kind: 'system', id: null };
+export const CLOSE_NOTE = 'Linked task done; the fix reaches agents with the next deploy.';
+export const UNDO_NOTE = 'A linked task is no longer done.';
+/** What the hub knows about a report's linked tasks: backlog tasks do not count; a done task without review blocks the close. */
+export interface TaskState { linked: number; counted: number; done: number; unreviewed: number }
 
 /** Rate limits, per agent ID unless noted. Overridable with the settings key feedback.limits. */
 export interface Limits { reportsPerHour: number; reportsPerDay: number; entriesPerHour: number; openPerAgent: number; entriesPerReport: number; hubReportsPerDay: number; spamHits: number }
@@ -53,6 +60,9 @@ export interface ReportRow {
   duplicate_of: string | null; hidden: number; reopen_count: number; status_rev: number; backers: number;
   filer_agent_id: string; filer_credential_id: string | null; filer_app_credential_id: string | null; filer_app: string | null; filer_pc_id: string | null; filer_teams: string;
   client_name: string | null; client_version: string | null; hub_version: string; created_at: number; updated_at: number; last_seen_at: number; status_at: number;
+  assigned_agent_id: string | null; assigned_at: number | null; assigned_note: string | null; assigned_read_at: number | null;
+  /** The hub closed it because its linked tasks were done; closed_from is the status to return to, fixed_after the hub version the fix comes after. */
+  closed_by_task: number; closed_from: Status | null; fixed_after: string | null;
 }
 interface EntryRow {
   id: string; report_id: string; origin_report_id: string | null; agent_id: string; credential_id: string | null; kind: EntryKind; text: string | null;
@@ -151,12 +161,14 @@ export class Feedback {
   /** May this agent see the summary layer? Hidden reports belong to filer and backers; "own only" narrows it to them for everyone. */
   canSee(r: ReportRow, agentId: string): boolean {
     if (!r.hidden && !this.ownOnly()) return true;
-    return this.isMine(r, agentId);
+    return this.isMine(r, agentId) || r.assigned_agent_id === agentId;
   }
   /** Agents that count as backers: the filer and everyone with a +1, evidence or still_happening entry. */
   private backingAgents(reportId: string): string[] {
     const r = this.db.prepare('SELECT filer_agent_id a FROM feedback_reports WHERE id=?').get(reportId) as { a: string } | undefined;
-    const rows = this.db.prepare(`SELECT DISTINCT agent_id a FROM feedback_entries WHERE report_id=? AND kind IN ${BACKING_SQL}`).all(reportId) as { a: string }[];
+    // The assignee's evidence is its account of the work, not a +1: it does not count as backing.
+    const rows = this.db.prepare(`SELECT DISTINCT e.agent_id a FROM feedback_entries e JOIN feedback_reports r ON r.id=e.report_id WHERE e.report_id=? AND e.kind IN ${BACKING_SQL}
+      AND NOT (e.kind='evidence' AND e.agent_id IS r.assigned_agent_id)`).all(reportId) as { a: string }[];
     return [...new Set([...(r ? [r.a] : []), ...rows.map((x) => x.a)])];
   }
   private recount(reportId: string): void {
@@ -233,7 +245,7 @@ export class Feedback {
   }
 
   /** Change status and tell everyone concerned (once per agent), except the agent that caused the change. */
-  private transition(r: ReportRow, to: Status, actor: Actor, o: { note?: string | null; guidance?: string | null; fixedIn?: string | null; duplicateOf?: string | null; reopen?: boolean; clearNote?: boolean; by?: 'operator' | 'filer' | 'hub' } = {}): ReportRow {
+  private transition(r: ReportRow, to: Status, actor: Actor, o: { note?: string | null; guidance?: string | null; fixedIn?: string | null; duplicateOf?: string | null; reopen?: boolean; clearNote?: boolean; by?: 'operator' | 'filer' | 'hub'; notice?: string } = {}): ReportRow {
     const now = Date.now();
     const note = o.clearNote ? null : o.note === undefined ? r.status_note : o.note;
     const guidance = o.guidance === undefined ? r.guidance : o.guidance;
@@ -245,7 +257,7 @@ export class Feedback {
       this.history(r.id, actor, 'status', r.status, to, o.note ?? null);
     });
     const next = this.mustReport(r.id);
-    const body = noticeBody(next, o.by ?? (actor.kind === 'admin' ? 'operator' : 'hub'));
+    const body = noticeBody(next, o.by ?? (actor.kind === 'admin' ? 'operator' : 'hub')) + (o.notice ? ` ${o.notice}` : '');
     for (const a of recipients) this.keys.notify(a, 'feedback_update', body, { feedback: r.id, rev: next.status_rev });
     return next;
   }
@@ -350,9 +362,14 @@ export class Feedback {
       this.recount(r.id);
     });
     let report = this.mustReport(r.id), reopened = false, note: string | undefined;
-    if (r.status === 'fixed') {
+    const after = r.status === 'fixed' && !r.fixed_in && r.fixed_after ? compareVersions(HUB_VERSION, r.fixed_after) : null;
+    if (after !== null && after <= 0) {
+      // Closed by its linked tasks after this version: the fix is not deployed yet.
+      note = `Recorded as evidence only: the fix was made after hub version ${r.fixed_after} and reaches agents with the next deploy.`;
+    } else if (r.status === 'fixed') {
       const cmp = r.fixed_in ? compareVersions(HUB_VERSION, r.fixed_in) : null;
       if (!r.fixed_in || cmp === null || cmp >= 0) {
+        this.clearTaskClose(r.id);
         report = this.transition(report, 'new', { kind: 'agent', id: w.agentId }, { reopen: true, clearNote: true, by: 'hub' });
         reopened = true;
         note = 'The report was reopened as new.';
@@ -420,11 +437,14 @@ export class Feedback {
 
   /** The summary layer: what every agent allowed to use feedback may see. The title is the only free text. */
   summary(r: ReportRow, agentId: string) {
-    const hasDecision = r.status === 'accepted' || r.status === 'fixed' || r.status === 'wont_fix' || r.status === 'needs_info' || r.status === 'duplicate';
+    const assigned = r.assigned_agent_id === agentId;
+    const hasDecision = assigned || r.status === 'accepted' || r.status === 'fixed' || r.status === 'wont_fix' || r.status === 'needs_info' || r.status === 'duplicate';
     return {
       id: r.id, kind: r.kind, title: r.title, title_trust: 'L2', tool: r.tool, area: r.area, error_code: r.error_code, severity: r.severity, status: r.status,
       backers: r.backers, created_at: iso(r.created_at), last_seen_at: iso(r.last_seen_at), reopen_count: r.reopen_count, mine: this.isMine(r, agentId),
       ...(r.status === 'duplicate' && r.duplicate_of ? { duplicate_of: r.duplicate_of } : {}),
+      ...this.linkedFor(r.id, agentId),
+      ...(assigned ? { assigned_to_you: true, assignment: { trust: 'L0', note: r.assigned_note, assigned_at: iso(r.assigned_at ?? r.updated_at), read: r.assigned_read_at !== null } } : {}),
       ...(hasDecision && (r.status_note || r.guidance || r.fixed_in) ? { decision: { trust: 'L0', note: r.status_note, guidance: r.guidance, fixed_in: r.fixed_in } } : {}),
     };
   }
@@ -456,17 +476,152 @@ export class Feedback {
     this.assertEnabled();
     const r = this.report(id);
     if (!r || !this.canSee(r, agentId)) throw denied();
+    // Reading the report is what makes an assignment "read"; acknowledging its notice is not (an agent may ack in bulk).
+    if (r.assigned_agent_id === agentId && r.assigned_read_at === null) {
+      r.assigned_read_at = Date.now();
+      this.db.prepare('UPDATE feedback_reports SET assigned_read_at=? WHERE id=? AND assigned_agent_id=? AND assigned_read_at IS NULL').run(r.assigned_read_at, id, agentId);
+    }
     return { summary: this.summary(r, agentId), detail: this.detailFor(r, agentId, linkOk) };
+  }
+  /** linked_tasks for an agent: the count, and id, title and status of the tasks it may read (tasks of its teams). */
+  private linkedFor(reportId: string, agentId: string): { linked_tasks?: { count: number; tasks: { id: string; title: string; title_trust: 'L2'; status: string }[] } } {
+    const ts = this.tasksOf(reportId);
+    if (!ts.length) return {};
+    const tasks = ts.filter((t) => t.team_id && this.teams.roleOf(t.team_id, agentId)).map((t) => ({ id: t.id, title: t.title, title_trust: 'L2' as const, status: t.status }));
+    return { linked_tasks: { count: ts.length, tasks } };
+  }
+
+  // ───────────── Linked tasks ─────────────
+
+  private linkRows(reportId: string) {
+    return this.db.prepare('SELECT task_id,linked_by_kind,linked_by_id,created_at FROM feedback_task_links WHERE report_id=? ORDER BY created_at, rowid').all(reportId) as { task_id: string; linked_by_kind: string; linked_by_id: string | null; created_at: number }[];
+  }
+  private tasksOf(reportId: string): TaskRow[] {
+    return this.db.prepare('SELECT t.* FROM feedback_task_links l JOIN tasks t ON t.id=l.task_id WHERE l.report_id=? ORDER BY l.created_at, l.rowid').all(reportId) as unknown as TaskRow[];
+  }
+  taskState(reportId: string): TaskState {
+    const ts = this.tasksOf(reportId), counted = ts.filter((t) => t.status !== 'backlog'), done = counted.filter((t) => t.status === 'done');
+    return { linked: ts.length, counted: counted.length, done: done.length, unreviewed: done.filter((t) => this.teams.effectiveReview(t) === 'none').length };
+  }
+  private static allDone(s: TaskState): boolean { return s.counted > 0 && s.done === s.counted; }
+  private clearTaskClose(reportId: string): void {
+    this.db.prepare('UPDATE feedback_reports SET closed_by_task=0, closed_from=NULL, fixed_after=NULL WHERE id=?').run(reportId);
+  }
+
+  /**
+   * May this actor link a report to a task of this team? The operator: any report that is not a duplicate or withdrawn.
+   * A coordinator of the team: only a report it may see that is assigned to it or to a member of the team.
+   */
+  private linkable(reportId: string, teamId: string | null, actor: Actor): ReportRow {
+    const r = this.report(reportId);
+    if (actor.kind !== 'admin') {
+      if (actor.kind !== 'agent' || !actor.id || !teamId || this.teams.roleOf(teamId, actor.id) !== 'coordinator') throw denied();
+      if (!r || !this.canSee(r, actor.id)) throw denied();
+      const a = r.assigned_agent_id;
+      if (!a || (a !== actor.id && !this.teams.roleOf(teamId, a))) throw denied();
+    }
+    if (!r) throw new FeedbackError('not_found', `Feedback ${reportId} not found.`);
+    if (r.status === 'duplicate' || r.status === 'withdrawn') throw new FeedbackError('invalid_state', `Feedback ${r.id} is ${r.status}${r.duplicate_of ? `; link ${r.duplicate_of} instead` : ''}.`);
+    return r;
+  }
+  /** A task change (task_create, task_update) and its link changes as one: a refused link undoes the task change too. */
+  applyLinks<T extends { id: string }>(actor: Actor, fn: () => T, add: string[], remove: string[]): T {
+    return tx(this.db, () => {
+      const t = fn();
+      for (const id of remove) this.unlink(id, t.id, actor);
+      for (const id of add) this.link(id, t.id, actor);
+      return t;
+    });
+  }
+
+  /** Link a report to a task. Returns false when the link already existed. */
+  link(reportId: string, taskId: string, actor: Actor): boolean {
+    if (actor.kind !== 'admin') this.assertEnabled();
+    const t = this.teams.task(taskId);
+    if (!t) throw actor.kind === 'admin' ? new FeedbackError('not_found', 'Task not found.') : denied();
+    const r = this.linkable(reportId, t.team_id, actor);
+    if (this.db.prepare('SELECT 1 x FROM feedback_task_links WHERE report_id=? AND task_id=?').get(r.id, t.id)) return false;
+    tx(this.db, () => {
+      this.db.prepare('INSERT INTO feedback_task_links(report_id,task_id,linked_by_kind,linked_by_id,created_at) VALUES (?,?,?,?,?)').run(r.id, t.id, actor.kind === 'admin' ? 'admin' : 'agent', actor.id, Date.now());
+      this.history(r.id, actor, 'linked_task', null, t.id, `Linked to task ${JSON.stringify(t.title)}`);
+      this.db.prepare('UPDATE feedback_reports SET updated_at=? WHERE id=?').run(Date.now(), r.id);
+    });
+    this.audit.event(actor, 'feedback.link', { kind: 'feedback', id: r.id }, { task: t.id, action: 'link' });
+    this.evaluate(r.id);
+    return true;
+  }
+
+  /** Remove a link. The operator at any time; a coordinator only a link it made, while the task is not done. */
+  unlink(reportId: string, taskId: string, actor: Actor): void {
+    if (actor.kind !== 'admin') this.assertEnabled();
+    const row = this.db.prepare('SELECT linked_by_kind,linked_by_id FROM feedback_task_links WHERE report_id=? AND task_id=?').get(reportId, taskId) as { linked_by_kind: string; linked_by_id: string | null } | undefined;
+    const t = this.teams.task(taskId);
+    if (actor.kind !== 'admin') {
+      if (!row || row.linked_by_kind !== 'agent' || row.linked_by_id !== actor.id) throw denied();
+      if (t?.status === 'done') throw new FeedbackError('invalid_state', 'The task is done: only the operator can remove this link now.');
+    }
+    if (!row) throw new FeedbackError('not_found', 'That report is not linked to that task.');
+    tx(this.db, () => {
+      this.db.prepare('DELETE FROM feedback_task_links WHERE report_id=? AND task_id=?').run(reportId, taskId);
+      this.history(reportId, actor, 'linked_task', taskId, null, `Unlinked from task ${t ? JSON.stringify(t.title) : taskId}`);
+      this.db.prepare('UPDATE feedback_reports SET updated_at=? WHERE id=?').run(Date.now(), reportId);
+    });
+    this.audit.event(actor, 'feedback.link', { kind: 'feedback', id: reportId }, { task: taskId, action: 'unlink' });
+    this.evaluate(reportId);
+  }
+
+  /**
+   * Close an accepted report whose counted linked tasks are all approved and done (fixed after the current hub version),
+   * or undo a close the hub made when that stops being true. A report the operator closed is never touched.
+   */
+  evaluate(reportId: string): void {
+    const r = this.report(reportId);
+    if (!r) return;
+    const s = this.taskState(r.id), closes = Feedback.allDone(s) && s.unreviewed === 0;
+    if (r.status === 'accepted' && closes) {
+      this.db.prepare('UPDATE feedback_reports SET closed_by_task=1, closed_from=?, fixed_after=? WHERE id=?').run(r.status, HUB_VERSION, r.id);
+      this.transition(r, 'fixed', SYSTEM, { note: CLOSE_NOTE, fixedIn: null, by: 'hub', notice: `The hub closed it because its linked tasks are done: fixed after hub version ${HUB_VERSION}; the fix reaches agents with the next deploy.` });
+      this.audit.event(SYSTEM, 'feedback.status', { kind: 'feedback', id: r.id }, { from: r.status, to: 'fixed', closed_by_task: true, fixed_after: HUB_VERSION });
+    } else if (r.status === 'fixed' && r.closed_by_task && !closes) {
+      const back: Status = r.closed_from ?? 'accepted';
+      this.clearTaskClose(r.id);
+      this.transition(r, back, SYSTEM, { note: UNDO_NOTE, by: 'hub', notice: UNDO_NOTE });
+      this.audit.event(SYSTEM, 'feedback.status', { kind: 'feedback', id: r.id }, { from: 'fixed', to: back, reopened_by_task: true });
+    }
+  }
+  /** A task changed status: re-check every report linked to it. */
+  onTaskEvent(taskId: string): void {
+    for (const { report_id } of this.db.prepare('SELECT report_id FROM feedback_task_links WHERE task_id=?').all(taskId) as { report_id: string }[]) this.evaluate(report_id);
+  }
+
+  /** "From feedback" on a task for an agent: linked reports it may see, never a hidden one. */
+  fromFeedback(taskId: string, agentId: string): { id: string; title: string; title_trust: 'L2'; status: string }[] {
+    if (!this.enabled()) return [];
+    const rows = this.db.prepare('SELECT r.* FROM feedback_task_links l JOIN feedback_reports r ON r.id=l.report_id WHERE l.task_id=? ORDER BY l.created_at, l.rowid').all(taskId) as unknown as ReportRow[];
+    return rows.filter((r) => !r.hidden && this.canSee(r, agentId)).map((r) => ({ id: r.id, title: r.title, title_trust: 'L2' as const, status: r.status }));
+  }
+  /** Every report linked to a task, for the operator's task screen. */
+  reportsOfTask(taskId: string): { id: string; title: string; status: string; hidden: boolean; closed_by_task: boolean }[] {
+    return (this.db.prepare('SELECT r.id,r.title,r.status,r.hidden,r.closed_by_task FROM feedback_task_links l JOIN feedback_reports r ON r.id=l.report_id WHERE l.task_id=? ORDER BY l.created_at, l.rowid').all(taskId) as { id: string; title: string; status: string; hidden: number; closed_by_task: number }[])
+      .map((r) => ({ ...r, hidden: !!r.hidden, closed_by_task: !!r.closed_by_task }));
+  }
+
+  /** Reports assigned to the agent that it has not read with feedback_read since (session_whoami). */
+  unreadAssigned(agentId: string): number {
+    if (!this.enabled()) return 0;
+    return (this.db.prepare("SELECT COUNT(*) n FROM feedback_reports WHERE assigned_agent_id=? AND assigned_read_at IS NULL AND status NOT IN ('duplicate','withdrawn')").get(agentId) as { n: number }).n;
   }
 
   /** feedback_find. With no filter at all it lists the caller's own reports. */
-  find(agentId: string, f: { query?: string; tool?: string; area?: string; kind?: string; status?: string; mine?: boolean; limit?: number; cursor?: string }): { items: ReportRow[]; next_cursor: string | null } {
+  find(agentId: string, f: { query?: string; tool?: string; area?: string; kind?: string; status?: string; mine?: boolean; assigned?: 'me'; limit?: number; cursor?: string }): { items: ReportRow[]; next_cursor: string | null } {
     this.assertEnabled();
     const where: string[] = [], args: (string | number)[] = [];
     const mineSql = '(r.filer_agent_id=? OR EXISTS (SELECT 1 FROM feedback_entries e WHERE (e.report_id=r.id OR e.origin_report_id=r.id) AND e.agent_id=?))';
-    const noFilter = !f.query && !f.tool && !f.area && !f.kind && !f.status && f.mine === undefined;
+    const noFilter = !f.query && !f.tool && !f.area && !f.kind && !f.status && f.mine === undefined && !f.assigned;
     const mine = f.mine ?? noFilter;
-    if (this.ownOnly() || mine) { where.push(mineSql); args.push(agentId, agentId); }
+    // Reports assigned to the caller: visible to it whatever their visibility, so the filter stands on its own.
+    if (f.assigned === 'me') { where.push('r.assigned_agent_id=?'); args.push(agentId); if (f.mine) { where.push(mineSql); args.push(agentId, agentId); } }
+    else if (this.ownOnly() || mine) { where.push(mineSql); args.push(agentId, agentId); }
     else { where.push(`(r.hidden=0 OR ${mineSql})`); args.push(agentId, agentId); }
     if (f.tool) { where.push('r.tool=?'); args.push(f.tool); }
     if (f.area) { where.push('r.area=?'); args.push(f.area); }
@@ -507,7 +662,7 @@ export class Feedback {
   // ───────────── Operator ─────────────
 
   /** Impact order: backers, then severity, then last seen. */
-  list(f: { bucket?: 'new' | 'open' | 'closed'; status?: string; kind?: string; tool?: string; team?: string; agent?: string; q?: string; sort?: 'impact' | 'recent'; limit?: number }) {
+  list(f: { bucket?: 'new' | 'open' | 'closed'; status?: string; kind?: string; tool?: string; team?: string; agent?: string; assignee?: string; linked?: 'linked' | 'not_linked'; q?: string; sort?: 'impact' | 'recent'; limit?: number }) {
     const where: string[] = [], args: (string | number)[] = [];
     if (f.bucket === 'new') where.push("r.status='new'");
     else if (f.bucket === 'open') where.push("r.status IN ('needs_info','accepted')");
@@ -517,6 +672,9 @@ export class Feedback {
     if (f.tool) { where.push('(r.tool=? OR r.area=?)'); args.push(f.tool, f.tool); }
     if (f.team) { where.push('EXISTS (SELECT 1 FROM json_each(r.filer_teams) j WHERE j.value=?)'); args.push(f.team); }
     if (f.agent) { where.push('(r.filer_agent_id=? OR EXISTS (SELECT 1 FROM feedback_entries e WHERE (e.report_id=r.id OR e.origin_report_id=r.id) AND e.agent_id=?))'); args.push(f.agent, f.agent); }
+    if (f.assignee) { where.push('r.assigned_agent_id=?'); args.push(f.assignee); }
+    if (f.linked === 'linked') where.push('EXISTS (SELECT 1 FROM feedback_task_links l WHERE l.report_id=r.id)');
+    else if (f.linked === 'not_linked') where.push('NOT EXISTS (SELECT 1 FROM feedback_task_links l WHERE l.report_id=r.id)');
     for (const w of (f.q ?? '').toLowerCase().split(/\s+/).filter(Boolean).slice(0, 8)) {
       where.push("(lower(r.title) LIKE ? ESCAPE '\\' OR lower(COALESCE(r.tool,'')) LIKE ? ESCAPE '\\' OR lower(r.area) LIKE ? ESCAPE '\\' OR lower(COALESCE(r.error_code,'')) LIKE ? ESCAPE '\\' OR r.id LIKE ? ESCAPE '\\')");
       args.push(like(w), like(w), like(w), like(w), like(w));
@@ -529,11 +687,24 @@ export class Feedback {
       FROM feedback_reports r ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY ${order}, r.rowid DESC LIMIT ?`).all(...args, Math.max(1, Math.min(500, f.limit ?? 200))) as unknown as (ReportRow & { sum_calls: number; sum_tokens: number; sum_minutes: number })[];
     const label = (id: string) => this.keys.agent(id)?.label ?? id;
     return rows.map((r) => ({
+      ...this.taskFlags(r),
       id: r.id, kind: r.kind, title: r.title, tool: r.tool, area: r.area, error_code: r.error_code, severity: r.severity, status: r.status, backers: r.backers,
       reopen_count: r.reopen_count, hidden: !!r.hidden, created_at: r.created_at, last_seen_at: r.last_seen_at, status_at: r.status_at,
       filer: { agent_id: r.filer_agent_id, label: label(r.filer_agent_id) }, duplicate_of: r.duplicate_of,
+      assignee: r.assigned_agent_id ? { agent_id: r.assigned_agent_id, label: label(r.assigned_agent_id), read_at: r.assigned_read_at } : null,
       cost_sum: { extra_calls: r.sum_calls, extra_tokens: r.sum_tokens, minutes_lost: r.sum_minutes },
     }));
+  }
+
+  /** The linked-task facts the console shows on a row and the detail: counts, the single task's status, Task done, Closed by task. */
+  private taskFlags(r: ReportRow) {
+    const s = this.taskState(r.id);
+    const one = s.linked === 1 ? (this.db.prepare('SELECT t.status FROM feedback_task_links l JOIN tasks t ON t.id=l.task_id WHERE l.report_id=?').get(r.id) as { status: string }).status : null;
+    return {
+      linked_tasks: s.linked ? { count: s.linked, counted: s.counted, done: s.done, status: one } : null,
+      task_done: OPEN_STATUSES.includes(r.status) && Feedback.allDone(s),
+      closed_by_task: r.status === 'fixed' && !!r.closed_by_task,
+    };
   }
 
   /** Tools and areas that have reports, for the list's filter. */
@@ -568,7 +739,7 @@ export class Feedback {
     const firstAt = new Map<string, number>();
     firstAt.set(r.filer_agent_id, r.created_at);
     const info = new Map<string, { app: string | null; client: string | null }>([[r.filer_agent_id, { app: r.filer_app, client: r.client_name ? `${r.client_name}${r.client_version ? ` ${r.client_version}` : ''}` : null }]]);
-    for (const e of entries) if (['plus_one', 'evidence', 'still_happening'].includes(e.kind) && !firstAt.has(e.agent_id)) {
+    for (const e of entries) if (['plus_one', 'evidence', 'still_happening'].includes(e.kind) && !firstAt.has(e.agent_id) && !(e.kind === 'evidence' && e.agent_id === r.assigned_agent_id)) {
       firstAt.set(e.agent_id, e.created_at);
       const raw = this.db.prepare('SELECT app_name,client_name,client_version FROM feedback_entries WHERE id=?').get(e.id) as { app_name: string | null; client_name: string | null; client_version: string | null };
       info.set(e.agent_id, { app: raw.app_name, client: raw.client_name ? `${raw.client_name}${raw.client_version ? ` ${raw.client_version}` : ''}` : null });
@@ -585,6 +756,7 @@ export class Feedback {
     const pc = r.filer_pc_id ? this.keys.machine(r.filer_pc_id) : null;
     return {
       report: { ...r, hidden: !!r.hidden, title_words: undefined, cost: costOf(r) },
+      assignee: r.assigned_agent_id ? { agent_id: r.assigned_agent_id, label: label(r.assigned_agent_id), since: r.assigned_at, note: r.assigned_note, read_at: r.assigned_read_at, on_demand: this.onDemand(r.assigned_agent_id) } : null,
       filer: { agent_id: r.filer_agent_id, label: label(r.filer_agent_id), app: r.filer_app, pc_id: r.filer_pc_id, pc: pc?.name ?? null, teams: JSON.parse(r.filer_teams) as string[], client: r.client_name ? `${r.client_name}${r.client_version ? ` ${r.client_version}` : ''}` : null },
       backers, entries,
       links: (this.db.prepare('SELECT kind,target FROM feedback_links WHERE report_id=? AND entry_id IS NULL ORDER BY id').all(id) as { kind: string; target: string }[]).map(linkText),
@@ -593,7 +765,44 @@ export class Feedback {
       hub_evidence: { calls: calls.map((c) => ({ ...c, agent_label: label(c.agent_id) })), same_error_7d: sameError },
       notices: { notified: n.notified, seen: Number(n.seen) },
       duplicates: (this.db.prepare("SELECT id,title FROM feedback_reports WHERE duplicate_of=?").all(id) as { id: string; title: string }[]),
+      linked_tasks: this.linkRows(id).map((l) => {
+        const t = this.teams.task(l.task_id), team = t?.team_id ? this.teams.team(t.team_id) : null;
+        return { task_id: l.task_id, title: t?.title ?? l.task_id, status: t?.status ?? null, team_id: t?.team_id ?? null, team_name: team?.name ?? null,
+          review: t ? this.teams.effectiveReview(t) : null, linked_by: l.linked_by_kind === 'agent' && l.linked_by_id ? label(l.linked_by_id) : 'operator', linked_by_kind: l.linked_by_kind, linked_at: l.created_at };
+      }),
+      task_flags: this.taskFlags(r),
     };
+  }
+
+  /** In a team that works on demand: the hub cannot wake it, so the operator has to tell its session. */
+  private onDemand(agentId: string): boolean {
+    return !!this.db.prepare("SELECT 1 x FROM team_members m JOIN teams t ON t.id=m.team_id WHERE m.agent_id=? AND m.removed_at IS NULL AND t.delivery_mode='on_demand' AND t.status IN ('draft','running','paused') LIMIT 1").get(agentId);
+  }
+
+  /**
+   * Assign the report to one agent, or unassign it (agentId null). The new assignee gets a feedback_assigned notice with
+   * the report, the operator's note and guidance (L0) and the decision; the previous assignee is told once that it is no
+   * longer assigned. The assignment grants nothing beyond reading this report's summary layer.
+   */
+  assign(id: string, agentId: string | null, note: string | null, actor: Actor): ReportRow {
+    const r = this.mustReport(id);
+    if (r.status === 'duplicate' || r.status === 'withdrawn') throw new FeedbackError('invalid_state', `The report is ${r.status}; assign ${r.status === 'duplicate' ? r.duplicate_of : 'another report'} instead.`);
+    if (agentId) {
+      const a = this.keys.agent(agentId);
+      if (!a || a.status === 'archived') throw new FeedbackError('invalid_argument', 'No such agent, or it is archived.');
+    }
+    const prev = r.assigned_agent_id, clean = note?.trim() || null;
+    if (prev === agentId && clean === r.assigned_note) return r;
+    const now = Date.now();
+    tx(this.db, () => {
+      this.db.prepare('UPDATE feedback_reports SET assigned_agent_id=?, assigned_at=?, assigned_note=?, assigned_read_at=NULL, updated_at=? WHERE id=?').run(agentId, agentId ? now : null, agentId ? clean : null, now, id);
+      this.history(id, actor, 'assignee', prev, agentId, clean);
+    });
+    const next = this.mustReport(id);
+    if (agentId) this.keys.notify(agentId, 'feedback_assigned', assignBody(next, clean));
+    if (prev && prev !== agentId) this.keys.notify(prev, 'feedback_unassigned', unassignBody(r, agentId ? 'the operator reassigned it' : 'the operator unassigned it'));
+    this.audit.event(actor, 'feedback.assign', { kind: 'feedback', id }, { from: prev, to: agentId });
+    return next;
   }
 
   setStatus(id: string, i: { status: Status; note?: string | null; guidance?: string | null; fixed_in?: string | null }, actor: Actor): ReportRow {
@@ -603,6 +812,8 @@ export class Feedback {
     const note = i.note?.trim() || null;
     if ((i.status === 'fixed' || i.status === 'wont_fix' || i.status === 'needs_info') && !note) throw new FeedbackError('invalid_argument', i.status === 'fixed' ? 'Say what changed.' : i.status === 'wont_fix' ? 'Give a reason.' : 'Ask the question.');
     const fixedIn = i.status === 'fixed' ? (i.fixed_in?.trim() || null) : null;
+    // The operator's decision replaces a close the hub made: from now on the operator's rule applies.
+    this.clearTaskClose(r.id);
     const next = this.transition(r, i.status, actor, { note, guidance: i.guidance === undefined ? undefined : (i.guidance?.trim() || null), fixedIn, by: 'operator' });
     this.audit.event(actor, 'feedback.status', { kind: 'feedback', id }, { from: r.status, to: i.status, fixed_in: fixedIn });
     return next;
@@ -618,6 +829,7 @@ export class Feedback {
     const agents = this.backingAgents(dup.id);
     const before = this.backingAgents(target.id);
     const next = this.transition(dup, 'duplicate', actor, { duplicateOf: targetId, note: `Merged into ${targetId}.`, by: 'operator' });
+    let linksMoved = 0;
     tx(this.db, () => {
       this.db.prepare(`UPDATE feedback_entries SET kind='evidence' WHERE report_id=? AND kind='plus_one' AND agent_id IN
         (SELECT agent_id FROM feedback_entries WHERE report_id=? AND kind='plus_one' UNION SELECT filer_agent_id FROM feedback_reports WHERE id=?)`).run(dup.id, targetId, targetId);
@@ -630,9 +842,28 @@ export class Feedback {
       this.recount(targetId);
       this.db.prepare('UPDATE feedback_reports SET last_seen_at=MAX(last_seen_at,?), updated_at=? WHERE id=?').run(dup.last_seen_at, Date.now(), targetId);
       this.history(targetId, actor, 'merged_from', null, dup.id);
+      // Linked tasks move to the surviving report (a task linked to both stays once).
+      linksMoved = this.db.prepare('INSERT OR IGNORE INTO feedback_task_links(report_id,task_id,linked_by_kind,linked_by_id,created_at) SELECT ?,task_id,linked_by_kind,linked_by_id,created_at FROM feedback_task_links WHERE report_id=?').run(targetId, dup.id).changes as number;
+      this.db.prepare('DELETE FROM feedback_task_links WHERE report_id=?').run(dup.id);
+      this.clearTaskClose(dup.id);
     });
+    if (linksMoved) this.evaluate(targetId);
+    if (dup.assigned_agent_id) {
+      const who = dup.assigned_agent_id;
+      this.db.prepare('UPDATE feedback_reports SET assigned_agent_id=NULL, assigned_at=NULL, assigned_note=NULL, assigned_read_at=NULL WHERE id=?').run(dup.id);
+      this.history(dup.id, actor, 'assignee', who, null, `Merged into ${targetId}.`);
+      if (!target.assigned_agent_id) {
+        this.db.prepare('UPDATE feedback_reports SET assigned_agent_id=?, assigned_at=?, assigned_note=?, assigned_read_at=NULL WHERE id=?').run(who, Date.now(), dup.assigned_note, targetId);
+        this.history(targetId, actor, 'assignee', null, who, `Carried over from ${dup.id}.`);
+        this.keys.notify(who, 'feedback_assigned', `Feedback ${dup.id} was merged into ${targetId}; the assignment moved with it. ` + assignBody(this.mustReport(targetId), dup.assigned_note));
+        this.audit.event(actor, 'feedback.assign', { kind: 'feedback', id: targetId }, { from: null, to: who, carried_from: dup.id });
+      } else if (target.assigned_agent_id !== who) {
+        this.keys.notify(who, 'feedback_unassigned', unassignBody(dup, `the operator merged it into another report, which someone else is working on`));
+      }
+      this.recount(targetId);
+    }
     const moved = this.backingAgents(targetId).filter((a) => !before.includes(a)).length;
-    this.audit.event(actor, 'feedback.merge', { kind: 'feedback', id }, { duplicate: id, target: targetId, backers_moved: moved, agents: agents.length });
+    this.audit.event(actor, 'feedback.merge', { kind: 'feedback', id }, { duplicate: id, target: targetId, backers_moved: moved, agents: agents.length, links_moved: linksMoved });
     return { report: next, target: this.mustReport(targetId), moved };
   }
 
@@ -721,16 +952,32 @@ export class Feedback {
 
 function linkText(l: { kind: string; target: string }): string { return l.kind === 'path' ? l.target : `${l.kind}:${l.target}`; }
 
-/** Parse `task:<id>`, `share:<id>` or a vault path. */
+/** Parse a link with the shared reference grammar (util/refs.ts): `task:<id>`, `share:<id>` or `share:<id>@v<n>`, or a vault path. */
 export function parseLink(raw: string): { kind: 'task' | 'share' | 'path'; target: string } {
-  const s = raw.trim();
-  const m = /^(task|share):(\S{1,100})$/.exec(s);
-  if (m) return { kind: m[1] as 'task' | 'share', target: m[2]! };
-  if (s.startsWith('/') && s.length <= 400 && !/[\0\r\n]/.test(s)) return { kind: 'path', target: s };
-  throw new FeedbackError('invalid_argument', 'A link looks like task:<id>, share:<id> or a vault path such as /vault/Folder/note.md.');
+  const ALLOW = ['task', 'share', 'path'] as const;
+  let r;
+  try { r = parseRef(raw, ALLOW); } catch (e) { if (e instanceof RefError) throw new FeedbackError('invalid_argument', `A link is ${forms(ALLOW)}.`); throw e; }
+  if (r.kind === 'task') return { kind: 'task', target: r.id };
+  if (r.kind === 'share') return { kind: 'share', target: r.version ? `${r.id}@v${r.version}` : r.id };
+  return { kind: 'path', target: (r as { path: string }).path };
 }
 
 /** The notice text for a status change: report ID, title (L2 data), new status, and the operator's note or guidance (L0). */
+/** The feedback_unassigned notice: which report and why, never who has it now. */
+function unassignBody(r: ReportRow, why: string): string {
+  return `Feedback ${r.id} (title, L2 data: ${JSON.stringify(r.title)}) is no longer assigned to you: ${why}. Stop working on it.`;
+}
+
+/** The feedback_assigned notice: what to work on, the operator's words (L0), and what to do when done. */
+function assignBody(r: ReportRow, note: string | null): string {
+  const parts = [`The operator assigned feedback ${r.id} to you (title, L2 data: ${JSON.stringify(r.title)}; status ${r.status}, severity ${r.severity}${r.tool ? `, tool ${r.tool}` : ''}${r.error_code ? `, error ${r.error_code}` : ''}).`];
+  if (note) parts.push(`Operator note on the assignment (L0): ${note}`);
+  if (r.status_note) parts.push(`Operator decision note (L0): ${r.status_note}`);
+  if (r.guidance) parts.push(`Operator guidance (L0): ${r.guidance}`);
+  parts.push('Read it with feedback_read. When you have done the work, say what you did with feedback_add (kind: evidence); the operator marks it fixed.');
+  return parts.join(' ');
+}
+
 function noticeBody(r: ReportRow, by: 'operator' | 'filer' | 'hub'): string {
   const head = `Feedback ${r.id} (title, L2 data: ${JSON.stringify(r.title)}) is now ${r.status}${by === 'filer' ? ', withdrawn by the agent that filed it' : ''}.`;
   const parts = [head];

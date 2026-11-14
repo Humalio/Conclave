@@ -5,8 +5,9 @@
  *    (agent targets) or assembles a temp file and commits it (vault and share targets).
  * Only metadata is in SQLite. Resume uses confirmed_offset / received_offset.
  */
+import { NOT_ALLOWED } from '../policy/engine.js';
 import { createHash, type Hash } from 'node:crypto';
-import { promises as fs, statSync } from 'node:fs';
+import { promises as fs, statSync, readdirSync, unlinkSync } from 'node:fs';
 import { EventEmitter } from 'node:events';
 import { join } from 'node:path';
 import type { Db } from '../db/db.js';
@@ -22,7 +23,8 @@ import type { Shares, Entry } from '../shares/shares.js';
 import type { LeakGuard } from '../guard/leakGuard.js';
 import type { Audit } from '../audit/audit.js';
 import { newId } from '../util/ids.js';
-import { authorize } from '../policy/engine.js';
+import { authorize, ownerAllows } from '../policy/engine.js';
+import type { OwnerScope } from '../policy/ownerScope.js';
 import { VirtualStream, frameHeader, FRAME_END, parseFramedFile } from '../util/frames.js';
 import { isPathAllowed, osKind, joinFor } from '../util/paths.js';
 
@@ -31,17 +33,26 @@ export const WINDOW = 4;
 export const BRIDGE_CHUNK = 1024 * 1024;
 const SCAN_LIMIT = 2 * 1024 * 1024;
 
-export interface ChannelCfg { inlineMax: number; bridgeMax: number; perKey: number; global: number; bytesPerHour: number; bufferBytes: number; tmpDir: string; expireMs: number }
+/** expireMs: an unaccepted offer; idleMs: an open transfer no one touches is abandoned after this long (default two hours). */
+export interface ChannelCfg { inlineMax: number; bridgeMax: number; perKey: number; global: number; bytesPerHour: number; bufferBytes: number; tmpDir: string; expireMs: number; idleMs?: number }
+/** Who saves a transfer: the sender's principal as the channel recorded it. */
+type Uploader = Pick<ChannelRow, 'from_agent_id' | 'from_credential_id' | 'from_app_credential_id' | 'from_machine_id' | 'opened_with'>;
+const IDLE_MS = 2 * 3600_000;
 export interface ChannelRow {
   id: string; from_agent_id: string; from_credential_id: string; target_kind: 'agent' | 'vault' | 'share'; target: string; to_agent_id: string | null; to_credential_id: string | null;
   direction: 'send' | 'download'; mode: 'inline' | 'bridge'; from_local_path: string | null; to_local_path: string | null; from_machine_id: string | null; to_machine_id: string | null;
   framing: 'raw' | 'tar'; share_path: string | null; confirmed_offset: number; received_offset: number; purpose: string | null; size: number | null; sha256: string | null;
   sender_sha: string | null; receiver_sha: string | null; sender_done: number; receiver_done: number; receiver_committed: number; base_revision: string | null;
+  /** The app key the sender opened the channel through, and the tool it used (null on channels opened before 0111). */
+  from_app_credential_id: string | null; opened_with: string | null;
   status: 'offered' | 'open' | 'done' | 'expired' | 'closed' | 'failed'; failure_reason: string | null; result: string | null; bytes_moved: number;
   created_at: number; expires_at: number; started_at: number | null; finished_at: number | null;
 }
 export interface OpenSpec {
-  from: { agentId: string; credId: string; machineId: string | null };
+  /** appId: the app key of the login, whose cap narrows a save again when it lands. */
+  from: { agentId: string; credId: string; machineId: string | null; appId?: string | null };
+  /** The tool that opened the channel (channel_open, share_upload, file_download, share_download). */
+  openedWith?: string;
   targetKind: 'agent' | 'vault' | 'share'; target: string; toAgentId?: string; direction: 'send' | 'download'; mode: 'inline' | 'bridge';
   fromLocalPath?: string; toLocalPath?: string; framing: 'raw' | 'tar'; sharePath?: string; size?: number; sha256?: string; baseRevision?: string; purpose: string;
   /** Inline download: the hub already has the bytes. */
@@ -57,7 +68,8 @@ export type BridgeReply = { status: number; body?: Record<string, unknown>; data
 
 const err = (c: string, m: string) => new KeyError(c, m);
 const normSha = (s: string) => (/^sha256:/i.test(s) ? s.toLowerCase() : `sha256:${s.toLowerCase()}`);
-const DENIED = 'Not allowed, or does not exist.';
+const DENIED = NOT_ALLOWED;
+const PAUSED = 'The team is paused, so nothing was saved. Keep calling work_next.';
 
 export class Channels {
   private readonly em = new EventEmitter();
@@ -133,12 +145,20 @@ export class Channels {
     void fs.unlink(this.part(id)).catch(() => undefined);
   }
   private part(id: string): string { return join(this.cfg.tmpDir, `chan-${id}.part`); }
+  private get idleMs(): number { return this.cfg.idleMs ?? IDLE_MS; }
+  /** Someone is still working on this open channel: it is not abandoned for another idle window. */
+  private touch(id: string): void {
+    this.db.prepare("UPDATE data_channels SET expires_at=MAX(expires_at, ?) WHERE id=? AND status='open'").run(Date.now() + this.idleMs, id);
+  }
 
   // ───────── startup, expiry ─────────
   private recover(): void {
     const now = Date.now();
     this.db.prepare("UPDATE data_channels SET status='failed', failure_reason='restart', finished_at=? WHERE mode='inline' AND status IN ('offered','open')").run(now);
     const rows = this.db.prepare("SELECT * FROM data_channels WHERE mode='bridge' AND status IN ('offered','open')").all() as unknown as ChannelRow[];
+    // The hub was down, not the transfer idle: an open bridge transfer gets a fresh idle window from the restart, so the
+    // first sweep does not end one that is about to resume.
+    this.db.prepare("UPDATE data_channels SET expires_at=MAX(expires_at, ?) WHERE mode='bridge' AND status='open'").run(now + this.idleMs);
     for (const c of rows) {
       if (c.target_kind === 'agent') {
         // relayed bytes were only in memory: the sender restarts from what the receiver confirmed
@@ -149,11 +169,22 @@ export class Channels {
         this.db.prepare('UPDATE data_channels SET received_offset=?, sender_done=0 WHERE id=?').run(n, c.id);
       }
     }
+    // Staging left by a channel that is no longer open (a crash between ending it and deleting its file) is released.
+    let names: string[] = [];
+    try { names = readdirSync(this.cfg.tmpDir); } catch { names = []; }
+    const live = new Set((this.db.prepare("SELECT id FROM data_channels WHERE status IN ('offered','open')").all() as { id: string }[]).map((r) => r.id));
+    for (const n of names) {
+      const m = /^chan-(.+)\.part$/.exec(n);
+      if (m && !live.has(m[1]!)) { try { unlinkSync(join(this.cfg.tmpDir, n)); } catch { /* gone already */ } }
+    }
   }
   sweep(): void {
     const now = Date.now();
     const rows = this.db.prepare("SELECT id FROM data_channels WHERE status='offered' AND expires_at<?").all(now) as { id: string }[];
     for (const r of rows) this.end(r.id, 'expired', 'expired');
+    // An open transfer no one has touched for the idle window is abandoned: ending it deletes its staging and frees its slot.
+    const idle = this.db.prepare("SELECT id FROM data_channels WHERE status='open' AND expires_at<?").all(now) as { id: string }[];
+    for (const r of idle) this.end(r.id, 'expired', 'idle');
     // A suspended or revoked key, or a download whose reader lost access, ends its live channels with a clear status
     // instead of leaving them open (and their bytes buffered) until they expire.
     for (const c of this.db.prepare("SELECT * FROM data_channels WHERE status IN ('offered','open')").all() as unknown as ChannelRow[]) {
@@ -205,9 +236,10 @@ export class Channels {
     if (this.usedThisHour(o.from.credId) + (o.size ?? 0) > this.cfg.bytesPerHour) throw err('rate_limited', 'This key has used its hourly channel byte quota.');
     const id = newId.channel(), now = Date.now();
     const status = o.targetKind === 'agent' ? 'offered' : 'open';
-    this.db.prepare(`INSERT INTO data_channels(id,from_agent_id,from_credential_id,target_kind,target,to_agent_id,direction,mode,from_local_path,to_local_path,from_machine_id,framing,share_path,purpose,size,sha256,base_revision,status,created_at,expires_at,started_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(id, o.from.agentId, o.from.credId, o.targetKind, o.target, o.toAgentId ?? null, o.direction, o.mode, o.fromLocalPath ?? null, o.toLocalPath ?? null,
-      o.from.machineId, o.framing, o.sharePath ?? null, o.purpose, o.size ?? null, o.sha256 ? normSha(o.sha256) : null, o.baseRevision ?? null, status, now, now + this.cfg.expireMs, status === 'open' ? now : null);
+    this.db.prepare(`INSERT INTO data_channels(id,from_agent_id,from_credential_id,target_kind,target,to_agent_id,direction,mode,from_local_path,to_local_path,from_machine_id,framing,share_path,purpose,size,sha256,base_revision,status,created_at,expires_at,started_at,from_app_credential_id,opened_with)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(id, o.from.agentId, o.from.credId, o.targetKind, o.target, o.toAgentId ?? null, o.direction, o.mode, o.fromLocalPath ?? null, o.toLocalPath ?? null,
+      o.from.machineId, o.framing, o.sharePath ?? null, o.purpose, o.size ?? null, o.sha256 ? normSha(o.sha256) : null, o.baseRevision ?? null, status, now, now + (status === 'open' ? this.idleMs : this.cfg.expireMs), status === 'open' ? now : null,
+      o.from.appId ?? null, o.openedWith ?? null);
     if (o.preload) {
       const r = this.relay(id);
       for (let i = 0; i < o.preload.length; i += INLINE_CHUNK) r.queue.push({ seq: r.nextSeq++, buf: o.preload.subarray(i, i + INLINE_CHUNK) });
@@ -272,19 +304,63 @@ export class Channels {
     return !!cr && this.keys.effectiveStatus(cr) === 'active';
   }
   /**
-   * A download is re-authorized on every chunk it delivers, not only when it was opened: the reader's key must still be
-   * active and still grant fs.read and fs.download on the vault file, or still reach the share. (The session key's own
-   * rules and temporary grants; an app-key cap changed mid-transfer is not seen here.)
+   * A download is re-authorized on every chunk it delivers, not only when it was requested (docs/transfers.md), as the
+   * tool call that requested it was: the reader's key and the app key it came through must still be active, and the
+   * key's rules and temporary grants, narrowed by that app key's cap, must still grant fs.read and fs.download on the
+   * vault file, or share.read on the share (its author and the reviewer of a task in review that names it need no
+   * grant), which must still be open to the reader. A channel from before the app key was recorded is checked without it.
    */
   private downloadAllowed(c: ChannelRow): boolean {
     if (c.direction !== 'download') return true;
-    if (!this.credActive(c.from_credential_id)) return false;
-    if (c.target_kind === 'vault') {
-      const rules = this.keys.rulesFor(c.from_credential_id), res = `path:${c.target}`;
-      return authorize(rules, [], 'fs.read', res).allowed && authorize(rules, [], 'fs.download', res).allowed;
+    const appId = c.from_app_credential_id;
+    if (!this.credActive(c.from_credential_id) || (appId !== null && !this.credActive(appId))) return false;
+    // The reader's owner ceilings (docs/authorization.md#owner-enforcement) apply at every delivery too.
+    const rules = this.keys.rulesFor(c.from_credential_id), appCap = appId ? this.keys.rulesFor(appId) : [];
+    const cap = this.ownerScope ? this.ownerScope.cap(c.from_agent_id, appCap) : appCap;
+    const may = (action: string, res: string) => authorize(rules, cap, action, res, { isPaused: this.teams.isPaused }).allowed;
+    if (c.target_kind === 'vault') { const res = `path:${c.target}`; return may('fs.read', res) && may('fs.download', res); }
+    if (c.target_kind === 'share') {
+      const sh = this.shares.share(c.target.split('@')[0]!);
+      if (!sh || !this.shares.canAccess(sh, c.from_agent_id)) return false;
+      return (sh.author_agent_id === c.from_agent_id || this.shares.reviewing(sh.id, c.from_agent_id) || may('share.read', `share:${sh.id}`)) && ownerAllows(cap, 'share.read', `share:${sh.id}`);
     }
-    if (c.target_kind === 'share') { const sh = this.shares.share(c.target.split('@')[0]!); return !!sh && this.shares.canAccess(sh, c.from_agent_id); }
     return true;
+  }
+  /** Owner ceilings for delivery and publication rechecks; set by app.ts. */
+  ownerScope: OwnerScope | null = null;
+  /**
+   * A save into the vault or a share is authorized again when it lands, as the tool call that opened the channel was
+   * (FR-AUTHZ-01: a commit follows the current decision). The sender's key, and the app key it opened the channel through,
+   * must still be active; none of the sender's teams may be paused or switched off; and its rules and temporary grants,
+   * narrowed by that app key's cap, must still grant `action` on `resource` (plus channel.use for a channel opened with
+   * channel_open). Returns why the save is refused ('denied' or 'paused'), or null. A refusal is logged as a denied access.
+   */
+  private saveRefusal(c: Uploader, action: string, resource: string): 'denied' | 'paused' | null {
+    const refuse = (why: 'denied' | 'paused', act = action, res = resource, ruleId: string | null = null) => {
+      this.audit.access({ credentialId: c.from_credential_id, agentId: c.from_agent_id, path: res.startsWith('path:') ? res.slice(5) : res, action: act, allowed: false, ruleId });
+      return why;
+    };
+    const appId = c.from_app_credential_id;
+    if (!this.credActive(c.from_credential_id) || (appId !== null && !this.credActive(appId))) return refuse('denied');
+    if (this.teams.pausedTeamOf(c.from_agent_id)) return refuse('paused');
+    const rules = this.keys.rulesFor(c.from_credential_id), appCap = appId ? this.keys.rulesFor(appId) : [];
+    const cap = this.ownerScope ? this.ownerScope.cap(c.from_agent_id, appCap) : appCap;
+    const checks: [string, string][] = c.opened_with === 'channel_open' ? [['channel.use', 'channel:any'], [action, resource]] : [[action, resource]];
+    for (const [act, res] of checks) {
+      const dec = authorize(rules, cap, act, res, { isPaused: this.teams.isPaused });
+      if (!dec.allowed) return refuse(dec.source === 'paused' ? 'paused' : 'denied', act, res, dec.rule?.id ?? null);
+    }
+    return null;
+  }
+  /**
+   * An upload into the vault or a share, checked again before each chunk is staged: the save it leads to must still be
+   * allowed (shareSaveRefusal, or the vault lockdown and saveRefusal for the file). Returns the failure reason, or null.
+   */
+  private uploadRefusal(c: ChannelRow): string | null {
+    if (c.direction !== 'send' || c.target_kind === 'agent') return null;
+    if (c.target_kind === 'share') return this.shareSaveRefusal(c, this.shares.share(c.target))?.reason ?? null;
+    if (this.lockdown?.blocks('file_update', c.from_agent_id, c.from_machine_id)) return 'lockdown';
+    return this.saveRefusal(c, (c.base_revision ?? 'absent') === 'absent' ? 'fs.create' : 'fs.update', `path:${this.vault.normalise(c.target).path}`);
   }
   private bridgeParticipantsActive(c: ChannelRow): boolean {
     return this.credActive(c.from_credential_id) &&
@@ -314,6 +390,9 @@ export class Channels {
     if (c.status === 'offered') throw err('invalid_state', 'The receiver has not accepted this channel yet.');
     if (c.status !== 'open') return { ok: false, status: c.status, failure_reason: c.failure_reason, result: c.result ? JSON.parse(c.result) : null };
     if (!this.credActive(c.from_credential_id)) { this.fail(id, 'denied'); throw err('denied', DENIED); }
+    const refused = this.uploadRefusal(c);
+    if (refused) { this.fail(id, refused); throw err(refused, refused === 'paused' ? PAUSED : DENIED); }
+    this.touch(id);
     const r = this.relay(id);
     if (seq < r.nextSeq) return { ok: true, duplicate: true, next_seq: r.nextSeq };
     if (seq > r.nextSeq) throw err('out_of_order', `Expected seq ${r.nextSeq}.`);
@@ -345,6 +424,7 @@ export class Channels {
     const receiver = c0.direction === 'download' ? c0.from_agent_id : c0.to_agent_id;
     if (c0.mode !== 'inline' || receiver !== agentId) throw err('invalid_state', 'channel_receive is for the receiver of an inline channel.');
     const deadline = Date.now() + Math.min(45, Math.max(0, waitS)) * 1000;
+    this.touch(id);
     for (;;) {
       const c = this.get(id)!;
       if (c.status === 'offered') throw err('invalid_state', 'Accept the channel first.');
@@ -384,18 +464,31 @@ export class Channels {
         if (locked) return fail('lockdown', { message: locked });
         const { rel, path } = this.vault.normalise(c.target);
         const base = c.base_revision ?? 'absent';
+        // The save is authorized again, as a file_create (new file) or file_update would be (saveRefusal), under the store's
+        // write lock just before the bytes land. A refusal fails the channel with 'denied' or 'paused'.
+        const action = base === 'absent' ? 'fs.create' : 'fs.update';
+        const recheck = () => {
+          const why = this.saveRefusal(c, action, `path:${path}`);
+          if (why) throw err(why, why === 'paused' ? PAUSED : DENIED);
+        };
         const r = await this.store.write(rel, bytes, base, base === 'absent' ? 'create' : 'update', {
-          agentId: c.from_agent_id, credentialId: c.from_credential_id, allowLarge: true,
-          recheck: () => { if (!this.credActive(c.from_credential_id)) throw new VaultError('denied', DENIED); },
+          agentId: c.from_agent_id, credentialId: c.from_credential_id, allowLarge: true, recheck,
         });
         const result = { path, revision: r.revision, previous_revision: r.previous_revision, size: bytes.length, sha256: r.revision };
         this.end(c.id, 'done', null, result);
         return { status: 'done', result, reason: null };
       }
       const sh = this.shares.share(c.target);
-      if (!sh || sh.status !== 'open') return fail('denied');
-      const v = await this.shares.addFiles(sh.id, [{ path: c.share_path!, bytes }], { note: c.purpose, final: true, kind: 'channel' });
-      const result = { share_id: sh.id, version: v.version, files: v.files, size: bytes.length };
+      const refused = this.shareSaveRefusal(c, sh);
+      if (refused) return fail(refused.reason, { message: refused.message });
+      // Again after the blob is staged, just before the version is published (nothing awaits in between).
+      const recheck = () => {
+        if (this.get(c.id)?.status !== 'open') throw err('closed', 'The channel was closed before the version was published.');
+        const late = this.shareSaveRefusal(c, this.shares.share(sh!.id));
+        if (late) throw err(late.reason, late.message);
+      };
+      const v = await this.shares.addFiles(sh!.id, [{ path: c.share_path!, bytes }], { note: c.purpose, final: true, kind: 'channel' }, recheck);
+      const result = { share_id: sh!.id, version: v.version, files: v.files, size: bytes.length };
       this.end(c.id, 'done', null, result);
       return { status: 'done', result, reason: null };
     } catch (e) {
@@ -403,6 +496,25 @@ export class Channels {
       if (e instanceof KeyError) return fail(e.code, { message: e.message });
       throw e;
     }
+  }
+  /**
+   * A save into a share is authorized again when it lands, as a share_upload would be: the share must still be open, an
+   * agent, PC or all-writes lockdown stops it, and the sender must still pass saveRefusal for share.upload on the share.
+   * Returns the channel's failure reason and message, or null.
+   */
+  private shareSaveRefusal(c: Uploader, sh: ReturnType<Shares['share']>): { reason: string; message: string } | null {
+    if (!sh || sh.status !== 'open') return { reason: 'denied', message: DENIED };
+    const locked = this.lockdown?.blocks('share_upload', c.from_agent_id, c.from_machine_id) ?? null;
+    if (locked) return { reason: 'lockdown', message: locked };
+    const why = this.saveRefusal(c, 'share.upload', `share:${sh.id}`);
+    return why ? { reason: why, message: why === 'paused' ? PAUSED : DENIED } : null;
+  }
+  /**
+   * share_upload with inline files, just before its version is published (after the blobs are staged): the same check as
+   * a channel save into the share, for the calling session's key and app key. Returns the reason and message, or null.
+   */
+  shareUploadRefusal(who: { agentId: string; credId: string; appId: string | null; machineId: string | null }, shareId: string): { reason: string; message: string } | null {
+    return this.shareSaveRefusal({ from_agent_id: who.agentId, from_credential_id: who.credId, from_app_credential_id: who.appId, from_machine_id: who.machineId, opened_with: 'share_upload' }, this.shares.share(shareId));
   }
 
   // ───────── bridge mode: jobs ─────────
@@ -433,6 +545,7 @@ export class Channels {
     const c = this.get(id);
     const r = c ? this.roleOf(c, machineId, role) : null;
     if (!c || !r) return { status: 404, body: { error: 'not_found' } };
+    this.touch(id);
     return { status: 200, body: { status: c.status, role: r, size: c.size, received_offset: c.received_offset, confirmed_offset: c.confirmed_offset, failure_reason: c.failure_reason, sender_done: !!c.sender_done, receiver_done: !!c.receiver_done, verified: this.verified(c), committed: !!c.receiver_committed } };
   }
 
@@ -444,6 +557,10 @@ export class Channels {
       const c = this.get(id)!;
       if (c.status !== 'open') return { status: 410, body: { error: 'gone', status: c.status, failure_reason: c.failure_reason } };
       if (!this.bridgeParticipantsActive(c)) { this.fail(id, 'denied'); return { status: 410, body: { error: 'gone', status: 'failed' } }; }
+      // An upload whose save is no longer allowed stops at the next chunk; failing it deletes what was staged.
+      const refused = this.uploadRefusal(c);
+      if (refused) { this.fail(id, refused); return { status: 410, body: { error: 'gone', status: 'failed', failure_reason: refused } }; }
+      this.touch(id);
       // Refuse bytes the destination could never commit, instead of staging up to the channel cap first.
       const max = this.stageMax(c.target_kind);
       if (offset + body.length > max) { this.fail(id, 'too_large'); return { status: 413, body: { error: 'too_large' } }; }
@@ -490,6 +607,7 @@ export class Channels {
     const c0 = this.get(id);
     if (!c0 || this.roleOf(c0, machineId, 'receive') === null) return { status: 404, body: { error: 'not_found' } };
     const deadline = Date.now() + 20_000;
+    this.touch(id);
     for (;;) {
       const c = this.get(id)!;
       if (c.status !== 'open') return { status: 410, body: { error: 'gone', status: c.status, failure_reason: c.failure_reason } };
@@ -570,6 +688,7 @@ export class Channels {
     const c0 = this.get(id);
     const r = c0 ? this.roleOf(c0, machineId, role) : null;
     if (!c0 || !r) return { status: 404, body: { error: 'not_found' } };
+    this.touch(id);
     if (o.error) { this.fail(id, 'bridge_error', { role: r, message: o.error.slice(0, 500) }); return { status: 200, body: { status: 'failed' } }; }
     if (o.committed) {
       if (r !== 'receive') return { status: 400, body: { error: 'invalid_argument', message: 'only the receiving bridge commits' } };
@@ -636,7 +755,8 @@ export class Channels {
       }
       // share: a framed stream of files
       const sh = this.shares.share(c.target);
-      if (!sh || sh.status !== 'open') { this.fail(c.id, 'denied'); return; }
+      const refused = this.shareSaveRefusal(c, sh);
+      if (refused) { this.fail(c.id, refused.reason, { message: refused.message }); return; }
       const entries: Entry[] = [];
       let leaked = false;
       await parseFramedFile(part, async (path, size, fh, start) => {
@@ -660,8 +780,13 @@ export class Channels {
         }
       });
       if (leaked) return;
-      const v = this.shares.commitEntries(sh.id, entries, { note: c.purpose, final: true, kind: 'bridge' });
-      this.end(c.id, 'done', null, { share_id: sh.id, version: v.version, files: v.files, size: st.size, sha256: senderSha });
+      // Again just before the version is published: the files may have taken a while to read, and the sender may have
+      // closed the channel meanwhile. Nothing awaits between this check and the commit.
+      if (this.get(c.id)?.status !== 'open') return;
+      const late = this.shareSaveRefusal(c, this.shares.share(sh!.id));
+      if (late) { this.fail(c.id, late.reason, { message: late.message }); return; }
+      const v = this.shares.commitEntries(sh!.id, entries, { note: c.purpose, final: true, kind: 'bridge' });
+      this.end(c.id, 'done', null, { share_id: sh!.id, version: v.version, files: v.files, size: st.size, sha256: senderSha });
     } catch (e) {
       this.fail(c.id, e instanceof KeyError ? e.code : 'commit_failed', { message: e instanceof Error ? e.message : String(e) });
     }

@@ -1,6 +1,6 @@
 {
   "name": "agent-hub-server",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Conclave server",
   "main": "dist/main.js",
   "scripts": {
@@ -8,16 +8,18 @@
     "start": "node dist/main.js",
     "dev": "tsx src/main.ts",
     "test": "vitest run && npm run test:helper",
-    "test:helper": "node --test ../deploy/client/agent-hub-headers.test.mjs",
+    "test:helper": "node --test ../deploy/client/agent-hub-headers.test.mjs ../deploy/client/setup.test.mjs ../deploy/client/codex.test.mjs ../deploy/client/codex-wake.test.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "dev:hub": "node scripts/dev-hub.mjs",
-    "dev:seed": "node scripts/dev-seed.mjs"
+    "dev:seed": "node ../eval/run.mjs --hub",
+    "story": "node ../eval/run.mjs"
   },
   "type": "module",
   "dependencies": {
     "@fastify/cookie": "^11.1.5",
     "@modelcontextprotocol/sdk": "^1.32.2",
     "fastify": "^5.12.8",
+    "mermaid": "12.2.0",
     "pino": "^10.4.0",
     "zod": "^4.6.7"
   },

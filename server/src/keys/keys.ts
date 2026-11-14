@@ -12,6 +12,8 @@ import { newId } from '../util/ids.js';
 import type { Rule } from '../policy/engine.js';
 import { describeRuleChanges, validateRules } from '../policy/engine.js';
 import type { Audit, Actor } from '../audit/audit.js';
+import { isAdmin } from '../audit/audit.js';
+import { inForceSql } from '../directives/reachSql.js';
 
 export type KeyKind = 'app_key' | 'session_key';
 export type KeyStatus = 'active' | 'suspended' | 'revoked';
@@ -20,38 +22,195 @@ export interface Credential {
   id: string; kind: KeyKind; agent_id: string | null; machine_id: string | null; app_name: string | null;
   label: string; key_id: string; status: KeyStatus; status_reason: string | null; expires_at: number | null;
   replaces_credential_id: string | null; policy_id: string; max_live_sessions: number;
+  /** Session keys only: the one PC this key may log in from (through an app key on it); null is free. */
+  bound_machine_id: string | null;
+  /** App keys only: when the onboarding capability was turned on (docs/onboarding.md); null is off. */
+  onboarding_enabled_at: number | null;
+  /** Session keys only: a checkout issued a successor (docs/checkout.md §5). 'superseded_pending': not confirmed, this key
+   *  still works. 'suspended': the successor was confirmed; this key cannot log in and its tokens are suspended. */
+  succession?: 'superseded_pending' | 'suspended' | null;
+  /** Session keys only: the variable in keys.env that holds it on its PC (key prompts); null until the hub needs one. */
+  session_var?: string | null;
   created_at: number; first_used_at: number | null; last_used_at: number | null; revoked_at: number | null;
 }
 export interface Agent {
   id: string; label: string; project: string | null; model_label: string | null; role: string | null; role_detail: string | null;
   role_source: 'agent' | 'admin' | null; role_note: string | null; status_text: string | null; status: string; created_at: number; last_seen_at: number | null; archived_at?: number | null;
   recruited_team_id?: string | null; recruited_by?: string | null;
+  /** The console user who owns the agent (docs/authorization.md#agent-owners); null: unowned. */
+  owner_user_id?: string | null;
 }
+/** The admin's claim of the agents that had no owner (Settings → Agent owners), as system_settings keeps it. */
+export interface OwnerClaim { by: string; at: number; agents: number }
+const CLAIM_KEY = 'agent_owner.claim', ENFORCE_KEY = 'agent_owner.enforcement';
 export interface Machine { id: string; name: string; description: string | null; status: string; created_at: number; os?: string | null; setup_status?: string; bridge_version?: string | null; bridge_last_seen_at?: number | null }
-export interface Notice { id: string; agent_id: string; seq: number; kind: string; body: string; created_at: number }
+export interface Notice { id: string; agent_id: string; seq: number; kind: string; body: string; created_at: number; ref_kind?: string | null; ref_id?: string | null }
 
-const CRED_COLS = 'id,kind,agent_id,machine_id,app_name,label,key_id,status,status_reason,expires_at,replaces_credential_id,policy_id,max_live_sessions,created_at,first_used_at,last_used_at,revoked_at';
+/** The default and the largest limit of live logins on one app key. A new app key starts at the default. */
+export const DEFAULT_LIVE_LOGINS = 100, MAX_LIVE_LOGINS = 500;
+/** A session key keeps the old stored value: the limit is read from the app key, and the column default of 100 is for app keys only. */
+export const SESSION_KEY_LIVE_LOGINS = 20;
+const CRED_COLS = 'id,kind,agent_id,machine_id,app_name,label,key_id,status,status_reason,expires_at,replaces_credential_id,policy_id,max_live_sessions,bound_machine_id,onboarding_enabled_at,succession,session_var,created_at,first_used_at,last_used_at,revoked_at';
+/** How long a key prompt's pickup code works (docs/onboarding.md#key-prompts-a-new-rotated-or-reissued-session-key). */
+/** The keys.env variable names setup.mjs accepts (deploy/client/setup.mjs, keyCmd). */
+export const SESSION_VAR_RE = /^[A-Z][A-Z0-9_]{0,63}$/;
+export const KEY_PICKUP_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 export const TOKEN_IDLE_MS = 60 * 60 * 1000;
-/** SQL condition on agent_notices n: not a task notice, or its task is still in the state the notice describes. */
-const CURRENT_NOTICE = `((n.ref_task_id IS NULL OR EXISTS (SELECT 1 FROM tasks k WHERE k.id=n.ref_task_id AND k.status=n.ref_state))
-  AND (n.ref_feedback_id IS NULL OR EXISTS (SELECT 1 FROM feedback_reports f WHERE f.id=n.ref_feedback_id AND CAST(f.status_rev AS TEXT)=n.ref_state)))`;
+/** What a notice is about (agent_notices.ref_kind, 0106): its settler says when it stops describing the current state. */
+export type NoticeRefKind = 'task' | 'feedback' | 'directive' | 'directive_stop';
+/** notify()'s ref: the one shape, or the two older ones (`{task, state}`, `{feedback, rev}`) that callers still pass. */
+export type NoticeRef = { kind: NoticeRefKind; id: string; state?: string | number | null } | { task: string; state: string } | { feedback: string; rev: number };
+/**
+ * One SQL condition per ref kind, on agent_notices n: "this notice still describes the current state". A notice whose
+ * condition no longer holds is settled: skipped, never acked, so the cumulative cursor clears nothing else.
+ * - task: the task is still in the state the notice describes.
+ * - feedback: the report's status_rev is still the one the notice describes.
+ * - directive: the directive is still in force for the agent (the same rule as Directives.applies(), reachSql.ts) and the
+ *   agent has not confirmed this version or a later one (ref_state is the version, as TEXT).
+ * - directive_stop: the agent has not called directives_read since the notice was made. Strictly after: a read in the
+ *   same millisecond may have come before it, and a stop notice must not be lost.
+ */
+export const NOTICE_SETTLERS: Record<NoticeRefKind, string> = {
+  task: 'EXISTS (SELECT 1 FROM tasks k WHERE k.id=n.ref_id AND k.status=n.ref_state)',
+  feedback: 'EXISTS (SELECT 1 FROM feedback_reports f WHERE f.id=n.ref_id AND CAST(f.status_rev AS TEXT)=n.ref_state)',
+  directive: `EXISTS (SELECT 1 FROM directives d JOIN agents ag ON ag.id=n.agent_id WHERE d.id=n.ref_id AND ${inForceSql('d', 'ag')})
+    AND NOT EXISTS (SELECT 1 FROM directive_acks a WHERE a.directive_id=n.ref_id AND a.agent_id=n.agent_id AND a.version>=CAST(n.ref_state AS INTEGER))`,
+  directive_stop: 'NOT EXISTS (SELECT 1 FROM directive_reads r WHERE r.agent_id=n.agent_id AND r.read_at>n.created_at)',
+};
+const REF_KINDS = Object.keys(NOTICE_SETTLERS) as NoticeRefKind[];
+/**
+ * Legacy-shaped rows (ref_kind NULL, ref_task_id or ref_feedback_id set) are written by pre-0106 code after a rollback
+ * and kept on the next upgrade. They settle by the old columns, so they never ride along until session_ack.
+ */
+const LEGACY_SETTLERS = `(n.ref_kind IS NULL AND n.ref_task_id IS NOT NULL AND EXISTS (SELECT 1 FROM tasks k WHERE k.id=n.ref_task_id AND k.status=n.ref_state))
+  OR (n.ref_kind IS NULL AND n.ref_task_id IS NULL AND n.ref_feedback_id IS NOT NULL
+    AND EXISTS (SELECT 1 FROM feedback_reports f WHERE f.id=n.ref_feedback_id AND CAST(f.status_rev AS TEXT)=n.ref_state))`;
+/** SQL condition on agent_notices n: no ref (or a kind this hub does not know), or its settler says it is still current. */
+const CURRENT_NOTICE = `((n.ref_kind IS NULL AND n.ref_task_id IS NULL AND n.ref_feedback_id IS NULL)
+  OR n.ref_kind NOT IN (${REF_KINDS.map((k) => `'${k}'`).join(',')})
+  OR ${LEGACY_SETTLERS}
+  OR ${REF_KINDS.map((k) => `(n.ref_kind='${k}' AND ${NOTICE_SETTLERS[k]})`).join('\n  OR ')})`;
 const KEY_RE = /^ah_(app|ses)_([a-z2-7]{12})_([a-z2-7]{32})$/;
 const TOKEN_RE = /^ah_tok_([a-z2-7]{40})$/;
 
 export class KeyError extends Error {
-  constructor(public readonly code: string, message: string) { super(message); }
+  constructor(public readonly code: string, message: string, public readonly extra?: Record<string, unknown>) { super(message); }
+}
+/** A bound session key presented through an app key on another PC (or on none). Callers report it as an invalid key. */
+export class BoundElsewhereError extends KeyError {
+  constructor(public readonly credential: Credential, public readonly app: Credential) { super('bound_elsewhere', 'this session key is bound to another PC'); }
 }
 
 export class Keys {
   constructor(private readonly db: Db, private readonly pepper: string, private readonly audit: Audit) {}
 
   // ───────────── Agents and PCs ─────────────
-  createAgent(label: string, project: string | null, actor: Actor): Agent {
+  /**
+   * `owner`: the console user who owns the new agent, as the admin named it or as a path carries it on (a recruit gets
+   * its coordinator's owner). Never inferred. A named owner must be an active console user; a `carried` one is the
+   * source agent's recorded owner, kept as it is, so a path that worked before owners existed is not refused by them
+   * (owner enforcement decides what such an agent may do). Omitted or null: unowned.
+   */
+  createAgent(label: string, project: string | null, actor: Actor, owner: string | null = null, o: { carried?: boolean } = {}): Agent {
+    // Only the admin (by hand or by approving onboarding) or the hub itself makes an agent, never a member or an agent; a
+    // recruit is made for its coordinator and carries that coordinator's owner, never one the caller names.
+    if (!o.carried && actor.kind !== 'system' && !isAdmin(actor)) throw new KeyError('admin_only', 'Only an admin can do this.');
+    if (owner && !o.carried) this.checkOwner(owner);
     const id = newId.agent();
-    this.db.prepare('INSERT INTO agents(id,label,project,created_at) VALUES (?,?,?,?)').run(id, label, project, Date.now());
-    this.audit.event(actor, 'agent.create', { kind: 'agent', id }, { label, project });
+    this.db.prepare('INSERT INTO agents(id,label,project,created_at,owner_user_id) VALUES (?,?,?,?,?)').run(id, label, project, Date.now(), owner);
+    this.audit.event(actor, 'agent.create', { kind: 'agent', id }, { label, project, ...(owner ? { owner } : {}) });
     return this.agent(id)!;
   }
+
+  // ───────────── Agent owners (docs/authorization.md#agent-owners) ─────────────
+  /** An owner is an active console user that exists: anything else is refused, so an owner is never a guess. */
+  checkOwner(userId: string): void {
+    const u = this.db.prepare('SELECT status, expires_at FROM admin_users WHERE id=?').get(userId) as { status: string; expires_at: number | null } | undefined;
+    if (!u) throw new KeyError('invalid_argument', 'The owner must be a console user.');
+    if (u.status !== 'active' || (u.expires_at !== null && u.expires_at <= Date.now())) throw new KeyError('invalid_state', 'The owner must be an active console user.');
+  }
+  /**
+   * Directive reach follows the owner's grant while owner enforcement is on (docs/directives.md#project-reach): runs an
+   * owner or enforcement change, then tells these agents what directives they gained or lost (Directives.refresh).
+   */
+  reachGuard?: <T>(agentIds: string[], fn: () => T) => T;
+  private reached<T>(agentIds: string[], fn: () => T): T { return this.reachGuard ? this.reachGuard(agentIds, fn) : fn(); }
+  /** Only the admin assigns or changes an owner; null clears it. */
+  setOwner(agentId: string, owner: string | null, actor: Actor): Agent { return this.reached([agentId], () => this.setOwner_(agentId, owner, actor)); }
+  private setOwner_(agentId: string, owner: string | null, actor: Actor): Agent {
+    if (!isAdmin(actor)) throw new KeyError('admin_only', 'Only an admin can do this.');
+    const a = this.agent(agentId); if (!a) throw new KeyError('not_found', 'agent not found');
+    if (owner) this.checkOwner(owner);
+    if ((a.owner_user_id ?? null) === owner) return a;
+    this.db.prepare('UPDATE agents SET owner_user_id=? WHERE id=?').run(owner, agentId);
+    this.audit.event(actor, 'agent.owner', { kind: 'agent', id: agentId }, { from: a.owner_user_id ?? null, to: owner });
+    return this.agent(agentId)!;
+  }
+  private setting<T>(key: string): T | null {
+    const r = this.db.prepare('SELECT value FROM system_settings WHERE key=?').get(key) as { value: string } | undefined;
+    return r ? JSON.parse(r.value) as T : null;
+  }
+  private putSetting(key: string, value: unknown): void {
+    this.db.prepare('INSERT INTO system_settings(key,value,updated_at) VALUES (?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at').run(key, JSON.stringify(value), Date.now());
+  }
+  /**
+   * Claim all existing agents as mine: the signed-in admin becomes the owner of every unowned agent (archived ones too).
+   * Agents with an owner keep it. The admin's act only, recorded and audited; it may run again for agents unowned since.
+   */
+  claimUnowned(actor: Actor): OwnerClaim {
+    const ids = (this.db.prepare('SELECT id FROM agents WHERE owner_user_id IS NULL').all() as { id: string }[]).map((r) => r.id);
+    return this.reached(ids, () => this.claimUnowned_(actor));
+  }
+  private claimUnowned_(actor: Actor): OwnerClaim {
+    if (!isAdmin(actor) || !actor.id) throw new KeyError('admin_only', 'Only an admin can do this.');
+    this.checkOwner(actor.id);
+    return tx(this.db, () => {
+      const ids = (this.db.prepare('SELECT id FROM agents WHERE owner_user_id IS NULL').all() as { id: string }[]).map((r) => r.id);
+      this.db.prepare('UPDATE agents SET owner_user_id=? WHERE owner_user_id IS NULL').run(actor.id);
+      const claim: OwnerClaim = { by: actor.id!, at: Date.now(), agents: ids.length };
+      this.putSetting(CLAIM_KEY, claim);
+      this.audit.event(actor, 'agent.owner_claim', { kind: 'system', id: CLAIM_KEY }, { agents: ids.length, ids: ids.slice(0, 20) });
+      return claim;
+    });
+  }
+  /** The last claim, or null when the admin has not claimed the existing agents yet. */
+  ownerClaim(): OwnerClaim | null { return this.setting<OwnerClaim>(CLAIM_KEY); }
+  /**
+   * Whether owner enforcement is on (a hub setting, off by default). It is on only once the claim step has run; while it
+   * is off the owner is recorded and shown, and no decision reads it.
+   */
+  ownerEnforcement(): boolean { return this.ownerClaim() !== null && this.setting<boolean>(ENFORCE_KEY) === true; }
+  setOwnerEnforcement(on: boolean, actor: Actor): boolean { return this.reached(this.agents().map((a) => a.id), () => this.setOwnerEnforcement_(on, actor)); }
+  private setOwnerEnforcement_(on: boolean, actor: Actor): boolean {
+    if (!isAdmin(actor)) throw new KeyError('admin_only', 'Only an admin can do this.');
+    if (on && !this.ownerClaim()) throw new KeyError('invalid_state', 'Claim the existing agents first: owner enforcement stays off until then.');
+    const was = this.ownerEnforcement();
+    this.putSetting(ENFORCE_KEY, on);
+    if (was !== on) this.audit.event(actor, 'agent_owner.enforcement', { kind: 'system', id: ENFORCE_KEY }, { from: was, to: on });
+    return this.ownerEnforcement();
+  }
+  /** The agents a console user owns (archived ones too), for the user's page and before the user is disabled. */
+  ownedBy(userId: string): { id: string; label: string; archived: boolean }[] {
+    return (this.db.prepare('SELECT id, label, status FROM agents WHERE owner_user_id=? ORDER BY label').all(userId) as { id: string; label: string; status: string }[])
+      .map((a) => ({ id: a.id, label: a.label, archived: a.status === 'archived' }));
+  }
+  /**
+   * Move every agent a console user owns to another active console user, in one audited step: the admin's path for a
+   * person who leaves (disable them, then hand their agents on). Only the admin can do this.
+   */
+  reassignOwner(from: string, to: string, actor: Actor): { agents: number } { return this.reached(this.ownedBy(from).map((a) => a.id), () => this.reassignOwner_(from, to, actor)); }
+  private reassignOwner_(from: string, to: string, actor: Actor): { agents: number } {
+    if (!isAdmin(actor)) throw new KeyError('admin_only', 'Only an admin can do this.');
+    if (from === to) throw new KeyError('invalid_argument', 'Choose another person to hand the agents to.');
+    this.checkOwner(to);
+    return tx(this.db, () => {
+      const ids = this.ownedBy(from).map((a) => a.id);
+      this.db.prepare('UPDATE agents SET owner_user_id=? WHERE owner_user_id=?').run(to, from);
+      this.audit.event(actor, 'agent.owner_reassign', { kind: 'user', id: from }, { to, agents: ids.length, ids: ids.slice(0, 20) });
+      return { agents: ids.length };
+    });
+  }
+  unownedCount(): number { return (this.db.prepare('SELECT COUNT(*) n FROM agents WHERE owner_user_id IS NULL').get() as { n: number }).n; }
   agent(id: string): Agent | null { return (this.db.prepare('SELECT * FROM agents WHERE id=?').get(id) as unknown as Agent) ?? null; }
   agents(): Agent[] { return this.db.prepare('SELECT * FROM agents ORDER BY created_at DESC').all() as unknown as Agent[]; }
   updateAgent(id: string, patch: { label?: string; project?: string | null; role?: string | null; role_detail?: string | null }, actor: Actor): Agent {
@@ -80,12 +239,28 @@ export class Keys {
     return this.agent(agentId)!;
   }
 
-  createMachine(name: string, description: string | null, actor: Actor): Machine {
+  /** The one name rule for a PC, at create and at rename: lowercase letters, digits and dashes, 1 to 63 characters, unique. */
+  private checkMachineName(name: string, exceptId: string | null): void {
     if (!/^[a-z0-9][a-z0-9-]{0,62}$/.test(name)) throw new KeyError('invalid_argument', 'PC name: lowercase letters, digits and dashes');
-    if (this.db.prepare('SELECT 1 FROM machines WHERE name=?').get(name)) throw new KeyError('conflict', `a PC named "${name}" exists`);
+    const same = this.db.prepare('SELECT id FROM machines WHERE name=?').get(name) as { id: string } | undefined;
+    if (same && same.id !== exceptId) throw new KeyError('conflict', `a PC named "${name}" exists`);
+  }
+  createMachine(name: string, description: string | null, actor: Actor): Machine {
+    this.checkMachineName(name, null);
     const id = newId.pc();
     this.db.prepare('INSERT INTO machines(id,name,description,created_at) VALUES (?,?,?,?)').run(id, name, description, Date.now());
     this.audit.event(actor, 'pc.create', { kind: 'pc', id }, { name });
+    return this.machine(id)!;
+  }
+  /** Give a PC a new name. A PC is known by its id everywhere (keys, sessions, the bridge), so nothing else holds the name. The same name is a no-op. */
+  renameMachine(id: string, name: string, actor: Actor): Machine {
+    const m = this.machine(id); if (!m) throw new KeyError('not_found', 'PC not found');
+    if (m.name === name) return m;
+    this.checkMachineName(name, id);
+    tx(this.db, () => {
+      this.db.prepare('UPDATE machines SET name=? WHERE id=?').run(name, id);
+      this.audit.event(actor, 'pc.rename', { kind: 'pc', id }, { from: m.name, to: name });
+    });
     return this.machine(id)!;
   }
   machine(id: string): Machine | null { return (this.db.prepare('SELECT * FROM machines WHERE id=?').get(id) as unknown as Machine) ?? null; }
@@ -115,16 +290,26 @@ export class Keys {
     return id;
   }
 
-  createSessionKey(o: { agentId: string; label: string; expiresAt?: number | null; templateId?: string | null }, actor: Actor): { credential: Credential; secret: string } {
+  /**
+   * A new session key. `machineId` binds it to that PC from the start (docs/onboarding.md#pc-binding-of-session-keys), in
+   * the same transaction, so the key is never free in between; the binding is audited as key.binding_set.
+   */
+  createSessionKey(o: { agentId: string; label: string; expiresAt?: number | null; templateId?: string | null; machineId?: string | null }, actor: Actor): { credential: Credential; secret: string } {
     if (!this.agent(o.agentId)) throw new KeyError('not_found', 'agent not found');
+    if (o.machineId) {
+      const pc = this.machine(o.machineId);
+      if (!pc) throw new KeyError('not_found', 'PC not found');
+      if (pc.status === 'retired') throw new KeyError('invalid_state', 'a key cannot be bound to a retired PC');
+    }
     return tx(this.db, () => {
       const s = this.newSecret('session_key');
       const policyId = this.insertPolicy('credential', null, null);
       const id = newId.credential();
-      this.db.prepare(`INSERT INTO credentials(id,kind,agent_id,label,key_id,verifier,status,expires_at,policy_id,created_at,created_by_admin)
-        VALUES (?,?,?,?,?,?,'active',?,?,?,?)`).run(id, 'session_key', o.agentId, o.label, s.keyId, this.verifier(s.secret), o.expiresAt ?? null, policyId, Date.now(), actor.kind === 'admin' ? actor.id : null);
+      this.db.prepare(`INSERT INTO credentials(id,kind,agent_id,label,key_id,verifier,status,expires_at,policy_id,max_live_sessions,bound_machine_id,created_at,created_by_admin)
+        VALUES (?,?,?,?,?,?,'active',?,?,?,?,?,?)`).run(id, 'session_key', o.agentId, o.label, s.keyId, this.verifier(s.secret), o.expiresAt ?? null, policyId, SESSION_KEY_LIVE_LOGINS, o.machineId ?? null, Date.now(), actor.kind === 'admin' ? actor.id : null);
       if (o.templateId) this.applyTemplate(id, o.templateId, actor, 'template applied at creation');
       this.audit.event(actor, 'key.create', { kind: 'credential', id }, { kind: 'session_key', agent: o.agentId, label: o.label });
+      if (o.machineId) this.audit.event(actor, 'key.binding_set', { kind: 'credential', id }, { from: null, to: o.machineId, source: 'create' });
       return { credential: this.credential(id)!, secret: s.full };
     });
   }
@@ -136,7 +321,7 @@ export class Keys {
       const policyId = this.insertPolicy('credential', null, null);
       const id = newId.credential();
       this.db.prepare(`INSERT INTO credentials(id,kind,machine_id,app_name,label,key_id,verifier,status,policy_id,max_live_sessions,created_at,created_by_admin)
-        VALUES (?,?,?,?,?,?,?,'active',?,?,?,?)`).run(id, 'app_key', o.machineId, o.appName, o.label ?? `${o.appName} on ${m.name}`, s.keyId, this.verifier(s.secret), policyId, o.maxLiveSessions ?? 20, Date.now(), actor.kind === 'admin' ? actor.id : null);
+        VALUES (?,?,?,?,?,?,?,'active',?,?,?,?)`).run(id, 'app_key', o.machineId, o.appName, o.label ?? `${o.appName} on ${m.name}`, s.keyId, this.verifier(s.secret), policyId, o.maxLiveSessions ?? DEFAULT_LIVE_LOGINS, Date.now(), actor.kind === 'admin' ? actor.id : null);
       this.audit.event(actor, 'key.create', { kind: 'credential', id }, { kind: 'app_key', pc: m.name, app: o.appName });
       return { credential: this.credential(id)!, secret: s.full };
     });
@@ -196,9 +381,80 @@ export class Keys {
     tx(this.db, () => {
       this.db.prepare('UPDATE credentials SET status=?, status_reason=?, revoked_at=? WHERE id=?').run(status, reason, status === 'revoked' ? Date.now() : null, id);
       if (status !== 'active') this.revokeTokensFor(id, status);
+      if (status === 'revoked') this.db.prepare("UPDATE key_pickups SET status='void' WHERE credential_id=? AND status='open'").run(id);
+      if (status === 'revoked') this.voidCollections(id, 'revoked');
+      // A checkout successor that is not confirmed yet stands for this key: it goes down with it (docs/checkout.md §5),
+      // so a key suspended or revoked after pickup cannot live on as its successor.
+      if (status !== 'active' && c.succession === 'superseded_pending') {
+        for (const s of this.db.prepare("SELECT id FROM credentials WHERE replaces_credential_id=? AND kind='session_key' AND status='active'").all(id) as { id: string }[]) {
+          this.setStatus(s.id, status, reason ?? 'predecessor', actor);
+        }
+      }
     });
     this.audit.event(actor, `key.${status === 'active' ? 'reactivate' : status === 'suspended' ? 'suspend' : 'revoke'}`, { kind: 'credential', id }, { reason });
     return this.credential(id)!;
+  }
+
+  /**
+   * PC binding (docs/onboarding.md#pc-binding-of-session-keys): a bound session key logs in only through an app key
+   * on that PC; null makes it free. Checked at every login, so a change applies to the next one; live logins go on.
+   */
+  setBinding(id: string, machineId: string | null, actor: Actor): Credential {
+    const c = this.credential(id); if (!c) throw new KeyError('not_found', 'key not found');
+    if (c.kind !== 'session_key') throw new KeyError('invalid_argument', 'only a session key can be bound to a PC');
+    if (c.status === 'revoked') throw new KeyError('invalid_state', 'a revoked key cannot change');
+    const pc = machineId !== null ? this.machine(machineId) : null;
+    if (machineId !== null && !pc) throw new KeyError('not_found', 'PC not found');
+    if (pc && pc.status === 'retired' && c.bound_machine_id !== machineId) throw new KeyError('invalid_state', 'a key cannot be bound to a retired PC');
+    if (c.bound_machine_id === machineId) return c;
+    this.db.prepare('UPDATE credentials SET bound_machine_id=? WHERE id=?').run(machineId, id);
+    // An open pickup code names the PC it was made for; after a move it would hand the key to the PC it just left.
+    this.db.prepare("UPDATE key_pickups SET status='void' WHERE credential_id=? AND status='open'").run(id);
+    // So does an open collection: it names the PC and the one app key there that may collect it.
+    this.voidCollections(id, 'binding_changed');
+    this.audit.event(actor, 'key.binding_set', { kind: 'credential', id }, { from: c.bound_machine_id, to: machineId });
+    return this.credential(id)!;
+  }
+
+  /** The onboarding capability on an app key (docs/onboarding.md#the-app-key-and-its-onboarding-capability). */
+  setOnboarding(id: string, on: boolean, actor: Actor): Credential {
+    const c = this.credential(id); if (!c) throw new KeyError('not_found', 'key not found');
+    if (c.kind !== 'app_key') throw new KeyError('invalid_argument', 'only an app key can carry the onboarding capability');
+    if (on && c.status === 'revoked') throw new KeyError('invalid_state', 'a revoked key cannot change');
+    if (!!c.onboarding_enabled_at === on) return c;
+    this.db.prepare('UPDATE credentials SET onboarding_enabled_at=? WHERE id=?').run(on ? Date.now() : null, id);
+    this.audit.event(actor, on ? 'onboarding.capability_grant' : 'onboarding.capability_remove', { kind: 'credential', id });
+    return this.credential(id)!;
+  }
+
+  /**
+   * A fresh secret for the same credential (enrolment): the previous secret stops working and its logins end. The id,
+   * policy, PC and capability stay, so nothing that names the key changes.
+   */
+  reissueSecret(id: string, reason: string): { credential: Credential; secret: string } {
+    const c = this.credential(id); if (!c) throw new KeyError('not_found', 'key not found');
+    if (c.status !== 'active') throw new KeyError('invalid_state', `the key is ${c.status}`);
+    return tx(this.db, () => {
+      const s = this.newSecret(c.kind);
+      this.db.prepare('UPDATE credentials SET key_id=?, verifier=? WHERE id=?').run(s.keyId, this.verifier(s.secret), id);
+      this.revokeTokensFor(id, reason);
+      return { credential: this.credential(id)!, secret: s.full };
+    });
+  }
+
+  /** The most live logins an app key allows (docs/onboarding.md): 1 to 500, applied at the next login; the audit row has the old and the new limit. */
+  setLiveLimit(id: string, limit: number, actor: Actor): Credential {
+    const c = this.credential(id);
+    if (!c) throw new KeyError('not_found', 'key not found');
+    if (c.kind !== 'app_key') throw new KeyError('invalid_state', 'Only an app key has a limit of live logins.');
+    if (!Number.isInteger(limit) || limit < 1 || limit > MAX_LIVE_LOGINS) throw new KeyError('invalid_argument', 'The limit is a whole number from 1 to 500.');
+    if (limit === c.max_live_sessions) return c;
+    // The new limit and its audit row commit together: if the audit write fails, the limit stays as it was.
+    return tx(this.db, () => {
+      this.db.prepare('UPDATE credentials SET max_live_sessions=? WHERE id=?').run(limit, id);
+      this.audit.event(actor, 'key.live_limit', { kind: 'credential', id }, { from: c.max_live_sessions, to: limit });
+      return this.credential(id)!;
+    });
   }
 
   setExpiry(id: string, expiresAt: number | null, actor: Actor): Credential {
@@ -210,28 +466,253 @@ export class Keys {
 
   /**
    * Rotate: the new key takes over the policy (and thus grants); the old key is revoked,
-   * every token of it ends, and the agent gets a key_rotated notice.
+   * every token of it ends, and the agent gets a key_rotated notice. A key in an unsettled checkout move (one with a
+   * successor, or a successor whose old key is not settled) is refused: rotating it would leave the agent two live keys.
    */
-  rotate(id: string, actor: Actor): { credential: Credential; secret: string } {
+  rotate(id: string, actor: Actor, why: { reason?: 'routine' | 'suspected_leak' | null; delivery?: 'prompt' | 'collect' } = {}): { credential: Credential; secret: string } {
     const old = this.credential(id); if (!old) throw new KeyError('not_found', 'key not found');
     if (old.status === 'revoked') throw new KeyError('invalid_state', 'a revoked key cannot be rotated');
+    if (old.succession) throw new KeyError('invalid_state', 'This key has a checkout successor that is not settled. Finish or cancel the checkout first.');
+    if (old.replaces_credential_id && this.credential(old.replaces_credential_id)?.succession) throw new KeyError('invalid_state', 'This key is the successor in a checkout that is not settled. Finish or cancel the checkout first.');
     return tx(this.db, () => {
       const s = this.newSecret(old.kind);
       const spare = this.insertPolicy('credential', null, 'released by rotation');
       this.db.prepare("UPDATE credentials SET policy_id=?, status='revoked', status_reason='rotated', revoked_at=? WHERE id=?").run(spare, Date.now(), id);
       this.revokeTokensFor(id, 'rotated');
+      this.db.prepare("UPDATE key_pickups SET status='void' WHERE credential_id=? AND status='open'").run(id);
+      this.voidCollections(id, 'rotated');
       const nid = newId.credential();
-      this.db.prepare(`INSERT INTO credentials(id,kind,agent_id,machine_id,app_name,label,key_id,verifier,status,expires_at,replaces_credential_id,policy_id,max_live_sessions,created_at,created_by_admin)
-        VALUES (?,?,?,?,?,?,?,?,'active',?,?,?,?,?,?)`).run(nid, old.kind, old.agent_id, old.machine_id, old.app_name, old.label, s.keyId, this.verifier(s.secret), old.expires_at, id, old.policy_id, old.max_live_sessions, Date.now(), actor.kind === 'admin' ? actor.id : null);
+      this.db.prepare(`INSERT INTO credentials(id,kind,agent_id,machine_id,app_name,label,key_id,verifier,status,expires_at,replaces_credential_id,policy_id,max_live_sessions,bound_machine_id,onboarding_enabled_at,session_var,created_at,created_by_admin)
+        VALUES (?,?,?,?,?,?,?,?,'active',?,?,?,?,?,?,?,?,?)`).run(nid, old.kind, old.agent_id, old.machine_id, old.app_name, old.label, s.keyId, this.verifier(s.secret), old.expires_at, id, old.policy_id, old.max_live_sessions, old.bound_machine_id, old.onboarding_enabled_at, old.session_var ?? null, Date.now(), actor.kind === 'admin' ? actor.id : null);
       this.db.prepare('UPDATE temporary_grants SET credential_id=? WHERE credential_id=?').run(nid, id);
       this.db.prepare("UPDATE access_requests SET credential_id=? WHERE credential_id=? AND status='pending'").run(nid, id);
       // Team membership names the key its team rules live on; left on the old key, the next re-wire would drop them.
       this.db.prepare('UPDATE team_members SET credential_id=? WHERE credential_id=?').run(nid, id);
+      // An app key's onboarding requests and enrolment code follow it, so its pickup still counts as the filing key's.
+      this.db.prepare('UPDATE onboarding_requests SET app_credential_id=? WHERE app_credential_id=?').run(nid, id);
+      this.db.prepare('UPDATE enrolment_codes SET app_credential_id=? WHERE app_credential_id=?').run(nid, id);
       if (old.agent_id) this.notify(old.agent_id, 'key_rotated', 'Your session key was rotated. Wait for the new key from the administrator, then call session_login with it.');
-      this.audit.event(actor, 'key.rotate', { kind: 'credential', id: nid }, { replaces: id });
+      this.audit.event(actor, 'key.rotate', { kind: 'credential', id: nid }, { replaces: id, ...(old.kind === 'session_key' ? { reason: why.reason ?? null, delivery: why.delivery ?? 'prompt' } : {}) });
       return { credential: this.credential(nid)!, secret: s.full };
     });
   }
+
+  // ───────────── Key prompts (docs/onboarding.md#key-prompts-a-new-rotated-or-reissued-session-key) ─────────────
+  /**
+   * Where a session key's prompt sends it, from what the hub knows and nothing else: the PC (the binding, else the PC of
+   * the key's last login, else the PC that collected the key at onboarding, through the rotation chain), the keys.env
+   * variable (the stored one, else the onboarding slot's, else one derived from the agent's name for a PC; stored once
+   * chosen, always one setup.mjs accepts) and the client (the app of that last login on that PC, else the onboarding
+   * request's). A PC that is not retired keeps its pickup even without an active app key or while suspended: note then
+   * says what the operator must fix before setup.mjs can collect the key. No PC, or a retired one: pc is null and the
+   * prompt falls back to the raw key.
+   */
+  keyTarget(id: string): { pc: Machine | null; session_var: string | null; client_app: string | null; folder: string | null; note: string | null } {
+    const c = this.credential(id); if (!c) throw new KeyError('not_found', 'key not found');
+    if (c.kind !== 'session_key') throw new KeyError('invalid_argument', 'only a session key has a key prompt');
+    const chain = `WITH RECURSIVE ch(id) AS (SELECT ? UNION SELECT c.replaces_credential_id FROM credentials c JOIN ch ON c.id=ch.id WHERE c.replaces_credential_id IS NOT NULL)`;
+    const slot = this.db.prepare(`${chain}
+      SELECT s.session_var, s.folder, r.machine_id, r.body FROM onboarding_slots s JOIN onboarding_requests r ON r.id=s.request_id
+      WHERE s.credential_id IN (SELECT id FROM ch) ORDER BY s.created_at DESC LIMIT 1`).get(id) as { session_var: string; folder: string; machine_id: string; body: string } | undefined;
+    // The last login says where the agent runs today and through which client; the onboarding slot may be older than a move.
+    const last = this.db.prepare(`${chain}
+      SELECT a.machine_id, a.app_name FROM session_tokens t JOIN credentials a ON a.id=t.app_credential_id
+      WHERE t.session_credential_id IN (SELECT id FROM ch) ORDER BY t.created_at DESC LIMIT 1`).get(id) as { machine_id: string; app_name: string } | undefined;
+    let slotApp: string | null = null;
+    if (slot) { try { const x = (JSON.parse(slot.body) as { client?: { app?: unknown } }).client?.app; slotApp = typeof x === 'string' ? x : null; } catch { /* no client */ } }
+    const pcId = c.bound_machine_id ?? last?.machine_id ?? slot?.machine_id ?? null;
+    let pc = pcId ? this.machine(pcId) : null;
+    if (pc && pc.status === 'retired') pc = null;
+    const clientApp = pc && last?.machine_id === pc.id ? last.app_name : pc && slot?.machine_id === pc.id ? slotApp : last?.app_name ?? slotApp;
+    let note: string | null = null;
+    if (pc && pc.status !== 'active') note = `The PC ${pc.name} is ${pc.status}: reactivate it before running the command there.`;
+    else if (pc && !this.db.prepare("SELECT 1 FROM credentials WHERE kind='app_key' AND machine_id=? AND status='active' AND (expires_at IS NULL OR expires_at>?)").get(pc.id, Date.now()))
+      note = `The PC ${pc.name} has no active app key: issue or reactivate one before running the command there.`;
+    let sv = [c.session_var, slot?.session_var].find((v) => typeof v === 'string' && SESSION_VAR_RE.test(v)) ?? null;
+    if (!sv && pc) {
+      const agent = this.agent(c.agent_id!);
+      // setup.mjs accepts at most 64 characters; keep room for the "_<n>" a clash adds and for "_SESSION_KEY".
+      const base = ((agent?.label ?? c.label).toUpperCase().replace(/[^A-Z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'AGENT').replace(/^(\d)/, 'A_$1').slice(0, 64 - '_SESSION_KEY'.length - 5).replace(/_+$/, '');
+      const taken = new Set((this.db.prepare(`SELECT DISTINCT session_var v FROM credentials WHERE session_var IS NOT NULL AND agent_id IS NOT NULL AND id<>? AND status<>'revoked'
+        AND bound_machine_id=? AND agent_id<>?`).all(id, pc.id, c.agent_id) as { v: string }[]).map((r) => r.v));
+      sv = `${base}_SESSION_KEY`;
+      for (let n = 2; taken.has(sv); n++) sv = `${base}_${n}_SESSION_KEY`;
+    }
+    if (sv && sv !== c.session_var) this.db.prepare('UPDATE credentials SET session_var=? WHERE id=?').run(sv, id);
+    return { pc, session_var: sv, client_app: clientApp, folder: slot?.folder ?? null, note };
+  }
+
+  /**
+   * Arm a pickup for a session key: its secret stops working at once (a fresh key id, no usable verifier), any open code of
+   * the key is void, and a new single-use code for that PC is stored as a hash. The key is made at redeemPickup().
+   */
+  armPickup(id: string, machineId: string, sessionVar: string, actor: Actor): { code: string; expires_at: number } {
+    return tx(this.db, () => {
+      const c = this.credential(id); if (!c) throw new KeyError('not_found', 'key not found');
+      if (c.kind !== 'session_key' || c.status !== 'active') throw new KeyError('invalid_state', 'only an active session key gets a pickup code');
+      if (!SESSION_VAR_RE.test(sessionVar)) throw new KeyError('invalid_argument', 'the keys.env variable must be 1 to 64 capitals, digits or underscores, starting with a letter');
+      const now = Date.now(), code = `cnv_key_${randomToken(17).slice(0, 26)}`, expires = now + KEY_PICKUP_TTL_MS;
+      this.db.prepare("UPDATE key_pickups SET status='void' WHERE credential_id=? AND status='open'").run(id);
+      this.voidCollections(id, 'prompt_instead');
+      this.blankSecret(id, 'pickup');
+      this.db.prepare('INSERT INTO key_pickups(id,credential_id,machine_id,session_var,code_hash,created_at,expires_at,created_by_admin) VALUES (?,?,?,?,?,?,?,?)')
+        .run(`kpk_${randomToken(10)}`, id, machineId, sessionVar, sha256Hex(code), now, expires, actor.kind === 'admin' ? actor.id : null);
+      this.audit.event(actor, 'key.pickup_armed', { kind: 'credential', id }, { pc: machineId, session_var: sessionVar, expires_at: expires });
+      return { code, expires_at: expires };
+    });
+  }
+
+  /**
+   * Swap a pickup code for its key, through an app key of the code's PC. An unknown code, or one for another PC, is
+   * not_found; a used, void or expired one invalid_state; the key must still be active and, when bound, bound to that PC.
+   * `refuse` may stop it for the key's agent (a lockdown) before the key is made: the code then stays open. Audited without the code or key.
+   */
+  redeemPickup(app: Credential, code: string, refuse?: (agentId: string | null) => string | null): { session_var: string; secret: string; label: string; pc: string; credential_id: string } {
+    return tx(this.db, () => {
+      const p = /^cnv_key_[a-z2-7]{26}$/.test(code) ? this.db.prepare('SELECT * FROM key_pickups WHERE code_hash=?').get(sha256Hex(code)) as { id: string; credential_id: string; machine_id: string; session_var: string; status: string; expires_at: number } | undefined : undefined;
+      if (!p || p.machine_id !== app.machine_id) throw new KeyError('not_found', 'Unknown key pickup code.');
+      const c = this.credential(p.credential_id)!;
+      if (p.status !== 'open') throw new KeyError('invalid_state', p.status === 'used' ? 'This key pickup code was already used.' : 'This key pickup code was replaced. Ask the administrator for a new prompt.');
+      if (p.expires_at <= Date.now()) throw new KeyError('invalid_state', 'This key pickup code has expired. Ask the administrator for a new prompt.');
+      if (c.bound_machine_id && c.bound_machine_id !== p.machine_id) {
+        throw new KeyError('invalid_state', 'This key is now bound to another PC, so this code was replaced. Ask the administrator for a new prompt.');
+      }
+      if (this.effectiveStatus(c) !== 'active') throw new KeyError('invalid_state', `The key is ${this.effectiveStatus(c)}.`);
+      const no = refuse?.(c.agent_id); if (no) throw new KeyError('lockdown', no);
+      const secret = this.issueSessionSecret(c.id);
+      this.db.prepare("UPDATE key_pickups SET status='used', used_at=? WHERE id=?").run(Date.now(), p.id);
+      const pc = this.machine(p.machine_id)!;
+      this.audit.event({ kind: 'system', id: null }, 'key.pickup', { kind: 'credential', id: c.id }, { pc: pc.id, session_var: p.session_var, app_key: app.id });
+      return { session_var: p.session_var, secret, label: c.label, pc: pc.name, credential_id: c.id };
+    });
+  }
+  /** A session key's secret stops working at once: a fresh key id, no usable verifier, and its logins end. */
+  blankSecret(id: string, reason: string): void {
+    this.db.prepare("UPDATE credentials SET key_id=?, verifier='' WHERE id=?").run(this.newSecret('session_key').keyId, id);
+    this.revokeTokensFor(id, reason);
+  }
+  /** A new secret for a session key whose secret was blanked (a pickup or a collection): returned once, stored only as its verifier. */
+  issueSessionSecret(id: string): string {
+    const s = this.newSecret('session_key');
+    this.db.prepare('UPDATE credentials SET key_id=?, verifier=? WHERE id=?').run(s.keyId, this.verifier(s.secret), id);
+    return s.full;
+  }
+  /** An open collection of the key (keys/keyCollect.ts) is void: a binding change, a revoke, a rotation or a key prompt instead. */
+  private voidCollections(id: string, outcome: string): void {
+    this.db.prepare("UPDATE key_collections SET status='void', outcome=?, ended_at=? WHERE credential_id=? AND status='open'").run(outcome, Date.now(), id);
+  }
+  /**
+   * Set by the key collections (keys/keyCollect.ts): runs at each login with a valid session key, before the PC binding
+   * check, and refuses a collected key used through any app key but the one it was collected for, on this PC or another.
+   */
+  collectGuard: ((ses: Credential, app: Credential) => void) | null = null;
+  /** The open pickup of a key, if any (the console shows its expiry). */
+  openPickup(id: string): { machine_id: string; session_var: string; expires_at: number } | null {
+    return (this.db.prepare("SELECT machine_id, session_var, expires_at FROM key_pickups WHERE credential_id=? AND status='open' AND expires_at>? ORDER BY created_at DESC LIMIT 1").get(id, Date.now()) as { machine_id: string; session_var: string; expires_at: number } | undefined) ?? null;
+  }
+
+  /**
+   * A checkout's successor key (docs/checkout.md §5). Unlike rotate(), the old key stays active (marked succession
+   * 'superseded_pending') and no notice is sent: the new row replaces it, is bound to the target PC in the same transaction (even
+   * when the old key was free), gets a copy of the old key's own rules (team rules follow membership at the next wire),
+   * and takes over team membership, temporary grants and pending access requests. revertSuccessor() undoes it.
+   */
+  issueSuccessor(id: string, machineId: string, actor: Actor, label?: string): { credential: Credential; secret: string } {
+    return tx(this.db, () => {
+      const old = this.credential(id); if (!old) throw new KeyError('not_found', 'key not found');
+      if (old.kind !== 'session_key') throw new KeyError('invalid_argument', 'only a session key has a successor');
+      if (old.status !== 'active') throw new KeyError('invalid_state', `the key is ${old.status}`);
+      if (old.succession) throw new KeyError('conflict', 'this key already has a successor that is not settled');
+      const pc = this.machine(machineId); if (!pc) throw new KeyError('not_found', 'PC not found');
+      if (pc.status === 'retired') throw new KeyError('invalid_state', 'a key cannot be bound to a retired PC');
+      const s = this.newSecret('session_key'), now = Date.now();
+      const policyId = this.insertPolicy('credential', null, 'successor (checkout)');
+      // Team rules are copied too (with their team tag and position), so the next wire finds nothing changed and sends no notice.
+      this.copyRules(old.policy_id, policyId, 'all');
+      const stored = this.rules(policyId, false);
+      if (stored.length) {
+        this.db.prepare('UPDATE permission_policies SET version=2, updated_at=? WHERE id=?').run(now, policyId);
+        this.db.prepare('INSERT INTO policy_versions(policy_id,version,rules,changed_by,change_note,created_at) VALUES (?,2,?,NULL,?,?)').run(policyId, JSON.stringify(stored), `copied from ${old.id}`, now);
+      }
+      const nid = newId.credential();
+      this.db.prepare(`INSERT INTO credentials(id,kind,agent_id,label,key_id,verifier,status,expires_at,replaces_credential_id,policy_id,max_live_sessions,bound_machine_id,created_at,created_by_admin)
+        VALUES (?,?,?,?,?,?,'active',?,?,?,?,?,?,?)`).run(nid, 'session_key', old.agent_id, label ?? old.label, s.keyId, this.verifier(s.secret), old.expires_at, id, policyId, old.max_live_sessions, machineId, now, actor.kind === 'admin' ? actor.id : null);
+      this.moveHoldings(id, nid);
+      this.db.prepare("UPDATE credentials SET succession='superseded_pending' WHERE id=?").run(id);
+      this.audit.event(actor, 'key.successor', { kind: 'credential', id: nid }, { replaces: id, agent: old.agent_id, bound_to: machineId });
+      this.audit.event(actor, 'key.binding_set', { kind: 'credential', id: nid }, { from: null, to: machineId, source: 'successor' });
+      return { credential: this.credential(nid)!, secret: s.full };
+    });
+  }
+  private copyRules(fromPolicy: string, toPolicy: string, which: 'all' | 'team'): void {
+    const ins = this.db.prepare('INSERT INTO permission_rules(id,policy_id,position,effect,actions,resource,from_template,note,team_id,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)');
+    for (const r of this.db.prepare(`SELECT * FROM permission_rules WHERE policy_id=?${which === 'team' ? ' AND team_id IS NOT NULL' : ''} ORDER BY position`).all(fromPolicy) as { position: number; effect: string; actions: string; resource: string; from_template: string | null; note: string | null; team_id: string | null; created_at: number }[]) {
+      ins.run(newId.rule(), toPolicy, r.position, r.effect, r.actions, r.resource, r.from_template, r.note, r.team_id, r.created_at);
+    }
+  }
+  /** Team membership, temporary grants and pending access requests follow the key that serves the agent. */
+  private moveHoldings(from: string, to: string): void {
+    this.db.prepare('UPDATE temporary_grants SET credential_id=? WHERE credential_id=?').run(to, from);
+    this.db.prepare("UPDATE access_requests SET credential_id=? WHERE credential_id=? AND status='pending'").run(to, from);
+    this.db.prepare('UPDATE team_members SET credential_id=? WHERE credential_id=?').run(to, from);
+  }
+  /**
+   * Undo a successor that never took over (a pickup retry, a new render, cancel or expiry): the holdings go back to the
+   * old key, the successor is revoked with its tokens, and the old key's tokens suspended by `by` are reinstated.
+   * Returns the old key's id. The caller re-wires the teams whose membership moved.
+   */
+  revertSuccessor(newCredentialId: string, reason: string, actor: Actor, by?: string): string {
+    return tx(this.db, () => {
+      const n = this.credential(newCredentialId); if (!n?.replaces_credential_id) throw new KeyError('not_found', 'successor not found');
+      const old = this.credential(n.replaces_credential_id)!;
+      this.moveHoldings(n.id, old.id);
+      // The team rules come back with membership (a wire since the issue may have moved them), so the caller's re-wire finds nothing changed.
+      this.db.prepare('DELETE FROM permission_rules WHERE policy_id=? AND team_id IS NOT NULL').run(old.policy_id);
+      this.copyRules(n.policy_id, old.policy_id, 'team');
+      if (n.status !== 'revoked') {
+        this.db.prepare("UPDATE credentials SET status='revoked', status_reason=?, revoked_at=? WHERE id=?").run(reason, Date.now(), n.id);
+        this.revokeTokensFor(n.id, 'revoked');
+      }
+      if (old.succession) this.db.prepare('UPDATE credentials SET succession=NULL WHERE id=?').run(old.id);
+      const reinstated = by ? this.reinstateTokens(old.id, by) : 0;
+      this.audit.event(actor, 'key.successor_reverted', { kind: 'credential', id: n.id }, { replaces: old.id, reason, reinstated });
+      return old.id;
+    });
+  }
+  /** The successor took over (confirm): the old key cannot log in again and its live tokens are suspended by `by`. */
+  confirmSuccessor(newCredentialId: string, by: string, actor: Actor): number {
+    return tx(this.db, () => {
+      const n = this.credential(newCredentialId); if (!n?.replaces_credential_id) throw new KeyError('not_found', 'successor not found');
+      this.db.prepare("UPDATE credentials SET succession='suspended' WHERE id=? AND status<>'revoked'").run(n.replaces_credential_id);
+      // Only tokens still inside their idle window: an expired one stays expired, so a later reinstate cannot revive it.
+      const now = Date.now();
+      const r = this.db.prepare('UPDATE session_tokens SET suspended_at=?, suspended_by=? WHERE session_credential_id=? AND revoked_at IS NULL AND suspended_at IS NULL AND expires_at>?')
+        .run(now, by, n.replaces_credential_id, now);
+      this.audit.event(actor, 'key.tokens_suspended', { kind: 'credential', id: n.replaces_credential_id }, { by, tokens: Number(r.changes), successor: n.id });
+      return Number(r.changes);
+    });
+  }
+  /** The move is done (restored): the old key is revoked, its suspended tokens with it. */
+  finishSuccessor(newCredentialId: string, actor: Actor): void {
+    tx(this.db, () => {
+      const n = this.credential(newCredentialId); if (!n?.replaces_credential_id) throw new KeyError('not_found', 'successor not found');
+      const old = this.credential(n.replaces_credential_id!)!;
+      this.db.prepare('UPDATE credentials SET succession=NULL WHERE id=?').run(old.id);
+      if (old.status !== 'revoked') this.setStatus(old.id, 'revoked', 'superseded', actor);
+    });
+  }
+  /**
+   * Tokens suspended by `by` (a checkout id) work again with the idle time they had left when suspended: the expiry moves
+   * on by the time spent suspended, never further. Only live tokens were suspended, so none comes back from expiry.
+   */
+  reinstateTokens(credentialId: string, by: string): number {
+    const now = Date.now();
+    const r = this.db.prepare('UPDATE session_tokens SET expires_at=expires_at + MAX(0, ? - suspended_at), suspended_at=NULL, suspended_by=NULL WHERE session_credential_id=? AND suspended_by=? AND suspended_at IS NOT NULL AND revoked_at IS NULL')
+      .run(now, credentialId, by);
+    return Number(r.changes);
+  }
+  /** End a key's logins without a notice (a same-user reuse move ends them at render); the key can log in again. */
+  endTokens(credentialId: string, reason: string): number { return this.revokeTokensFor(credentialId, reason); }
 
   /** "End logins": revokes tokens; the session can log in again. */
   endLogins(id: string, actor: Actor): number {
@@ -338,12 +819,15 @@ export class Keys {
   }
 
   // ───────────── Login tokens ─────────────
-  login(app: Credential, sessionKey: string): { token: string; credential: Credential; concurrent: boolean } {
+  login(app: Credential, sessionKey: string, opts: { compact?: boolean } = {}): { token: string; credential: Credential; concurrent: boolean } {
     const ses = this.verifyKey(sessionKey, 'session_key');
+    if (ses.succession === 'suspended') throw new KeyError('suspended', 'this session key was moved by a checkout; its successor is in use');
+    this.collectGuard?.(ses, app);
+    if (ses.bound_machine_id && ses.bound_machine_id !== app.machine_id) throw new BoundElsewhereError(ses, app);
     const now = Date.now();
-    const live = (this.db.prepare('SELECT COUNT(*) n FROM session_tokens WHERE app_credential_id=? AND revoked_at IS NULL AND expires_at>?').get(app.id, now) as { n: number }).n;
+    const live = (this.db.prepare('SELECT COUNT(*) n FROM session_tokens WHERE app_credential_id=? AND revoked_at IS NULL AND suspended_at IS NULL AND expires_at>?').get(app.id, now) as { n: number }).n;
     if (live >= app.max_live_sessions) throw new KeyError('rate_limited', `this app already has ${live} live sessions (limit ${app.max_live_sessions})`);
-    const others = (this.db.prepare('SELECT COUNT(*) n FROM session_tokens WHERE session_credential_id=? AND revoked_at IS NULL AND expires_at>?').get(ses.id, now) as { n: number }).n;
+    const others = (this.db.prepare('SELECT COUNT(*) n FROM session_tokens WHERE session_credential_id=? AND revoked_at IS NULL AND suspended_at IS NULL AND expires_at>?').get(ses.id, now) as { n: number }).n;
     const token = `ah_tok_${randomToken(25).slice(0, 40)}`, hash = sha256Hex(token);
     // A new login continues where the agent left off: notices after the last one it confirmed (so a directive sent
     // while it was logged out still arrives), and room read positions from its earlier logins (so history is not replayed).
@@ -353,8 +837,8 @@ export class Keys {
     const newest = (this.db.prepare('SELECT COALESCE(MAX(seq),0) s FROM agent_notices WHERE agent_id=?').get(ses.agent_id!) as { s: number }).s;
     const acked = prev !== null ? Math.min(prev, newest) : firstDirective !== null ? firstDirective - 1 : newest;
     tx(this.db, () => {
-      this.db.prepare('INSERT INTO session_tokens(token_hash,app_credential_id,session_credential_id,notice_acked_seq,created_at,last_used_at,expires_at) VALUES (?,?,?,?,?,?,?)')
-        .run(hash, app.id, ses.id, acked, now, now, now + TOKEN_IDLE_MS);
+      this.db.prepare('INSERT INTO session_tokens(token_hash,app_credential_id,session_credential_id,notice_acked_seq,created_at,last_used_at,expires_at,compact) VALUES (?,?,?,?,?,?,?,?)')
+        .run(hash, app.id, ses.id, acked, now, now, now + TOKEN_IDLE_MS, opts.compact ? 1 : 0);
       this.db.prepare(`INSERT INTO message_delivery_cursors(agent_id,token_hash,room_id,delivered_seq,acked_seq,updated_at)
         SELECT agent_id, ?, room_id, MAX(delivered_seq), MAX(acked_seq), ? FROM message_delivery_cursors WHERE agent_id=? GROUP BY room_id`).run(hash, now, ses.agent_id!);
     });
@@ -366,8 +850,9 @@ export class Keys {
   resolveToken(app: Credential, token: string): { tokenHash: string; credential: Credential; agent: Agent } {
     if (!TOKEN_RE.test(token)) throw new KeyError('login_required', 'missing or malformed session_token; call session_login');
     const h = sha256Hex(token), now = Date.now();
-    const t = this.db.prepare('SELECT * FROM session_tokens WHERE token_hash=?').get(h) as { app_credential_id: string; session_credential_id: string; expires_at: number; revoked_at: number | null; revoked_reason: string | null } | undefined;
+    const t = this.db.prepare('SELECT * FROM session_tokens WHERE token_hash=?').get(h) as { app_credential_id: string; session_credential_id: string; expires_at: number; revoked_at: number | null; revoked_reason: string | null; suspended_at: number | null } | undefined;
     if (!t || t.app_credential_id !== app.id) throw new KeyError('login_required', 'unknown session_token; call session_login');
+    if (t.revoked_at === null && t.suspended_at !== null) throw new KeyError('key_inactive', 'this session moved to another place (checkout); it is suspended until the move ends');
     if (t.revoked_at !== null) {
       if (t.revoked_reason === 'rotated') throw new KeyError('key_rotated', 'your key was rotated; wait for the new key');
       if (t.revoked_reason === 'suspended' || t.revoked_reason === 'revoked' || t.revoked_reason === 'pc_suspended' || t.revoked_reason === 'leak_guard' || t.revoked_reason === 'archived') throw new KeyError('key_inactive', 'your session key is not active');
@@ -389,27 +874,65 @@ export class Keys {
   liveLogins(filter: { credentialId?: string } = {}): { token_hash: string; app_credential_id: string; session_credential_id: string; created_at: number; last_used_at: number; expires_at: number }[] {
     const now = Date.now();
     const sql = `SELECT token_hash,app_credential_id,session_credential_id,created_at,last_used_at,expires_at FROM session_tokens
-      WHERE revoked_at IS NULL AND expires_at>? ${filter.credentialId ? 'AND (session_credential_id=? OR app_credential_id=?)' : ''} ORDER BY last_used_at DESC`;
+      WHERE revoked_at IS NULL AND suspended_at IS NULL AND expires_at>? ${filter.credentialId ? 'AND (session_credential_id=? OR app_credential_id=?)' : ''} ORDER BY last_used_at DESC`;
     return (filter.credentialId ? this.db.prepare(sql).all(now, filter.credentialId, filter.credentialId) : this.db.prepare(sql).all(now)) as never;
   }
 
   // ───────────── Notices ─────────────
-  /** ref: a task notice names its task and the state it describes, so it stops being delivered once the task moves on. */
-  notify(agentId: string, kind: string, body: string, ref?: { task: string; state: string } | { feedback: string; rev: number }): void {
+  /**
+   * ref names what the notice is about, so it settles (stops being delivered) once it no longer describes the current
+   * state (NOTICE_SETTLERS): a task that moved on, a directive the agent confirmed. The older `{task, state}` and
+   * `{feedback, rev}` shapes are mapped to `{kind, id, state}` here.
+   */
+  /** Owner enforcement's check on a notice's subject (OwnerScope.maySeeNotice); null delivers every notice. */
+  noticeFilter: ((agentId: string, ref: { kind: NoticeRefKind; id: string } | null) => boolean) | null = null;
+  notify(agentId: string, kind: string, body: string, ref?: NoticeRef): void {
+    const r = !ref ? null : 'task' in ref ? { kind: 'task' as const, id: ref.task, state: ref.state } : 'feedback' in ref ? { kind: 'feedback' as const, id: ref.feedback, state: ref.rev } : ref;
+    const state = r?.state === undefined || r.state === null ? null : String(r.state);
+    // While owner enforcement is on, a notice about work the agent's owner may not see is not made at all (app.ts sets this).
+    if (this.noticeFilter && !this.noticeFilter(agentId, r)) return;
     tx(this.db, () => {
       const seq = (this.db.prepare('SELECT COALESCE(MAX(seq),0)+1 s FROM agent_notices WHERE agent_id=?').get(agentId) as { s: number }).s;
-      const task = ref && 'task' in ref ? ref : null, fb = ref && 'feedback' in ref ? ref : null;
-      this.db.prepare('INSERT INTO agent_notices(id,agent_id,seq,kind,body,created_at,ref_task_id,ref_state,ref_feedback_id) VALUES (?,?,?,?,?,?,?,?,?)')
-        .run(newId.notice(), agentId, seq, kind, body, Date.now(), task?.task ?? null, task?.state ?? (fb ? String(fb.rev) : null), fb?.feedback ?? null);
+      // ref_kind/ref_id (0106) is the one ref shape; ref_task_id and ref_feedback_id are still written for one release.
+      this.db.prepare('INSERT INTO agent_notices(id,agent_id,seq,kind,body,created_at,ref_task_id,ref_state,ref_feedback_id,ref_kind,ref_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)')
+        .run(newId.notice(), agentId, seq, kind, body, Date.now(), r?.kind === 'task' ? r.id : null, state, r?.kind === 'feedback' ? r.id : null, r?.kind ?? null, r?.id ?? null);
     });
   }
-  /** Notices after this login's cursor, without task notices whose task has left the state they describe.
-      Stale ones are skipped, not acknowledged: the cursor is cumulative and must not clear unrelated notices. */
+  /** Notices after this login's cursor, without settled ones (NOTICE_SETTLERS).
+      Settled ones are skipped, not acknowledged: the cursor is cumulative and must not clear unrelated notices. */
   pendingNotices(tokenHash: string, agentId: string): Notice[] {
     const acked = (this.db.prepare('SELECT notice_acked_seq s FROM session_tokens WHERE token_hash=?').get(tokenHash) as { s: number } | undefined)?.s ?? 0;
     return this.db.prepare(`SELECT n.* FROM agent_notices n WHERE n.agent_id=? AND n.seq>? AND ${CURRENT_NOTICE} ORDER BY n.seq`).all(agentId, acked) as unknown as Notice[];
   }
-  /** Whether a stored notice still describes its task's current state (always true for other notices). */
+  /** The agent's newest notices for the console Inbox, newest first, each with `current` (1 unless the hub settled it
+      before delivery, so it never reaches the agent). Read only: it confirms nothing (dashboard-ux.md, Agent page). */
+  recentNotices(agentId: string, limit = 50): { seq: number; kind: string; body: string; created_at: number; delivered_at: number | null; current: number }[] {
+    return this.db.prepare(`SELECT n.seq,n.kind,n.body,n.created_at,n.delivered_at,CASE WHEN ${CURRENT_NOTICE} THEN 1 ELSE 0 END current
+      FROM agent_notices n WHERE n.agent_id=? ORDER BY n.seq DESC LIMIT ?`).all(agentId, limit) as unknown as { seq: number; kind: string; body: string; created_at: number; delivered_at: number | null; current: number }[];
+  }
+  /** This login's delivery cursor (docs/mcp.md, "Replies and notices"): every pending notice up to it rode inline once. */
+  deliveredSeq(tokenHash: string): number {
+    return (this.db.prepare('SELECT notice_delivered_seq s FROM session_tokens WHERE token_hash=?').get(tokenHash) as { s: number } | undefined)?.s ?? 0;
+  }
+  /**
+   * Record that these notices reached this login inline: its delivery cursor moves to the highest, and each notice keeps the
+   * first time any login of its agent received it (the console Inbox's "Delivered"). Delivery confirms nothing: the
+   * notices stay pending, and counted, until session_ack.
+   */
+  markDelivered(tokenHash: string, notices: { seq: number; id?: string }[]): void {
+    if (!notices.length) return;
+    const now = Date.now(), top = Math.max(...notices.map((n) => n.seq));
+    tx(this.db, () => {
+      this.db.prepare('UPDATE session_tokens SET notice_delivered_seq=MAX(notice_delivered_seq, ?) WHERE token_hash=?').run(top, tokenHash);
+      const set = this.db.prepare('UPDATE agent_notices SET delivered_at=? WHERE id=? AND delivered_at IS NULL');
+      for (const n of notices) if (n.id) set.run(now, n.id);
+    });
+  }
+  /** Whether this login asked for compact replies at session_login. */
+  compact(tokenHash: string): boolean {
+    return !!(this.db.prepare('SELECT compact FROM session_tokens WHERE token_hash=?').get(tokenHash) as { compact: number } | undefined)?.compact;
+  }
+  /** Whether a stored notice is still current: not settled (always true for notices without a ref). */
   noticeCurrent(noticeId: string): boolean {
     return !!this.db.prepare(`SELECT 1 FROM agent_notices n WHERE n.id=? AND ${CURRENT_NOTICE}`).get(noticeId);
   }

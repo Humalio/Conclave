@@ -15,6 +15,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { buildApp, type App } from '../src/app.js';
 import type { Config } from '../src/config.js';
 import { BRIDGE_CHUNK } from '../src/channels/channels.js';
+import { testConfig, adminLogin } from './hub.js';
 
 const sys = { kind: 'system' as const, id: null };
 let app: App, base: string, cookie = '', csrf = '', appKey = '', vaultDir = '', pc = '';
@@ -50,18 +51,12 @@ beforeAll(async () => {
   const dir = mkdtempSync(join(tmpdir(), 'ahrv-'));
   vaultDir = join(dir, 'vault');
   mkdirSync(join(vaultDir, 'Docs'), { recursive: true });
-  const config: Config = {
-    dataDir: join(dir, 'data'), dbFile: join(dir, 'data', 't.db'), vaultDir, vaultAlias: 'vault', port: 0, host: '127.0.0.1', pepper: 'test-pepper',
-    publicUrl: 'http://hub.test', production: false, adminUsername: 'admin', adminPassword: 'correct horse battery', publicDir: join(process.cwd(), 'public'), logLevel: 'silent', allowedOrigins: [],
-    vaultScanSeconds: 0, vaultWatch: false,
-  };
+  const config: Config = testConfig(dir, { vaultDir, maintenanceSeconds: undefined });
   app = await buildApp(config);
   await app.store.ready;
   await app.fastify.listen({ port: 0, host: '127.0.0.1' });
   base = `http://127.0.0.1:${(app.fastify.server.address() as { port: number }).port}`;
-  const r = await fetch(`${base}/api/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ username: 'admin', password: 'correct horse battery' }) });
-  cookie = r.headers.get('set-cookie')!.split(';')[0]!;
-  csrf = ((await r.json()) as { csrf: string }).csrf;
+  ({ cookie, csrf } = await adminLogin(base));
   pc = (await api('POST', '/pcs', { name: 'pc' })).body.pc.id;
   appKey = app.keys.createAppKey({ machineId: pc, appName: 'claude-code', maxLiveSessions: 100 }, sys).secret;
 });
@@ -134,7 +129,7 @@ describe('2. direct messages to a member of a draft or paused polling team', () 
   /** Next work item that is not a notice (notices are acked on the way), or the status when there is none. */
   async function next(W: Call): Promise<any> {
     for (let i = 0; i < 30; i++) {
-      const r = (await W('work_next')).structuredContent;
+      const r = (await W('work_next', { wait_seconds: 0 })).structuredContent;
       if (r.status === 'item' && r.item.kind === 'notice') { await W('work_ack', { item_id: r.item.item_id }); continue; }
       return r;
     }

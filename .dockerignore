@@ -6,9 +6,12 @@ data
 vault
 local-vault
 rehearsal-handoffs.json
-deploy
+# deploy/ stays out of the build context except the client bundle the Dockerfile copies.
+deploy/*
+!deploy/client
 demo
 docs
-eval
+# eval/ ships the Early Echo story for demo mode (vault, story, runner); its reports stay out.
+eval/out
 **/node_modules
 **/dist

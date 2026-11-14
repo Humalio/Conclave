@@ -13,6 +13,7 @@ export const newId = {
   alert: () => `alr_${randomToken(10)}`,
   team: () => `team_${randomToken(10)}`,
   task: () => `task_${randomToken(10)}`,
+  turn: () => `trn_${randomToken(10)}`,
   item: () => `itm_${randomToken(10)}`,
   file: () => `fil_${randomToken(10)}`,
   revision: () => `rev_${randomToken(10)}`,

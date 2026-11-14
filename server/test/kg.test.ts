@@ -6,6 +6,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { buildApp, type App } from '../src/app.js';
 import type { Config } from '../src/config.js';
+import { testConfig, adminLogin } from './hub.js';
 
 const sys = { kind: 'system' as const, id: null };
 let app: App, base = '', appKey = '';
@@ -42,7 +43,7 @@ const update = async (s: S, path: string, content: string) => {
 /** work_next, confirming notices on the way. */
 const wn = async (s: S) => {
   for (let i = 0; i < 10; i++) {
-    const r = (await s.call('work_next')).structuredContent;
+    const r = (await s.call('work_next', { wait_seconds: 0 })).structuredContent;
     if (r.status === 'item' && r.item.kind === 'notice') { await s.call('work_ack', { item_id: r.item.item_id }); continue; }
     return r;
   }
@@ -55,18 +56,12 @@ beforeAll(async () => {
   const dir = mkdtempSync(join(tmpdir(), 'ahkg-'));
   const vaultDir = join(dir, 'vault');
   mkdirSync(vaultDir, { recursive: true });
-  const config: Config = {
-    dataDir: join(dir, 'data'), dbFile: join(dir, 'data', 't.db'), vaultDir, vaultAlias: 'vault', port: 0, host: '127.0.0.1', pepper: 'test-pepper',
-    publicUrl: 'http://hub.test', production: false, adminUsername: 'admin', adminPassword: 'correct horse battery', publicDir: join(process.cwd(), 'public'), logLevel: 'silent', allowedOrigins: [],
-    vaultScanSeconds: 0, vaultWatch: false, maintenanceSeconds: 0, graph: { debounceMs: 0 },
-  };
+  const config: Config = testConfig(dir, { vaultDir, graph: { debounceMs: 0 } });
   app = await buildApp(config);
   await app.store.ready;
   await app.fastify.listen({ port: 0, host: '127.0.0.1' });
   base = `http://127.0.0.1:${(app.fastify.server.address() as { port: number }).port}`;
-  const r = await fetch(`${base}/api/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ username: 'admin', password: 'correct horse battery' }) });
-  const cookie = r.headers.get('set-cookie')!.split(';')[0]!;
-  const csrf = ((await r.json()) as { csrf: string }).csrf;
+  const { cookie, csrf } = await adminLogin(base);
   const pcId = ((await (await fetch(`${base}/api/pcs`, { method: 'POST', headers: { 'content-type': 'application/json', cookie, 'x-csrf-token': csrf }, body: JSON.stringify({ name: 'pc' }) })).json()) as any).pc.id as string;
   appKey = app.keys.createAppKey({ machineId: pcId, appName: 'claude-code', maxLiveSessions: 100 }, sys).secret;
 });

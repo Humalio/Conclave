@@ -1,4 +1,4 @@
-/** Permission catalogue (SPECIFICATION §8) — the subset implemented in Phase 1. */
+/** Permission catalogue (SPECIFICATION §8). */
 
 /** Tools every logged-in session may use; they only reveal the session's own state. */
 export const BASE_TOOLS = ['session_logout', 'session_whoami', 'session_describe', 'session_ack', 'access_list', 'access_check', 'access_request', 'access_status', 'team_info', 'work_next', 'work_ack'] as const;
@@ -7,7 +7,9 @@ export const BASE_TOOLS = ['session_logout', 'session_whoami', 'session_describe
  * Default tools: allowed for every logged-in session without a `tool.invoke` grant, but an explicit deny rule on the
  * session key or the app key (for example `tool:feedback_*`) refuses them. Base tools cannot be denied.
  */
-export const DEFAULT_TOOLS = ['feedback_find', 'feedback_file', 'feedback_read', 'feedback_add', 'directives_list', 'directives_read', 'directive_ack', 'directives_report'] as const;
+export const DEFAULT_TOOLS = ['feedback_find', 'feedback_file', 'feedback_read', 'feedback_add', 'directives_list', 'directives_read', 'directives_report',
+  // Hardware (docs/hardware.md): the machine's team list is the authority, so no grant is needed; a deny on tool:hw_* refuses them.
+  'hw_list', 'hw_join', 'hw_report', 'hw_leave'] as const;
 
 /** Tools that need an explicit `tool.invoke` grant on `tool:<name>`. */
 export const GRANTED_TOOLS = ['file_list', 'file_read', 'file_search', 'file_stat',
@@ -22,7 +24,7 @@ export const ALL_ACTIONS = [
   'fs.list', 'fs.read', 'fs.search', 'fs.create', 'fs.update', 'fs.rename', 'fs.delete', 'fs.download', 'fs.history', 'fs.restore', 'fs.conflicts',
   'message.send', 'message.receive', 'channel.open', 'channel.accept', 'share.with',
   'room.join', 'room.post', 'room.read_history', 'room.invite', 'room.create',
-  'team.member', 'task.create', 'task.assign', 'task.claim', 'task.review', 'task.complete', 'task.block', 'team.report', 'team.complete', 'team.recruit', 'team.plan', 'team.ask',
+  'team.member', 'task.create', 'task.assign', 'task.claim', 'task.review', 'task.complete', 'task.block', 'team.report', 'team.complete', 'team.recruit', 'team.ask',
   'share.create', 'share.upload', 'share.read', 'share.comment', 'share.suggest', 'share.promote',
   'channel.use',
   'graph.read', 'graph.write', 'graph.review',
@@ -53,7 +55,7 @@ export function builtinTemplates(vaultAlias: string): TemplateDef[] {
     },
     {
       name: 'Reviewer',
-      description: 'Read the vault; review tasks (team tools arrive in Phase 3b)',
+      description: 'Read the vault; review tasks',
       rules: [
         { effect: 'allow', actions: ['tool.invoke'], resource: 'tool:file_*' },
         { effect: 'allow', actions: ['fs.list', 'fs.read', 'fs.search', 'fs.history'], resource: `path:${v}` },
@@ -62,7 +64,7 @@ export function builtinTemplates(vaultAlias: string): TemplateDef[] {
     },
     {
       name: 'Coordinator',
-      description: 'Read the vault; create and assign tasks (team tools arrive in Phase 3b)',
+      description: 'Read the vault; create and assign tasks',
       rules: [
         { effect: 'allow', actions: ['tool.invoke'], resource: 'tool:file_*' },
         { effect: 'allow', actions: ['fs.list', 'fs.read', 'fs.search'], resource: `path:${v}` },

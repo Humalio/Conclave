@@ -57,7 +57,7 @@ export class Maintenance {
    * - logins dead (expired or ended) for 30 days, with their read positions and cursor snapshots, except each agent's newest login,
    *   which a new login copies its notice and read positions from;
    * - notices older than 90 days, except each agent's newest (new notices number on from it);
-   * - history of tasks finished more than 180 days ago, impact candidates of old revisions, curator results and
+   * - history of tasks finished (done, cancelled or discarded) more than 180 days ago, impact candidates of old revisions, curator results and
    *   finished curator jobs after 30 days, and usage counters after 30 days.
    */
   prune(now = Date.now()): Record<string, number> {
@@ -74,7 +74,7 @@ export class Maintenance {
     out.notices = this.batched(`DELETE FROM agent_notices WHERE id IN (SELECT n.id FROM agent_notices n WHERE n.created_at<?
       AND n.seq < (SELECT MAX(m.seq) FROM agent_notices m WHERE m.agent_id=n.agent_id) LIMIT ?)`, days(90));
     out.task_events = this.batched(`DELETE FROM task_events WHERE id IN (SELECT e.id FROM task_events e JOIN tasks k ON k.id=e.task_id
-      WHERE k.status IN ('done','cancelled') AND k.updated_at<? LIMIT ?)`, days(180));
+      WHERE k.status IN ('done','cancelled','discarded') AND k.updated_at<? LIMIT ?)`, days(180));
     out.impact = this.batched(`DELETE FROM kg_impact WHERE rowid IN (SELECT i.rowid FROM kg_impact i WHERE i.created_at<?
       AND NOT EXISTS (SELECT 1 FROM files f WHERE f.id=i.file_id AND f.current_revision=i.revision) LIMIT ?)`, days(90));
     out.job_results = this.batched('DELETE FROM kg_job_results WHERE rowid IN (SELECT rowid FROM kg_job_results WHERE created_at<? LIMIT ?)', days(30));
@@ -96,7 +96,7 @@ export class Maintenance {
   private deleteShares(cutoff: number): number {
     let total = 0;
     for (;;) {
-      const ids = (this.db.prepare("SELECT id FROM shares WHERE status IN ('closed','revoked') AND updated_at<? LIMIT ?").all(cutoff, BATCH) as { id: string }[]).map((r) => r.id);
+      const ids = (this.db.prepare("SELECT id FROM shares WHERE status IN ('closed','revoked') AND (task_id IS NULL OR status='revoked') AND updated_at<? LIMIT ?").all(cutoff, BATCH) as { id: string }[]).map((r) => r.id);
       if (ids.length === 0) return total;
       tx(this.db, () => this.deleteShareRows(ids));
       total += ids.length;

@@ -25,4 +25,9 @@ export class RateLimit {
       ON CONFLICT(scope,metric,window_start) DO UPDATE SET count=count+1`).run(scope, metric, ws);
     this.db.prepare('DELETE FROM usage_counters WHERE metric=? AND window_start<=?').run(metric, now - this.windowMs);
   }
+
+  /** Forget a scope's failures: a proven password ends the count against it. */
+  clear(scope: string, metric: string): void {
+    this.db.prepare('DELETE FROM usage_counters WHERE scope=? AND metric=?').run(scope, metric);
+  }
 }

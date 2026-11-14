@@ -1,4 +1,4 @@
-/** Phase 5 admin routes: access requests, temporary grants, lockdown scopes, alert actions, shares/channels admin, audit export. */
+/** Admin routes for access requests, temporary grants, lockdown scopes, alert actions, shares and channels, and the audit export. */
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import type { Db } from '../db/db.js';
@@ -13,8 +13,10 @@ import type { Alerts } from '../safety/alerts.js';
 import type { Shares } from '../shares/shares.js';
 import type { Channels } from '../channels/channels.js';
 import type { Maintenance } from '../safety/retention.js';
+import type { Routing } from './routing.js';
+import { parseDuration, DEFAULT_GRANT_S, MAX_GRANT_S } from '../access/access.js';
 
-export interface Phase5Deps { db: Db; keys: Keys; audit: Audit; access: Access; lockdown: Lockdown; alerts: Alerts; shares: Shares; channels: Channels; maintenance: Maintenance }
+export interface Phase5Deps { routing?: Routing; db: Db; keys: Keys; audit: Audit; access: Access; lockdown: Lockdown; alerts: Alerts; shares: Shares; channels: Channels; maintenance: Maintenance }
 
 const dur = z.union([z.string().max(10), z.number()]).optional();
 const q = (req: FastifyRequest) => req.query as Record<string, string | undefined>;
@@ -37,16 +39,49 @@ export function registerPhase5(api: FastifyInstance, d: Phase5Deps, actor: (req:
   const label = (id: string | null) => (id ? keys.agent(id)?.label ?? id : null);
 
   // ───── access requests and temporary grants ─────
-  const reqView = (r: ReturnType<Access['get']> & object) => ({ ...r, agent_label: label(r.agent_id), justification_untrusted: true });
-  api.get('/api/requests', async (req) => ({ requests: access.list(q(req).status).map(reqView) }));
+  /** A request as the console shows it. A member gets no key id and no console user id: whoever decided shows as `operator`. */
+  const reqView = (req: FastifyRequest, r: ReturnType<Access['get']> & object) => ({
+    ...r, agent_label: label(r.agent_id), justification_untrusted: true,
+    ...(req.member ? { credential_id: null, decided_by: r.decided_by ? 'operator' : null } : {}),
+  });
+  /**
+   * Who decides a request (docs/multi-user.md §1.3): the deciders of its team, inside the team's ceiling, checked again at decision time
+   * with the grant the approval would create; anything else is the admin's. A member sees only requests routed to them.
+   */
+  const requestActor = (req: FastifyRequest, id: string, seconds?: number): Actor => {
+    const r = access.get(id);
+    if (!r) throw new KeyError('not_found', 'request not found');
+    if (!d.routing) return actor(req);
+    if (req.member) {
+      if (!d.routing.mayDecideRequest(req.member.userId, r, seconds)) {
+        // Visible (routed to them) but the approval asked for more than the ceiling: refuse plainly; anything else reads as unknown.
+        if (seconds !== undefined && d.routing.mayDecideRequest(req.member.userId, r)) throw new KeyError('not_decider', 'That duration is beyond the team ceiling: only an admin can approve it.');
+        throw new KeyError('not_found', 'request not found');
+      }
+      return d.routing.act(actor(req), req.member, r.team_id ?? null, 'request not found');
+    }
+    return d.routing.act(actor(req), undefined, r.team_id && d.routing.withinCeiling(r) ? r.team_id : null);
+  };
+  api.get('/api/requests', async (req) => {
+    if (!req.member || !d.routing) return { requests: access.list(q(req).status).map((r) => reqView(req, r)) };
+    // A member's list: requests of the teams they decide for (in SQL), inside the ceiling, filtered before the limit.
+    access.expirePending();
+    return { requests: d.routing.requestsFor(req.member.userId, q(req).status, 200).map((r) => reqView(req, r)) };
+  });
   api.post('/api/requests/:id/approve', async (req) => {
     const b = z.object({ duration: dur, narrowed_resource: z.string().max(1024).optional(), actions: z.array(z.string().max(60)).min(1).optional() }).parse(req.body ?? {});
-    const r = access.approve(idOf(req), b, actor(req));
-    return { request: reqView(r.request), grant_id: r.grant_id, not_after: r.not_after };
+    let who = actor(req);
+    if (req.member) {
+      const cur = access.get(idOf(req));
+      const seconds = parseDuration(b.duration) ?? Math.min(cur?.requested_duration_s ?? DEFAULT_GRANT_S, MAX_GRANT_S);
+      who = requestActor(req, idOf(req), seconds);
+    } else who = requestActor(req, idOf(req));
+    const r = access.approve(idOf(req), b, who);
+    return { request: reqView(req, r.request), grant_id: r.grant_id, not_after: r.not_after };
   });
   api.post('/api/requests/:id/deny', async (req) => {
     const b = z.object({ note: z.string().max(500).optional() }).parse(req.body ?? {});
-    return { request: reqView(access.deny(idOf(req), b.note ?? null, actor(req))) };
+    return { request: reqView(req, access.deny(idOf(req), b.note ?? null, requestActor(req, idOf(req)))) };
   });
   api.get('/api/grants', async (req) => ({ grants: access.grants(q(req).all === '1') }));
   api.delete('/api/grants/:id', async (req) => { access.revoke(idOf(req), actor(req)); return { ok: true }; });

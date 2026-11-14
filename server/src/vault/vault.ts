@@ -4,11 +4,11 @@
  * normalised, confined to the vault root (no "..", no symlink escape) and checked for
  * hidden folders before anything touches the disk.
  */
-import { promises as fs, realpathSync } from 'node:fs';
+import { promises as fs, realpathSync, existsSync } from 'node:fs';
 import { join, relative, sep, isAbsolute } from 'node:path';
 import { sha256Hex } from '../util/crypto.js';
 
-export const DEFAULT_HIDDEN = ['.obsidian', '.trash', '.git', '.stfolder', '.stversions', '.sync', '.syncthing', '.DS_Store', '.hub-tmp', 'shares'];
+export const DEFAULT_HIDDEN = ['.obsidian', '.trash', '.git', '.stfolder', '.stversions', '.sync', '.syncthing', '.DS_Store', '.hub-tmp', 'shares', '.conclave-demo'];
 export const MAX_READ_BYTES = 90_000;
 
 export class VaultError extends Error {
@@ -47,6 +47,9 @@ export class Vault {
   /** Hidden from agents: configured names, hub temp files, and names ending in a dot or space (unreachable by path, see normalise). */
   isHidden(segment: string): boolean { return this.hidden.includes(segment) || this.hiddenLower.has(segment.toLowerCase()) || segment.endsWith('.hub-tmp') || /[. ]$/.test(segment); }
   private readonly hiddenLower: Set<string>;
+
+  /** Whether a normalised vault path exists on disk (no symlink checks; for warnings only, never for access). */
+  exists(virtualPath: string): boolean { try { return existsSync(join(this.root, ...this.normalise(virtualPath).rel)); } catch { return false; } }
 
   /** Resolve to a real absolute path inside the root, following symlinks safely. */
   async resolve(rel: string[]): Promise<string> {
@@ -106,7 +109,7 @@ export class Vault {
     const needles = [`[[${name}]]`, `[[${name}|`];
     const out: string[] = [];
     let scanned = 0;
-    for await (const f of this.walk([])) {
+    for await (const f of this.walk([], 20000, { agent: true })) {
       if (!/.md$/i.test(f.rel[f.rel.length - 1]!) || f.size > 2 * 1024 * 1024) continue;
       if (++scanned > 2000) break;
       const vp = this.virtual(f.rel);
@@ -140,9 +143,17 @@ export class Vault {
     return { path: this.virtual(rel), revision: `sha256:${sha256Hex(buf)}`, size: buf.length, offset, content: slice.toString('utf8'), truncated: offset + slice.length < buf.length };
   }
 
-  /** Walk every visible file below rel (depth-first, bounded). */
-  async *walk(rel: string[], maxFiles = 20000): AsyncGenerator<{ rel: string[]; size: number }> {
+  /**
+   * Folders an agent's walk never enters (vault-relative segments, e.g. [["99 Conclave"]]): the hub's own folder, so
+   * file_search and linkedFrom neither read it nor spend their file budget on it. Set once at boot (app.ts).
+   */
+  agentSkip: string[][] = [];
+  private skipped(rel: string[]): boolean { return this.agentSkip.some((s) => s.length <= rel.length && s.every((x, i) => x === rel[i])); }
+
+  /** Walk every visible file below rel (depth-first, bounded). An agent's walk (`o.agent`) skips the agentSkip folders. */
+  async *walk(rel: string[], maxFiles = 20000, o: { agent?: boolean } = {}): AsyncGenerator<{ rel: string[]; size: number }> {
     let count = 0;
+    if (o.agent && this.skipped(rel)) return;
     const stack: string[][] = [rel];
     while (stack.length) {
       const cur = stack.pop()!;
@@ -151,6 +162,7 @@ export class Vault {
       for (const d of entries) {
         if (this.isHidden(d.name)) continue;
         const child = [...cur, d.name];
+        if (o.agent && this.skipped(child)) continue;
         let real: string;
         try { real = await this.resolve(child); } catch { continue; }
         const s = await fs.stat(real).catch(() => null);

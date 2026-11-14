@@ -7,6 +7,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { buildApp, type App } from '../src/app.js';
 import type { Config } from '../src/config.js';
 import { lookAlike, similarNames } from '../src/graph/kg2.js';
+import { testConfig, adminLogin } from './hub.js';
 
 const sys = { kind: 'system' as const, id: null };
 let app: App, base = '', appKey = '', cookie = '', csrf = '';
@@ -42,7 +43,7 @@ const update = async (s: S, path: string, content: string) => {
 };
 const wn = async (s: S) => {
   for (let i = 0; i < 10; i++) {
-    const r = (await s.call('work_next')).structuredContent;
+    const r = (await s.call('work_next', { wait_seconds: 0 })).structuredContent;
     if (r.status === 'item' && r.item.kind === 'notice') { await s.call('work_ack', { item_id: r.item.item_id }); continue; }
     return r;
   }
@@ -81,19 +82,12 @@ beforeAll(async () => {
   const dir = mkdtempSync(join(tmpdir(), 'ahkg2-'));
   const vaultDir = join(dir, 'vault');
   mkdirSync(vaultDir, { recursive: true });
-  const config: Config = {
-    dataDir: join(dir, 'data'), dbFile: join(dir, 'data', 't.db'), vaultDir, vaultAlias: 'vault', port: 0, host: '127.0.0.1', pepper: 'test-pepper',
-    publicUrl: 'http://hub.test', production: false, adminUsername: 'admin', adminPassword: 'correct horse battery', publicDir: join(process.cwd(), 'public'), logLevel: 'silent', allowedOrigins: [],
-    vaultScanSeconds: 0, vaultWatch: false, maintenanceSeconds: 0,
-    graph: { debounceMs: 0, verifyRate: 1, communityMinMs: 0, folderMinNotes: 2, mergeReviewClaims: 2, repMinChecked: 3 },
-  };
+  const config: Config = testConfig(dir, { vaultDir, graph: { debounceMs: 0, verifyRate: 1, communityMinMs: 0, folderMinNotes: 2, mergeReviewClaims: 2, repMinChecked: 3 } });
   app = await buildApp(config);
   await app.store.ready;
   await app.fastify.listen({ port: 0, host: '127.0.0.1' });
   base = `http://127.0.0.1:${(app.fastify.server.address() as { port: number }).port}`;
-  const r = await fetch(`${base}/api/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ username: 'admin', password: 'correct horse battery' }) });
-  cookie = r.headers.get('set-cookie')!.split(';')[0]!;
-  csrf = ((await r.json()) as { csrf: string }).csrf;
+  ({ cookie, csrf } = await adminLogin(base));
   const pcId = ((await (await fetch(`${base}/api/pcs`, { method: 'POST', headers: { 'content-type': 'application/json', cookie, 'x-csrf-token': csrf }, body: JSON.stringify({ name: 'pc' }) })).json()) as any).pc.id as string;
   appKey = app.keys.createAppKey({ machineId: pcId, appName: 'claude-code', maxLiveSessions: 100 }, sys).secret;
   app.graph.setTier('strong-*', 'strong');
@@ -169,7 +163,8 @@ describe('K3: impact_check, flags, notices, fixes only through a reviewed task',
     const task = app.db.prepare('SELECT * FROM tasks WHERE id=?').get(flags[0].task_id) as any;
     expect(task.reviewer_agent_id).toBe(R.id);                             // fixes go through a reviewer
     expect(task.claimable).toBe(1);
-    expect(task.title).toContain(flagId);
+    expect(task.title).toBe('Review knowledge flag: stale note'); // the kind in prose, no raw id
+    expect(task.description).toContain(flagId);
     expect(task.title).not.toContain('/vault/'); // team-visible metadata stays safe under changing app caps
   });
 
@@ -252,8 +247,9 @@ describe('K4: contradictions, verify_sample, reputation, entity_merge', () => {
     expect((await up('/vault/K4/T2.md', 't2', 'renews on 2028-09-09', '2028-09-09')).structuredContent.accepted_claims).toBe(1);
     const flags = (await W.call('graph_stale')).structuredContent.flags;
     expect(flags.map((f: any) => f.kind)).toEqual(['contradiction', 'contradiction']);
-    const task = app.db.prepare('SELECT reviewer_agent_id r FROM tasks WHERE id=?').get(flags[0].task_id) as any;
+    const task = app.db.prepare('SELECT reviewer_agent_id r, title FROM tasks WHERE id=?').get(flags[0].task_id) as any;
     expect(task.r).toBe(R.id);
+    expect(task.title).toBe('Review knowledge flag: contradiction');
     const claims = (await W.call('graph_query', { entity: 'Orbit Contract' })).structuredContent.claims;
     expect(claims.map((c: any) => c.status)).toEqual(['disputed', 'disputed']);
     // only a reviewer decides, and the producer cannot

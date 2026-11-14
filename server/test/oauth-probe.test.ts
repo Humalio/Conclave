@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildApp, type App } from '../src/app.js';
 import type { Config } from '../src/config.js';
+import { testConfig } from './hub.js';
 
 let app: App;
 
@@ -17,12 +18,7 @@ beforeAll(async () => {
   const dir = mkdtempSync(join(tmpdir(), 'ahoauth-'));
   const vaultDir = join(dir, 'vault');
   mkdirSync(vaultDir, { recursive: true });
-  const config: Config = {
-    dataDir: join(dir, 'data'), dbFile: join(dir, 'data', 't.db'), vaultDir, vaultAlias: 'vault', port: 0, host: '127.0.0.1', pepper: 'test-pepper',
-    publicUrl: 'http://hub.test', production: false, adminUsername: 'admin', adminPassword: 'correct horse battery', publicDir: join(process.cwd(), 'public'), logLevel: 'silent', allowedOrigins: [],
-    vaultScanSeconds: 0, vaultWatch: false, maintenanceSeconds: 0,
-    graph: { debounceMs: 0, verifyRate: 0 },
-  };
+  const config: Config = testConfig(dir, { vaultDir, graph: { debounceMs: 0, verifyRate: 0 } });
   app = await buildApp(config);
   await app.store.ready;
 });

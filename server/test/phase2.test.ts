@@ -7,6 +7,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { buildApp, type App } from '../src/app.js';
 import type { Config } from '../src/config.js';
+import { testConfig, adminLogin } from './hub.js';
 
 const sys = { kind: 'system' as const, id: null };
 let app: App, base: string, cookie = '', csrf = '';
@@ -29,16 +30,11 @@ beforeAll(async () => {
   const vaultDir = join(dir, 'vault');
   mkdirSync(join(vaultDir, 'Public'), { recursive: true });
   writeFileSync(join(vaultDir, 'Public', 'a.md'), 'hello');
-  const config: Config = {
-    dataDir: join(dir, 'data'), dbFile: join(dir, 'data', 't.db'), vaultDir, vaultAlias: 'vault', port: 0, host: '127.0.0.1', pepper: 'test-pepper',
-    publicUrl: 'http://hub.test', production: false, adminUsername: 'admin', adminPassword: 'correct horse battery', publicDir: join(process.cwd(), 'public'), logLevel: 'silent', allowedOrigins: [],
-  };
+  const config: Config = testConfig(dir, { vaultDir, vaultScanSeconds: undefined, vaultWatch: undefined, maintenanceSeconds: undefined });
   app = await buildApp(config);
   await app.fastify.listen({ port: 0, host: '127.0.0.1' });
   base = `http://127.0.0.1:${(app.fastify.server.address() as { port: number }).port}`;
-  const r = await fetch(`${base}/api/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ username: 'admin', password: 'correct horse battery' }) });
-  cookie = r.headers.get('set-cookie')!.split(';')[0]!;
-  csrf = ((await r.json()) as { csrf: string }).csrf;
+  ({ cookie, csrf } = await adminLogin(base));
 });
 afterAll(async () => { await app.close(); });
 
@@ -215,6 +211,15 @@ describe('links, whoami, sessions, topology, metrics, archive', () => {
     expect(s.find((x) => x.agent.id === B.agent.id)!.concurrent_use).toBe(false);
     expect(s.every((x) => x.live)).toBe(true);
 
+    // The PCs list names the agents that called through the PC's app keys (newest first) and when the PC was last seen.
+    const pc = ((await api('GET', '/pcs')).body.pcs as any[]).find((x) => x.id === pcId)!;
+    expect(pc.agents.map((x: any) => x.id)).toContain(A.agent.id);
+    expect(pc.agents.find((x: any) => x.id === A.agent.id)).toMatchObject({ label: 'writer', last_at: expect.any(Number) });
+    expect(pc.agents.map((x: any) => x.last_at)).toEqual([...pc.agents.map((x: any) => x.last_at)].sort((a: number, b: number) => b - a));
+    expect(pc.last_seen_at).toEqual(expect.any(Number));
+    const other = ((await api('GET', '/pcs')).body.pcs as any[]).find((x) => x.id !== pcId && x.app_keys === 0);
+    if (other) expect(other.agents).toEqual([]);
+
     const insp = (await api('GET', `/sessions/${A.agent.id}`)).body;
     expect(insp.session_keys).toHaveLength(1);
     expect(JSON.stringify(insp)).not.toContain(A.secret.split('_')[3]!);
@@ -235,7 +240,35 @@ describe('links, whoami, sessions, topology, metrics, archive', () => {
     expect(insp2.notices_acked_seq).toBe(dir.seq);
     expect(insp2.notices[0].kind).toBe('message');
     expect(insp2).toHaveProperty('playbooks');
-    expect(app.db.prepare("SELECT COUNT(*) n FROM audit_events WHERE action='agent.notice' AND target_id=?").get(A.agent.id)).toMatchObject({ n: 2 });
+    // The agent page's Inbox (SPEC-AGENT-01): each notice says whether it is still current. Opening the page, however
+    // often, confirms nothing: the pending message stays pending and still reaches the agent.
+    expect(insp2.notices[0]).toMatchObject({ kind: 'message', body: 'Ping me when the draft is ready.', current: 1, created_at: expect.any(Number) });
+    // Who sent it: the send's audit entry records the notice's seq, so the Inbox names the admin who sent it (You when
+    // that is the viewer). A notice sent by another admin names them; one with no recorded sender has sent_by null (Operator).
+    expect(insp2.viewer_id).toEqual(expect.stringMatching(/^adm_/));
+    expect(insp2.notices[0].sent_by).toMatchObject({ id: insp2.viewer_id, name: expect.any(String) });
+    expect(insp2.notices.find((x: any) => x.seq === dir.seq).sent_by.id).toBe(insp2.viewer_id);
+    app.db.prepare("INSERT INTO admin_users(id,username,password_hash,created_at) VALUES ('adm_other','alice','x',?)").run(Date.now());
+    app.keys.notify(A.agent.id, 'message', 'From Alice.');
+    const aliceSeq = (app.db.prepare('SELECT MAX(seq) s FROM agent_notices WHERE agent_id=?').get(A.agent.id) as { s: number }).s;
+    app.db.prepare("INSERT INTO audit_events(actor_kind,actor_id,actor_role,action,target_kind,target_id,details,created_at) VALUES ('admin','adm_other','admin','agent.notice','agent',?,?,?)")
+      .run(A.agent.id, JSON.stringify({ kind: 'message', seq: aliceSeq }), Date.now());
+    app.keys.notify(A.agent.id, 'message', 'Sent before senders were recorded.');
+    const named = (await api('GET', `/sessions/${A.agent.id}`)).body.notices as any[];
+    expect(named.find((x) => x.body === 'From Alice.').sent_by).toEqual({ id: 'adm_other', name: 'alice' });
+    expect(named.find((x) => x.body === 'Sent before senders were recorded.').sent_by).toBeNull();
+    // Hub notices carry no sender.
+    expect(named.filter((x) => !['directive', 'message'].includes(x.kind)).every((x) => x.sent_by === null)).toBe(true);
+    for (let i = 0; i < 3; i++) expect((await api('GET', `/sessions/${A.agent.id}`)).body.notices_acked_seq).toBe(dir.seq);
+    const still = (await call('session_whoami', { session_token: tokA })).structuredContent.notices as { body: string }[];
+    expect(still.map((x) => x.body)).toContain('Ping me when the draft is ready.');
+    // A notice the hub settled before delivery (its task is gone) is listed as not current, so the Inbox does not call it Pending.
+    app.keys.notify(A.agent.id, 'review_requested', 'Review the draft.', { kind: 'task', id: 'task_gone', state: 'in_review' });
+    const settled = (await api('GET', `/sessions/${A.agent.id}`)).body.notices[0];
+    expect(settled).toMatchObject({ kind: 'review_requested', current: 0 });
+    expect(settled.seq).toBeGreaterThan(dir.seq);
+    expect(app.db.prepare("SELECT COUNT(*) n FROM audit_events WHERE action='agent.notice' AND target_id=?").get(A.agent.id)).toMatchObject({ n: 3 });
+    expect(app.db.prepare("SELECT COUNT(*) n FROM audit_events WHERE action='agent.notice' AND target_id=? AND json_extract(details,'$.seq')=?").get(A.agent.id, dir.seq)).toMatchObject({ n: 1 });
 
     const topo = (await api('GET', '/topology')).body;
     const pcT = topo.pcs.find((x: any) => x.id === pcId);

@@ -20,14 +20,16 @@ export const MAX_EXTERNAL_BLOB = 2 * 1024 * 1024; // observed external text kept
 export const MAX_TRACK = 64 * 1024 * 1024;        // larger files are not tracked
 export const MAX_CONTENT = 2 * 1024 * 1024;       // content accepted in one write call
 
-export interface Who { agentId?: string | null; credentialId?: string | null; adminId?: string | null; recheck?: () => void; allowLarge?: boolean }
+/** A person writing in the console (docs/vault.md "People writing in the vault"): the author kind and the console user id. */
+export interface Person { kind: 'operator' | 'collaborator'; userId: string }
+export interface Who { agentId?: string | null; credentialId?: string | null; adminId?: string | null; person?: Person | null; recheck?: () => void; allowLarge?: boolean }
 export interface FileRow { id: string; path: string; current_revision: string | null; size: number | null; mtime: number | null; is_text: number; deleted_at: number | null; created_at: number; updated_at: number }
-export interface RevisionRow { id: string; file_id: string; revision: string; parent_revision: string | null; path_at_revision: string; op: string; origin: string; recovered: number; agent_id: string | null; credential_id: string | null; admin_id: string | null; size: number | null; created_at: number }
+export interface RevisionRow { id: string; file_id: string; revision: string; parent_revision: string | null; path_at_revision: string; op: string; origin: string; recovered: number; agent_id: string | null; credential_id: string | null; admin_id: string | null; author_kind: 'operator' | 'collaborator' | null; user_id: string | null; size: number | null; created_at: number }
 export interface ConflictRow { id: string; file_id: string; source: string; base_revision: string | null; revisions: string; conflict_path: string | null; status: string; resolution: string | null; agent_id: string | null; resolved_by_admin: string | null; created_at: number; resolved_at: number | null }
 /** Fired after a revision is committed (graph indexing hooks in here). `bytes` is null for deletes and renames. */
 export interface RevisionEvent { fileId: string; path: string; revision: string; op: string; origin: string; agentId: string | null; bytes: Buffer | null }
 export interface ScanResult { checked: number; changed: number; renamed: number }
-interface Intent { id: string; op: 'write' | 'delete' | 'rename'; path: string; new_path: string | null; base_revision: string | null; new_revision: string | null; tmp_name: string | null; agent_id: string | null; credential_id: string | null; revision_op: string | null; origin: string | null }
+interface Intent { id: string; op: 'write' | 'delete' | 'rename'; path: string; new_path: string | null; base_revision: string | null; new_revision: string | null; tmp_name: string | null; agent_id: string | null; credential_id: string | null; author_kind: string | null; user_id: string | null; revision_op: string | null; origin: string | null }
 
 type Origin = 'platform' | 'external_observed' | 'restore' | 'initial_scan';
 type RevOp = 'create' | 'update' | 'patch' | 'rename' | 'delete' | 'restore' | 'observe';
@@ -47,7 +49,34 @@ export class VaultStore {
   ready: Promise<void> = Promise.resolve();
   /** Listeners must not throw into the writer; errors are logged and swallowed. */
   readonly listeners: ((e: RevisionEvent) => void)[] = [];
-  private emit(e: RevisionEvent): void { for (const l of this.listeners) { try { l(e); } catch (err) { console.error('revision listener failed', err); } } }
+  /** Tell every listener (the graph); false if one threw, so the caller keeps the write intent for a retry. */
+  private emit(e: RevisionEvent): boolean {
+    let ok = true;
+    for (const l of this.listeners) { try { l(e); } catch (err) { ok = false; console.error('revision listener failed', err); } }
+    return ok;
+  }
+  /** Intents whose change a listener failed to take: retried at the next scan, and at the next start if the hub stops. */
+  private readonly unsent = new Set<string>();
+  /** The intent is done once every listener has seen its change; otherwise it stays for retryUnsent() or recover(). */
+  private settle(intent: string, told: boolean): void {
+    if (told) { this.db.prepare('DELETE FROM write_intents WHERE id=?').run(intent); this.unsent.delete(intent); }
+    else this.unsent.add(intent);
+  }
+  /** Tell the graph again about committed changes a listener failed to take, under the paths' locks. */
+  async retryUnsent(): Promise<number> {
+    let n = 0;
+    for (const id of [...this.unsent]) {
+      const it = this.db.prepare('SELECT * FROM write_intents WHERE id=?').get(id) as unknown as Intent | undefined;
+      if (!it) { this.unsent.delete(id); continue; }
+      await this.lockAll([it.path, ...(it.new_path ? [it.new_path] : [])], async () => {
+        if (!this.db.prepare('SELECT 1 x FROM write_intents WHERE id=?').get(id)) { this.unsent.delete(id); return; }
+        const told = await this.emitCommitted(it);
+        this.settle(id, told);
+        if (told) n++;
+      });
+    }
+    return n;
+  }
   private chains = new Map<string, Promise<unknown>>();
   private watcher: FSWatcher | null = null;
   private timer: NodeJS.Timeout | null = null;
@@ -112,7 +141,7 @@ export class VaultStore {
   /** Remove a blob's bytes (retention GC, after it removed the row in the same synchronous step). */
   deleteBlobSync(hash: string): void { rmSync(this.blobPath(hash), { force: true }); }
   private assertWritable(): void {
-    if (this.writesDisabled() || this.vaultDisabled()) throw new VaultError('lockdown', 'Vault writes are disabled by the administrator (lockdown).');
+    if (this.writesDisabled() || this.vaultDisabled()) throw new VaultError('lockdown', 'Vault writes are disabled by the administrator (lockdown).', { reason: this.writesDisabled() ? 'writes_paused' : 'vault_lockdown' });
   }
 
   // ───────────── blobs ─────────────
@@ -228,6 +257,20 @@ export class VaultStore {
 
   private static key(rel: string[]): string { return rel.join('/'); }
 
+  /** How agents see a person author: the kind and a label ("Operator", or the collaborator's display name), never the user id. */
+  personLabel(kind: string | null, userId: string | null): { kind: 'operator' | 'collaborator'; label: string } | null {
+    if (kind === 'operator') return { kind, label: 'Operator' };
+    if (kind !== 'collaborator') return null;
+    const u = userId ? this.db.prepare('SELECT display_name FROM admin_users WHERE id=?').get(userId) as { display_name: string | null } | undefined : undefined;
+    return { kind, label: `${u?.display_name || 'A collaborator'} (collaborator)` };
+  }
+
+  /** The tracked live file whose path differs from this one only by letter case, if any (any file system). */
+  aliasOf(path: string): string | null {
+    const r = this.db.prepare('SELECT path FROM files WHERE lower(path)=lower(?) AND path<>? AND deleted_at IS NULL AND current_revision IS NOT NULL LIMIT 1').get(path, path) as { path: string } | undefined;
+    return r?.path ?? null;
+  }
+
   // ───────────── DB helpers ─────────────
   fileByPath(path: string, includeDeleted = false): FileRow | undefined {
     return (includeDeleted
@@ -248,8 +291,8 @@ export class VaultStore {
 
   private insertRevision(f: { fileId: string; revision: string; parent: string | null; path: string; op: RevOp; origin: Origin; recovered?: boolean; who?: Who; size: number | null }): string {
     const id = newId.revision();
-    this.db.prepare('INSERT INTO file_revisions(id,file_id,revision,parent_revision,path_at_revision,op,origin,recovered,agent_id,credential_id,admin_id,size,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)')
-      .run(id, f.fileId, f.revision, f.parent, f.path, f.op, f.origin, f.recovered ? 1 : 0, f.who?.agentId ?? null, f.who?.credentialId ?? null, f.who?.adminId ?? null, f.size, Date.now());
+    this.db.prepare('INSERT INTO file_revisions(id,file_id,revision,parent_revision,path_at_revision,op,origin,recovered,agent_id,credential_id,admin_id,author_kind,user_id,size,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+      .run(id, f.fileId, f.revision, f.parent, f.path, f.op, f.origin, f.recovered ? 1 : 0, f.who?.agentId ?? null, f.who?.credentialId ?? null, f.who?.adminId ?? null, f.who?.person?.kind ?? null, f.who?.person?.userId ?? null, f.size, Date.now());
     return id;
   }
 
@@ -357,6 +400,8 @@ export class VaultStore {
           this.db.prepare('UPDATE files SET path=?, updated_at=? WHERE id=?').run(m.path, Date.now(), cur.id);
           this.insertRevision({ fileId: cur.id, revision: m.hash, parent: m.hash, path: m.path, op: 'rename', origin: 'external_observed', size: cur.size });
         });
+        const b = cur.is_text ? await this.getBlob(m.hash) : null;
+        this.emit({ fileId: cur.id, path: m.path, revision: m.hash, op: 'rename', origin: 'external_observed', agentId: null, bytes: b && isText(b) ? b : null });
         done.add(m.path); done.add(g.path); result.renamed++;
       });
     }
@@ -389,6 +434,8 @@ export class VaultStore {
   scan(): Promise<ScanResult> {
     if (this.scanning) return this.scanning;
     this.scanning = (async () => {
+      // First the committed changes the graph failed to take: a listener error must not lose a change.
+      await this.retryUnsent().catch((e) => console.error('graph retry failed', e));
       const paths = new Set<string>();
       for await (const f of this.vault.walk([])) paths.add(f.rel.join('/'));
       for (const r of this.db.prepare('SELECT path FROM files WHERE deleted_at IS NULL').all() as { path: string }[]) paths.add(r.path);
@@ -401,13 +448,17 @@ export class VaultStore {
   }
 
   // ───────────── crash recovery ─────────────
-  /** Roll forward or clean up write intents left by a crash (design/04 §3 "Crash safety"). */
+  /**
+   * Roll forward or clean up write intents left by a crash (design/04 §3 "Crash safety"), then tell the graph each touched
+   * file's committed state (docs/vault.md): an intent stays until the graph has seen its change, so a crash between the
+   * metadata and the graph update is finished here. Both steps are idempotent: running recovery again changes nothing.
+   */
   async recover(): Promise<{ recovered: number; cleaned: number }> {
     const out = { recovered: 0, cleaned: 0 };
     const intents = this.db.prepare('SELECT * FROM write_intents ORDER BY created_at').all() as unknown as Intent[];
     for (const it of intents) {
       const rel = it.path.split('/');
-      const who: Who = { agentId: it.agent_id, credentialId: it.credential_id };
+      const who: Who = { agentId: it.agent_id, credentialId: it.credential_id, person: it.author_kind && it.user_id ? { kind: it.author_kind as Person['kind'], userId: it.user_id } : null };
       await this.lockAll([it.path, ...(it.new_path ? [it.new_path] : [])], async () => {
         if (it.tmp_name) {
           try { await fs.unlink(join(this.vault.root, ...rel.slice(0, -1), it.tmp_name)); out.cleaned++; } catch { /* already gone */ }
@@ -437,7 +488,7 @@ export class VaultStore {
           }
         } else if (it.op === 'rename' && it.new_path) {
           const dst = await this.safeStat(it.new_path.split('/'));
-          if (!st && dst?.isFile() && row) {
+          if (!st && dst?.isFile() && row && row.current_revision === it.base_revision) {
             tx(this.db, () => {
               this.db.prepare('UPDATE files SET path=?, updated_at=? WHERE id=?').run(it.new_path, Date.now(), row.id);
               this.insertRevision({ fileId: row.id, revision: row.current_revision ?? 'tombstone', parent: row.current_revision, path: it.new_path!, op: 'rename', origin: 'platform', recovered: true, who, size: row.size });
@@ -445,15 +496,36 @@ export class VaultStore {
             out.recovered++;
           }
         }
-        this.db.prepare('DELETE FROM write_intents WHERE id=?').run(it.id);
+        // Kept when the graph failed to take it again: the next start (or scan) tries once more.
+        this.settle(it.id, await this.emitCommitted(it));
       });
     }
     return out;
   }
 
+  /**
+   * The committed state of an intent's file, as the graph must see it: its current revision and path, or a tombstone.
+   * For a rename the renamed file is looked for where it went first, and at its old path only while it still holds the
+   * content that was renamed: a new file made at the old path since is not the renamed one. Returns whether the graph
+   * took it (true when there is no file to report).
+   */
+  private async emitCommitted(it: Intent): Promise<boolean> {
+    const at = (p: string | null, dead = false) => (p ? this.fileByPath(p, dead) : undefined);
+    const same = (f: ReturnType<VaultStore['fileByPath']>) => (f && f.current_revision === it.base_revision ? f : undefined);
+    const f = it.op === 'rename'
+      ? same(at(it.new_path)) ?? same(at(it.path)) ?? at(it.new_path) ?? at(it.new_path, true) ?? same(at(it.path, true))
+      : at(it.path) ?? at(it.new_path) ?? at(it.path, true) ?? at(it.new_path, true);
+    if (!f) return true;
+    const live = f.deleted_at === null && !!f.current_revision;
+    const bytes = live && f.is_text ? await this.getBlob(f.current_revision!) : null;
+    return this.emit({ fileId: f.id, path: f.path, revision: live ? f.current_revision! : 'tombstone', op: 'recover', origin: it.origin ?? 'platform', agentId: it.agent_id, bytes: bytes && isText(bytes) ? bytes : null });
+  }
+
   // ───────────── platform writes ─────────────
-  private conflict(fileId: string | null, current: string, base: string, extra?: { revision: string; role: string }[], exists = false): VaultError {
-    const id = fileId && !exists ? this.recordConflict(fileId, 'platform_cas', base, [{ revision: current, role: 'current' }, { revision: base, role: 'base' }, ...(extra ?? [])]) : null;
+  /** A stale base. Recorded as a platform_cas conflict for agents; a person's console save records none, because the
+   *  editor itself shows the change and asks (docs/filesystem-consistency.md). */
+  private conflict(fileId: string | null, current: string, base: string, extra?: { revision: string; role: string }[], exists = false, who?: Who): VaultError {
+    const id = fileId && !exists && !who?.person ? this.recordConflict(fileId, 'platform_cas', base, [{ revision: current, role: 'current' }, { revision: base, role: 'base' }, ...(extra ?? [])]) : null;
     return new VaultError('conflict', exists ? 'The file already exists.' : 'The file changed since base_revision. Re-read it and apply your change to current_revision.',
       { current_revision: current, base_revision: base, ...(id ? { conflict_id: id } : {}) });
   }
@@ -478,7 +550,7 @@ export class VaultStore {
       const file = this.fileByPath(path, true);
       if (op === 'create') {
         if (cur !== 'absent' || await this.clash(abs)) throw this.conflict(file?.id ?? null, cur, base, undefined, true);
-      } else if (cur !== base) throw this.conflict(file?.id ?? null, cur, base);
+      } else if (cur !== base) throw this.conflict(file?.id ?? null, cur, base, undefined, false, who);
       const newHash = sha(bytes);
       if (curBytes && op !== 'create' && op !== 'restore' && !isText(curBytes)) throw new VaultError('binary', 'the existing file is binary; it cannot be replaced with text');
       if (curBytes && newHash === cur && op !== 'create') return { revision: cur, previous_revision: cur, path };
@@ -488,8 +560,8 @@ export class VaultStore {
       const tmpName = `.${basename(abs)}.${newId.intent()}.hub-tmp`;
       const tmp = join(dirname(abs), tmpName);
       const intent = newId.intent();
-      this.db.prepare('INSERT INTO write_intents(id,op,path,base_revision,new_revision,tmp_name,agent_id,credential_id,revision_op,origin,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)')
-        .run(intent, 'write', path, cur, newHash, tmpName, who.agentId ?? null, who.credentialId ?? null, op, op === 'restore' ? 'restore' : 'platform', Date.now());
+      this.db.prepare('INSERT INTO write_intents(id,op,path,base_revision,new_revision,tmp_name,agent_id,credential_id,author_kind,user_id,revision_op,origin,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)')
+        .run(intent, 'write', path, cur, newHash, tmpName, who.agentId ?? null, who.credentialId ?? null, who.person?.kind ?? null, who.person?.userId ?? null, op, op === 'restore' ? 'restore' : 'platform', Date.now());
       const abort = async () => { await fs.unlink(tmp).catch(() => undefined); this.db.prepare('DELETE FROM write_intents WHERE id=?').run(intent); };
       try {
         await this.hooks.beforeTmp?.(abs);
@@ -520,10 +592,10 @@ export class VaultStore {
       const fid = tx(this.db, () => {
         const f = this.upsertFile(path, newHash, bytes.length, Math.round(nst.mtimeMs), isText(bytes));
         this.insertRevision({ fileId: f.id, revision: newHash, parent: cur === 'absent' ? null : cur, path, op, origin: op === 'restore' ? 'restore' : 'platform', who, size: bytes.length });
-        this.db.prepare('DELETE FROM write_intents WHERE id=?').run(intent);
         return f.id;
       });
-      this.emit({ fileId: fid, path, revision: newHash, op, origin: op === 'restore' ? 'restore' : 'platform', agentId: who.agentId ?? null, bytes: isText(bytes) ? bytes : null });
+      // The intent goes only once the graph has seen the change: a crash in between is finished by recovery.
+      this.settle(intent, this.emit({ fileId: fid, path, revision: newHash, op, origin: op === 'restore' ? 'restore' : 'platform', agentId: who.agentId ?? null, bytes: isText(bytes) ? bytes : null }));
       return { revision: newHash, previous_revision: cur === 'absent' ? null : cur, path };
     });
   }
@@ -542,10 +614,10 @@ export class VaultStore {
       const cur = sha(bytes);
       await this.observeLocked(rel, { bytes, st });
       const file = this.fileByPath(path)!;
-      if (cur !== base) throw this.conflict(file.id, cur, base);
+      if (cur !== base) throw this.conflict(file.id, cur, base, undefined, false, who);
       await this.putBlob(bytes);
       const intent = newId.intent();
-      this.db.prepare('INSERT INTO write_intents(id,op,path,base_revision,agent_id,credential_id,created_at) VALUES (?,?,?,?,?,?,?)').run(intent, 'delete', path, cur, who.agentId ?? null, who.credentialId ?? null, Date.now());
+      this.db.prepare('INSERT INTO write_intents(id,op,path,base_revision,agent_id,credential_id,author_kind,user_id,created_at) VALUES (?,?,?,?,?,?,?,?,?)').run(intent, 'delete', path, cur, who.agentId ?? null, who.credentialId ?? null, who.person?.kind ?? null, who.person?.userId ?? null, Date.now());
       try {
         const again = await fs.readFile(abs).catch(() => null);
         if (!again || sha(again) !== cur) {
@@ -558,9 +630,8 @@ export class VaultStore {
       tx(this.db, () => {
         this.insertRevision({ fileId: file.id, revision: 'tombstone', parent: cur, path, op: 'delete', origin: 'platform', who, size: null });
         this.upsertFile(path, null, null, null, false);
-        this.db.prepare('DELETE FROM write_intents WHERE id=?').run(intent);
       });
-      this.emit({ fileId: file.id, path, revision: 'tombstone', op: 'delete', origin: 'platform', agentId: who.agentId ?? null, bytes: null });
+      this.settle(intent, this.emit({ fileId: file.id, path, revision: 'tombstone', op: 'delete', origin: 'platform', agentId: who.agentId ?? null, bytes: null }));
       return { previous_revision: cur };
     });
   }
@@ -579,7 +650,7 @@ export class VaultStore {
       const cur = sha(bytes);
       await this.observeLocked(from, { bytes, st: src.st });
       const file = this.fileByPath(a)!;
-      if (cur !== base) throw this.conflict(file.id, cur, base);
+      if (cur !== base) throw this.conflict(file.id, cur, base, undefined, false, who);
       const dst = await this.safeAbs(to);
       const caseOnly = dirname(src.abs) === dirname(dst.abs) && basename(src.abs).toLowerCase() === basename(dst.abs).toLowerCase();
       // On a case-insensitive file system the destination of a case-only rename is the source itself; observing it
@@ -591,7 +662,7 @@ export class VaultStore {
       await this.putBlob(bytes);
       await fs.mkdir(dirname(dst.abs), { recursive: true });
       const intent = newId.intent();
-      this.db.prepare('INSERT INTO write_intents(id,op,path,new_path,base_revision,agent_id,credential_id,created_at) VALUES (?,?,?,?,?,?,?,?)').run(intent, 'rename', a, b, cur, who.agentId ?? null, who.credentialId ?? null, Date.now());
+      this.db.prepare('INSERT INTO write_intents(id,op,path,new_path,base_revision,agent_id,credential_id,author_kind,user_id,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)').run(intent, 'rename', a, b, cur, who.agentId ?? null, who.credentialId ?? null, who.person?.kind ?? null, who.person?.userId ?? null, Date.now());
       try {
         const again = await fs.readFile(src.abs).catch(() => null);
         if (!again || sha(again) !== cur) {
@@ -607,8 +678,8 @@ export class VaultStore {
         if (stale && stale.id !== file.id && stale.deleted_at !== null) this.db.prepare("UPDATE files SET path=path || '#' || id WHERE id=?").run(stale.id); // keep tombstoned history, free the path
         this.db.prepare('UPDATE files SET path=?, mtime=?, updated_at=? WHERE id=?').run(b, Math.round(nst.mtimeMs), Date.now(), file.id);
         this.insertRevision({ fileId: file.id, revision: cur, parent: cur, path: b, op: 'rename', origin: 'platform', who, size: bytes.length });
-        this.db.prepare('DELETE FROM write_intents WHERE id=?').run(intent);
       });
+      this.settle(intent, this.emit({ fileId: file.id, path: b, revision: cur, op: 'rename', origin: 'platform', agentId: who.agentId ?? null, bytes: isText(bytes) ? bytes : null }));
       return { revision: cur, path: b };
     });
   }

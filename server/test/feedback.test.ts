@@ -8,6 +8,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { buildApp, type App } from '../src/app.js';
 import type { Config } from '../src/config.js';
 import { HUB_VERSION } from '../src/version.js';
+import { testConfig, adminLogin } from './hub.js';
 
 const sys = { kind: 'system' as const, id: null };
 let app: App, base = '', cookie = '', csrf = '', appKey = '', pcId = '', capKey = '';
@@ -59,18 +60,12 @@ beforeAll(async () => {
   const vaultDir = join(dir, 'vault');
   mkdirSync(join(vaultDir, 'Projects/Alpha'), { recursive: true });
   writeFileSync(join(vaultDir, 'Projects/Alpha/plan.md'), 'Alpha plan');
-  const config: Config = {
-    dataDir: join(dir, 'data'), dbFile: join(dir, 'data', 't.db'), vaultDir, vaultAlias: 'vault', port: 0, host: '127.0.0.1', pepper: 'test-pepper',
-    publicUrl: 'http://hub.test', production: false, adminUsername: 'admin', adminPassword: 'correct horse battery', publicDir: join(process.cwd(), 'public'), logLevel: 'silent', allowedOrigins: [],
-    vaultScanSeconds: 0, vaultWatch: false, maintenanceSeconds: 0,
-  };
+  const config: Config = testConfig(dir, { vaultDir });
   app = await buildApp(config);
   await app.store.ready;
   await app.fastify.listen({ port: 0, host: '127.0.0.1' });
   base = `http://127.0.0.1:${(app.fastify.server.address() as { port: number }).port}`;
-  const r = await fetch(`${base}/api/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ username: 'admin', password: 'correct horse battery' }) });
-  cookie = r.headers.get('set-cookie')!.split(';')[0]!;
-  csrf = ((await r.json()) as { csrf: string }).csrf;
+  ({ cookie, csrf } = await adminLogin(base));
   pcId = (await api('POST', '/pcs', { name: 'pc' })).body.pc.id;
   appKey = app.keys.createAppKey({ machineId: pcId, appName: 'claude-code', maxLiveSessions: 200 }, sys).secret;
   capKey = app.keys.createAppKey({ machineId: pcId, appName: 'capped', maxLiveSessions: 50 }, sys).secret;

@@ -54,15 +54,20 @@ export class Alerts {
     if (cls) this.volume(cred, c.agentId, cls, now);
   }
 
-  /** A path argument that tries to leave the vault or reaches a hidden folder. */
+  /**
+   * A path argument that tries to leave the vault or reaches a hidden folder. Only arguments named as paths count
+   * (`path`, `paths`, `from`, `to`, `folder`, `path_prefix`…): prose such as a Blueprint body often holds "a/b." and
+   * its sentence-final dot reads as a hidden segment.
+   */
   private forbiddenPath(args: Record<string, unknown>): boolean {
-    const bad = (v: unknown, depth = 0): boolean => {
-      if (typeof v === 'string') return v.includes('/') && v.length < 1100 && v.split(/[\\/]/).some((seg) => seg === '..' || (seg.length > 1 && this.vault.isHidden(seg)));
-      if (depth < 3 && Array.isArray(v)) return v.slice(0, 20).some((x) => bad(x, depth + 1));
-      if (depth < 3 && v && typeof v === 'object') return Object.values(v).slice(0, 20).some((x) => bad(x, depth + 1));
+    const pathy = (k: string) => /^(?:.*_)?(?:path|paths|folder|folders|dir|from|to|prefix|target|dest)$/.test(k);
+    const bad = (v: unknown, isPath: boolean, depth = 0): boolean => {
+      if (typeof v === 'string') return isPath && v.includes('/') && v.length < 1100 && v.split(/[\\/]/).some((seg) => seg === '..' || (seg.length > 1 && this.vault.isHidden(seg)));
+      if (depth < 3 && Array.isArray(v)) return v.slice(0, 20).some((x) => bad(x, isPath, depth + 1));
+      if (depth < 3 && v && typeof v === 'object') return Object.entries(v).slice(0, 20).some(([k, x]) => bad(x, pathy(k), depth + 1));
       return false;
     };
-    return Object.entries(args).some(([k, v]) => k !== 'session_token' && k !== 'session_key' && bad(v));
+    return Object.entries(args).some(([k, v]) => bad(v, pathy(k)));
   }
 
   private volume(cred: string, agentId: string | null, cls: string, now: number): void {

@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { buildApp, type App } from '../src/app.js';
 import type { Who } from '../src/teams/teams.js';
+import { testConfig } from './hub.js';
 
 const sys = { kind: 'system' as const, id: null };
 let app: App, curator: Who, other: Who, writer: Who, teamId: string;
@@ -28,7 +29,7 @@ async function next(w = curator): Promise<any> {
 beforeEach(async () => {
   const dir = mkdtempSync(join(tmpdir(), 'ah-queue-regression-')), vaultDir = join(dir, 'vault');
   mkdirSync(vaultDir);
-  app = await buildApp({ dataDir: join(dir, 'data'), dbFile: join(dir, 'data', 'test.db'), vaultDir, vaultAlias: 'vault', host: '127.0.0.1', port: 0, pepper: 'test', publicUrl: 'http://test', production: false, adminUsername: 'admin', adminPassword: 'fixture-password', publicDir: join(process.cwd(), 'public'), logLevel: 'silent', allowedOrigins: [], vaultScanSeconds: 0, vaultWatch: false, maintenanceSeconds: 0, graph: { debounceMs: 0, verifyRate: 0 } });
+  app = await buildApp(testConfig(dir, { dbFile: join(dir, 'data', 'test.db'), vaultDir, pepper: 'test', publicUrl: 'http://test', adminPassword: 'fixture-password', graph: { debounceMs: 0, verifyRate: 0 } }));
   await app.store.ready;
   curator = agent('curator'); other = agent('other'); writer = agent('writer');
   const coord = agent('coordinator');
@@ -112,7 +113,8 @@ describe('knowledge queue regression coverage', () => {
   it('pages past more than 100 unreadable jobs to find eligible work', async () => {
     const scoped = agent('public curator', '/vault/Public/**');
     app.teams.addMember(teamId, { agent_id: scoped.agentId, role: 'curator' }, sys);
-    for (let i = 0; i < 101; i++) await write(`Private/${i}.md`);
+    // 101 separate notes, one more than a page of the queue; the writes are independent, so they run side by side.
+    await Promise.all(Array.from({ length: 101 }, (_, i) => write(`Private/${i}.md`)));
     await write('Public/Ready.md');
     expect((await next(scoped)).item.input.path).toBe('/vault/Public/Ready.md');
   });

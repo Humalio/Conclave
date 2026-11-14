@@ -1,5 +1,7 @@
 /** Shares (SPECIFICATION F6): versioned copies of files from an agent's PC, with feedback that follows the code. */
+import { NOT_ALLOWED } from '../policy/engine.js';
 import type { Db } from '../db/db.js';
+import { tx } from '../db/db.js';
 import type { Keys } from '../keys/keys.js';
 import { KeyError } from '../keys/keys.js';
 import type { Messaging } from '../messaging/messaging.js';
@@ -11,7 +13,7 @@ import { diffLines, unifiedDiff } from '../vault/diff.js';
 import { newId } from '../util/ids.js';
 import { safeRel } from '../util/frames.js';
 
-export interface ShareRow { id: string; author_agent_id: string; author_credential_id: string; name: string; description: string | null; status: string; created_at: number; updated_at: number }
+export interface ShareRow { id: string; author_agent_id: string; author_credential_id: string; name: string; description: string | null; status: string; created_at: number; updated_at: number; task_id?: string | null; task_role?: string | null }
 export interface Entry { path: string; blob_hash: string; size: number; is_text: boolean; stored: boolean }
 export interface VersionRow { share_id: string; version: number; note: string | null; manifest: string; total_bytes: number; upload_kind: string; status: string; created_at: number }
 export interface FeedbackRow {
@@ -20,11 +22,15 @@ export interface FeedbackRow {
 }
 export interface CommitOpts { note?: string | null; final: boolean; fromVersion?: number; kind: 'inline' | 'channel' | 'bridge' }
 export const MAX_FILES = 5000;
-const gone = () => new KeyError('denied', 'Not allowed, or does not exist.');
+const gone = () => new KeyError('denied', NOT_ALLOWED);
 const err = (c: string, m: string) => new KeyError(c, m);
 
 export class Shares {
   maxShareBytes = 1024 * 1024 * 1024;
+  /** Set by TaskAttachments: the task rule for a task-bound share (its readers follow the task, not a recipient list). */
+  taskReader?: (sh: ShareRow, agentId: string) => boolean;
+  /** Set by TaskAttachments: a task's title, for the refusal that names it. */
+  taskTitle?: (taskId: string) => string;
   bytesPerHour = 1024 * 1024 * 1024;
   constructor(private readonly db: Db, private readonly keys: Keys, private readonly msgr: Messaging, private readonly teams: Teams, private readonly store: VaultStore) {
     teams.itemKinds.set('share_feedback', (ref) => {
@@ -50,6 +56,8 @@ export class Shares {
 
   /** Is this agent on the recipient list, and still allowed to receive from the author? Checked on every read. */
   canAccess(sh: ShareRow, agentId: string): boolean {
+    // A task-bound share answers to the task rule alone: not its author, its recipients or a review (taskAttachments.ts).
+    if (sh.task_id) return this.taskReader?.(sh, agentId) ?? false;
     if (sh.author_agent_id === agentId) return true;
     if (sh.status !== 'open') return false;
     const me = this.keys.agent(agentId);
@@ -58,21 +66,51 @@ export class Shares {
       const k = t.slice(0, t.indexOf(':')), id = t.slice(t.indexOf(':') + 1);
       return k === 'agent' ? id === agentId : k === 'team' ? !!this.teams.roleOf(id, agentId) : k === 'room' ? this.msgr.isMember(id, agentId) : false;
     });
-    return listed && this.msgr.agentAllows(sh.author_agent_id, 'message.send', `agent:${agentId}`) && this.msgr.agentAllows(agentId, 'message.receive', `agent:${sh.author_agent_id}`);
+    if (listed && this.msgr.agentAllows(sh.author_agent_id, 'message.send', `agent:${agentId}`) && this.msgr.agentAllows(agentId, 'message.receive', `agent:${sh.author_agent_id}`)) return true;
+    // The review is the grant (F-19): the task's reviewer reads and comments on the submitted share while it is in review,
+    // whether or not the author listed them or the team grants messaging.
+    return this.reviewing(sh.id, agentId);
+  }
+  /** The reviewer of a task in review that names this share reads and comments on it while the review lasts (F-19). */
+  reviewing(shareId: string, agentId: string): boolean {
+    return !!this.db.prepare("SELECT 1 FROM tasks WHERE share_id=? AND reviewer_agent_id=? AND status='in_review'").get(shareId, agentId);
+  }
+  /**
+   * task_submit names a share (F-19): it must exist, be open and readable by the submitter, at a published version (the
+   * latest when none is named). Returns that version.
+   */
+  checkSubmitted(agentId: string, shareId: string, version?: number): number {
+    const sh = this.share(shareId);
+    if (!sh || !this.canAccess(sh, agentId)) throw new KeyError('invalid_argument', `Share ${shareId} is not one you can submit: it does not exist, is closed, or you cannot read it.`);
+    if (sh.status !== 'open') throw new KeyError('invalid_argument', `Share ${shareId} is ${sh.status}.`);
+    if (version === undefined) {
+      const v = this.latest(sh.id);
+      if (!v) throw new KeyError('invalid_argument', `Share ${shareId} has no published version yet: publish it with share_upload, then submit.`);
+      return v;
+    }
+    const v = this.version(sh.id, version);
+    if (!v || v.status !== 'published') throw new KeyError('invalid_argument', `Share ${shareId} has no published version ${version} (latest: ${this.latest(sh.id) || 'none'}).`);
+    return version;
   }
   mustAccess(id: string, agentId: string): ShareRow {
     const sh = this.share(id);
     if (!sh || !this.canAccess(sh, agentId)) throw gone();
     return sh;
   }
+  /** The refusal for a share tool that changes or comments on a task-bound share: it changes only through its task. */
+  taskBound(sh: ShareRow): KeyError {
+    return new KeyError('invalid_state', `This share belongs to task ${this.taskTitle?.(sh.task_id!) ?? sh.task_id}. Change it through the task, and comment in the review.`);
+  }
   mustAuthor(id: string, agentId: string): ShareRow {
     const sh = this.share(id);
+    // Only the hub writes a task-bound share: one of the task's readers is told so, anyone else reads it as unknown.
+    if (sh?.task_id) throw this.canAccess(sh, agentId) ? this.taskBound(sh) : gone();
     if (!sh || sh.author_agent_id !== agentId) throw gone();
     return sh;
   }
   listFor(agentId: string, mineOnly: boolean): ShareRow[] {
     const all = this.db.prepare("SELECT * FROM shares WHERE status='open' OR author_agent_id=? ORDER BY created_at DESC LIMIT 500").all(agentId) as unknown as ShareRow[];
-    return all.filter((s) => (mineOnly ? s.author_agent_id === agentId : this.canAccess(s, agentId)));
+    return all.filter((s) => !s.task_id && (mineOnly ? s.author_agent_id === agentId : this.canAccess(s, agentId)));
   }
 
   create(author: { agentId: string; credId: string }, name: string, description: string | null, targets: string[]): ShareRow {
@@ -84,15 +122,26 @@ export class Shares {
   close(id: string, status: 'closed' | 'revoked' = 'closed'): void { this.db.prepare('UPDATE shares SET status=?, updated_at=? WHERE id=?').run(status, Date.now(), id); }
 
   /** Count upload bytes against the key's hourly quota. */
-  charge(credId: string, bytes: number): void {
+  /** Charge the key's hourly share upload quota. Returns the refund, for an upload that then publishes nothing. */
+  charge(credId: string, bytes: number): () => void {
     const w = Math.floor(Date.now() / 3600_000) * 3600_000, scope = `key:${credId}`;
     const used = (this.db.prepare("SELECT count c FROM usage_counters WHERE scope=? AND metric='share_bytes' AND window_start=?").get(scope, w) as { c: number } | undefined)?.c ?? 0;
     if (used + bytes > this.bytesPerHour) throw err('rate_limited', `This key's share upload quota (${this.bytesPerHour} bytes per hour) is used up.`);
     this.db.prepare("INSERT INTO usage_counters(scope,metric,window_start,count) VALUES (?,'share_bytes',?,?) ON CONFLICT(scope,metric,window_start) DO UPDATE SET count=count+excluded.count").run(scope, w, bytes);
+    let undone = false;
+    return () => {
+      if (undone) return; undone = true;
+      this.db.prepare("UPDATE usage_counters SET count=MAX(0, count-?) WHERE scope=? AND metric='share_bytes' AND window_start=?").run(bytes, scope, w);
+    };
   }
 
   // ───── versions ─────
-  async addFiles(shareId: string, files: { path: string; bytes: Buffer }[], o: CommitOpts): Promise<{ version: number; status: string; files: number; total_bytes: number }> {
+  /**
+   * Stage the files' blobs, then commit them. `recheck` runs after the blobs are staged and just before the version is
+   * written (nothing awaits in between), so an authority or share change during staging still stops the publication: it
+   * throws to refuse, and nothing is committed.
+   */
+  async addFiles(shareId: string, files: { path: string; bytes: Buffer }[], o: CommitOpts, recheck?: () => void): Promise<{ version: number; status: string; files: number; total_bytes: number }> {
     const entries: Entry[] = [];
     for (const f of files) {
       const p = safeRel(f.path);
@@ -100,10 +149,18 @@ export class Shares {
       const r = await this.store.putBlob(f.bytes, MAX_BLOB);
       entries.push({ path: p, blob_hash: r.hash, size: f.bytes.length, is_text: isText(f.bytes), stored: r.stored });
     }
+    recheck?.();
     return this.commitEntries(shareId, entries, o);
   }
+  /**
+   * Write a version. Inline uploads build the share's draft and `final` publishes it. A channel or bridge upload publishes
+   * only its own snapshot (its entries, on `fromVersion` if given): an open draft is neither merged into it nor touched,
+   * and moves to the next version number so the published versions stay in order.
+   */
   commitEntries(shareId: string, entries: Entry[], o: CommitOpts): { version: number; status: string; files: number; total_bytes: number } {
-    const draft = this.db.prepare("SELECT * FROM share_versions WHERE share_id=? AND status='draft'").get(shareId) as unknown as VersionRow | undefined;
+    const found = this.db.prepare("SELECT * FROM share_versions WHERE share_id=? AND status='draft'").get(shareId) as unknown as VersionRow | undefined;
+    const snapshot = o.kind !== 'inline';
+    const draft = snapshot ? undefined : found;
     const map = new Map<string, Entry>();
     if (draft) for (const e of this.manifestOf(draft)) map.set(e.path, e);
     else if (o.fromVersion) {
@@ -116,15 +173,21 @@ export class Shares {
     const list = [...map.values()].sort((a, b) => (a.path < b.path ? -1 : 1));
     const total = list.reduce((n, e) => n + e.size, 0);
     if (total > this.maxShareBytes) throw err('too_large', `A share version is at most ${this.maxShareBytes} bytes.`);
-    const now = Date.now(), status = o.final ? 'published' : 'draft';
-    let version: number;
-    if (draft) {
-      version = draft.version;
-      this.db.prepare('UPDATE share_versions SET manifest=?, total_bytes=?, status=?, note=COALESCE(?,note) WHERE share_id=? AND version=?').run(JSON.stringify(list), total, status, o.note ?? null, shareId, version);
-    } else {
-      version = ((this.db.prepare('SELECT MAX(version) v FROM share_versions WHERE share_id=?').get(shareId) as { v: number | null }).v ?? 0) + 1;
-      this.db.prepare('INSERT INTO share_versions(share_id,version,note,manifest,total_bytes,upload_kind,status,created_at) VALUES (?,?,?,?,?,?,?,?)').run(shareId, version, o.note ?? null, JSON.stringify(list), total, o.kind, status, now);
-    }
+    const now = Date.now(), status = snapshot || o.final ? 'published' : 'draft';
+    const version = tx(this.db, () => {
+      if (draft) {
+        this.db.prepare('UPDATE share_versions SET manifest=?, total_bytes=?, status=?, note=COALESCE(?,note) WHERE share_id=? AND version=?').run(JSON.stringify(list), total, status, o.note ?? null, shareId, draft.version);
+        return draft.version;
+      }
+      let v = ((this.db.prepare('SELECT MAX(version) v FROM share_versions WHERE share_id=?').get(shareId) as { v: number | null }).v ?? 0) + 1;
+      if (found) {
+        // The open draft is the highest version: the snapshot takes its number and the draft moves up one.
+        v = found.version;
+        this.db.prepare('UPDATE share_versions SET version=? WHERE share_id=? AND version=?').run(v + 1, shareId, v);
+      }
+      this.db.prepare('INSERT INTO share_versions(share_id,version,note,manifest,total_bytes,upload_kind,status,created_at) VALUES (?,?,?,?,?,?,?,?)').run(shareId, v, o.note ?? null, JSON.stringify(list), total, o.kind, status, now);
+      return v;
+    });
     this.db.prepare('UPDATE shares SET updated_at=? WHERE id=?').run(now, shareId);
     return { version, status, files: list.length, total_bytes: total };
   }

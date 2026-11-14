@@ -3,15 +3,20 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { RateLimit } from '../db/rateLimit.js';
 import { z } from 'zod';
 import type { Db } from '../db/db.js';
+import { tx } from '../db/db.js';
 import type { Keys, Credential } from '../keys/keys.js';
 import { KeyError } from '../keys/keys.js';
+import { registerAttachmentApi } from './attachmentApi.js';
+import type { TaskAttachments } from '../shares/taskAttachments.js';
+import { LIVE_STATUSES, type KeyCollections } from '../keys/keyCollect.js';
 import type { Audit, Actor } from '../audit/audit.js';
 import type { Vault } from '../vault/vault.js';
 import type { Config } from '../config.js';
 import { authorize, canReach, validateRules, parseResource, explicitlyDenied } from '../policy/engine.js';
-import type { Rule } from '../policy/engine.js';
+import type { Rule, Cap } from '../policy/engine.js';
+import type { OwnerScope } from '../policy/ownerScope.js';
 import { BASE_TOOLS, DEFAULT_TOOLS, GRANTED_TOOLS } from '../policy/catalogue.js';
-import { hashPassword, randomToken, safeEqualHex, sha256Hex, verifyPasswordAsync, verifyTotp } from '../util/crypto.js';
+import { hashPassword, randomToken, safeEqualHex, sha256Hex, verifyPasswordAsync } from '../util/crypto.js';
 import { newId } from '../util/ids.js';
 import type { Setup } from '../setup/setup.js';
 import type { Links } from '../links/links.js';
@@ -20,27 +25,56 @@ import { registerPhase3 } from './phase3.js';
 import type { Messaging } from '../messaging/messaging.js';
 import type { Teams } from '../teams/teams.js';
 import { registerTeams } from './teams.js';
+import { registerMemberBoard } from './memberBoard.js';
+import { registerWorkFeed } from './workFeed.js';
 import { registerVaultApi } from './vaultApi.js';
+import { registerVaultLinksApi } from './vaultLinksApi.js';
+import { registerVaultWriteApi } from './vaultWrite.js';
 import { registerResetApi } from './resetApi.js';
+import { registerDemoApi } from './demoApi.js';
+import type { DemoController } from '../demo/demo.js';
 import { registerTelemetryApi } from './telemetryApi.js';
 import { registerFeedbackApi } from './feedbackApi.js';
+import { registerHardwareApi } from './hardwareApi.js';
+import type { Hardware } from '../hardware/hardware.js';
 import { registerDecisionsApi } from './decisionsApi.js';
+import { registerBlueprintApi } from './blueprintApi.js';
+import type { Blueprint } from '../blueprint/blueprint.js';
 import { registerDirectivesApi } from './directivesApi.js';
 import type { Directives } from '../directives/directives.js';
 import type { Decisions } from '../teams/decisions.js';
 import type { Feedback } from '../feedback/feedback.js';
 import type { VaultStore } from '../vault/store.js';
+import { Sources } from '../blueprint/sources.js';
+import { Meetings } from '../blueprint/meetings.js';
 import { registerPhase5 } from './phase5.js';
 import { registerGraphAdmin } from './graphApi.js';
 import type { Graph } from '../graph/graph.js';
 import type { Phase5Deps } from './phase5.js';
+import { registerOnboardingApi } from './onboardingApi.js';
+import { registerCheckoutApi } from './checkoutApi.js';
+import { registerMirrorApi } from './mirrorApi.js';
+import type { Mirror } from '../mirror/mirror.js';
+import type { Checkouts } from '../checkout/checkout.js';
+import type { CheckoutKeys } from '../checkout/render.js';
+import type { Onboarding } from '../onboarding/onboarding.js';
+import type { ClientFiles } from '../onboarding/http.js';
+import { pickupPrompt, secretPrompt, toolsLine, clientOf } from '../keys/keyPrompt.js';
+import { NeedsYou, NEEDS_PAGE_MAX, sourceReply, type Viewer, type CheckoutNeeds } from './needsYou.js';
+import { Users, registerUsersApi, type UserRow } from './users.js';
+import { scopeOf, MEMBER_LIVE, MEMBER_READY, BEFORE_TOTP, ADMIN_ONLY } from './scopes.js';
+import type { Routing } from './routing.js';
+import { CEILING_ACTIONS } from './routing.js';
+import { BpRouting } from './bpRouting.js';
+import { MemberScope } from './memberScope.js';
+import { ownedAgents } from './accountView.js';
 
 const COOKIE = 'ah_admin';
 const SESSION_MS = 12 * 60 * 60 * 1000;
 
-export interface AdminDeps { db: Db; keys: Keys; audit: Audit; vault: Vault; store: VaultStore; config: Config; loginLimit: RateLimit; setup: Setup; links: Links; messaging: Messaging; teams: Teams; phase5: Omit<Phase5Deps, 'db' | 'keys' | 'audit'>; graph: Graph; feedback: Feedback; decisions: Decisions; directives: Directives }
-interface AdminCtx { id: string; username: string; csrf: string; totp: boolean }
-declare module 'fastify' { interface FastifyRequest { admin?: AdminCtx } }
+export interface AdminDeps { users: Users; routing: Routing; demo?: DemoController; db: Db; keys: Keys; audit: Audit; vault: Vault; store: VaultStore; config: Config; loginLimit: RateLimit; setup: Setup; links: Links; messaging: Messaging; teams: Teams; phase5: Omit<Phase5Deps, 'db' | 'keys' | 'audit'>; graph: Graph; feedback: Feedback; hardware: Hardware; decisions: Decisions; directives: Directives; onboarding: Onboarding; clientFiles: ClientFiles; blueprint: Blueprint; checkouts?: Checkouts; checkoutKeys?: CheckoutKeys; mirror?: Mirror; ownerScope?: OwnerScope; keyCollections?: KeyCollections; taskAttachments?: TaskAttachments }
+interface AdminCtx { id: string; username: string; csrf: string; totp: boolean; role: 'admin' | 'member'; user: UserRow }
+declare module 'fastify' { interface FastifyRequest { admin?: AdminCtx; member?: MemberScope } }
 
 const DUMMY_HASH = hashPassword('not-a-real-password');
 /** Password checks running at once; more sign-ins wait their turn with a 429 instead of queueing scrypt work. */
@@ -50,8 +84,8 @@ let verifying = 0;
 export function bootstrapAdmin(db: Db, audit: Audit, config: Config): void {
   const n = (db.prepare('SELECT COUNT(*) n FROM admin_users').get() as { n: number }).n;
   if (n > 0 || !config.adminUsername || !config.adminPassword) return;
-  const id = newId.admin();
-  db.prepare('INSERT INTO admin_users(id,username,password_hash,created_at) VALUES (?,?,?,?)').run(id, config.adminUsername, hashPassword(config.adminPassword), Date.now());
+  const id = newId.admin(), now = Date.now();
+  db.prepare('INSERT INTO admin_users(id,username,password_hash,created_at,password_changed_at) VALUES (?,?,?,?,?)').run(id, config.adminUsername, hashPassword(config.adminPassword), now, now);
   audit.event({ kind: 'system', id: null }, 'admin.bootstrap', { kind: 'admin', id }, { username: config.adminUsername });
 }
 
@@ -70,28 +104,52 @@ const checkRules = (rules: unknown): Omit<Rule, 'id'>[] => {
 };
 const withSlash = (r: string) => (r.startsWith('/') ? `path:${r}` : r);
 
-export function registerAdminApi(f: FastifyInstance, d: AdminDeps): void {
-  const { db, keys, audit, vault, config, loginLimit } = d;
+/** Registers the admin API; returns the /api routes it registered ("METHOD /pattern"), which the scope registry must cover. */
+export function registerAdminApi(f: FastifyInstance, d: AdminDeps): string[] {
+  const { db, keys, audit, vault, config, loginLimit, users } = d;
+  const routes: string[] = [];
 
   f.register(async (api) => {
-    // ───── auth hook ─────
+    api.addHook('onRoute', (r) => { for (const m of [r.method].flat()) if (m !== 'HEAD' && r.url.startsWith('/api')) routes.push(`${m} ${r.url}`); });
+    // ───── auth hook: session, expiry, 2FA requirement, then the route's scope (docs/multi-user.md §2) ─────
     api.addHook('preHandler', async (req, reply) => {
-      if (req.url.startsWith('/api/login')) return;
+      const pattern = req.routeOptions.url ?? '';
+      const scope = scopeOf(req.method, pattern), key = `${req.method === 'HEAD' ? 'GET' : req.method} ${pattern}`;
+      if (scope === 'public') return;
       const sid = req.cookies[COOKIE];
-      const row = sid ? db.prepare(`SELECT s.admin_id, s.csrf_token, s.expires_at, u.username, u.totp_secret, u.status FROM admin_sessions s JOIN admin_users u ON u.id=s.admin_id WHERE s.id_hash=?`)
-        .get(Buffer.from(sha256Hex(sid), 'hex')) as { admin_id: string; csrf_token: string; expires_at: number; username: string; totp_secret: string | null; status: string } | undefined : undefined;
-      if (!row || row.expires_at < Date.now() || row.status !== 'active') return reply.code(401).send({ error: 'unauthenticated', message: 'Sign in first.' });
+      const row = sid ? db.prepare(`SELECT s.admin_id, s.csrf_token, s.expires_at session_expires_at, u.* FROM admin_sessions s JOIN admin_users u ON u.id=s.admin_id WHERE s.id_hash=?`)
+        .get(Buffer.from(sha256Hex(sid), 'hex')) as (UserRow & { admin_id: string; csrf_token: string; session_expires_at: number }) | undefined : undefined;
+      if (!row || row.session_expires_at < Date.now() || row.status !== 'active') return reply.code(401).send({ error: 'unauthenticated', message: 'Sign in first.' });
+      if (users.isExpired(row)) { users.enforceExpiry(row); return reply.code(401).send({ error: 'expired', message: 'This account has expired.' }); }
       if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method)) {
         const h = req.headers['x-csrf-token'];
         if (typeof h !== 'string' || !safeEqualHex(sha256Hex(h), sha256Hex(row.csrf_token))) return reply.code(403).send({ error: 'csrf', message: 'Missing or wrong x-csrf-token header.' });
       }
       db.prepare('UPDATE admin_sessions SET last_seen_at=? WHERE id_hash=?').run(Date.now(), Buffer.from(sha256Hex(sid!), 'hex'));
-      req.admin = { id: row.admin_id, username: row.username, csrf: row.csrf_token, totp: row.totp_secret !== null };
+      req.admin = { id: row.admin_id, username: row.username, csrf: row.csrf_token, totp: row.totp_secret !== null, role: row.role, user: row };
+      // 2FA required but not enrolled (§1.4): only /api/me, /api/totp/* and /api/logout until it is.
+      if (!users.ready(row) && !BEFORE_TOTP.has(key)) return reply.code(403).send({ error: 'totp_required', message: 'Set up two-factor authentication first.' });
+      // Undeclared routes are admin-only (fail closed); members reach only the scopes that are filtered for them.
+      if (row.role !== 'admin' && (!scope || !(MEMBER_LIVE.has(scope) || ((scope === 'filtered' || scope === 'decider') && MEMBER_READY.has(key))))) return reply.code(403).send(ADMIN_ONLY);
+      // A member's view of the hub, rebuilt on every call so a revoked grant applies at once (§2).
+      if (row.role !== 'admin') req.member = new MemberScope(db, row.id, !!row.external);
     });
-    const actor = (req: FastifyRequest): Actor => ({ kind: 'admin', id: req.admin!.id });
+    // No console user id reaches a member (§1.4): views drop the ones they know of (who answered, who decided, task
+    // event actors), and this pass replaces any other one (a Blueprint label, a proposal's decided_by, a grant's
+    // granted_by) with plain `operator`.
+    api.addHook('onSend', async (req, _reply, payload) => {
+      if (!req.member || typeof payload !== 'string') return payload;
+      let out = payload;
+      for (const { id } of db.prepare('SELECT id FROM admin_users').all() as { id: string }[]) if (out.includes(id)) out = out.split(`operator:${id}`).join('operator').split(id).join('operator');
+      return out;
+    });
+    const actor = (req: FastifyRequest): Actor => ({ kind: 'admin', id: req.admin!.id, role: req.admin!.role });
     const body = <T extends z.ZodType>(s: T, req: FastifyRequest): z.infer<T> => s.parse(req.body ?? {});
     const idOf = (req: FastifyRequest) => (req.params as { id: string }).id;
     const cred = (id: string): Credential => { const c = keys.credential(id); if (!c) throw new KeyError('not_found', 'key not found'); return c; };
+
+    /** On a demo hub the .env operator's password is fixed (Replay signs in with it). */
+    const passwordLocked = (u: UserRow) => !!(config.demoMode && config.adminUsername && u.role === 'admin' && u.username.toLowerCase() === config.adminUsername.toLowerCase());
 
     // ───── login / session ─────
     api.post('/api/login', async (req, reply) => {
@@ -102,24 +160,81 @@ export function registerAdminApi(f: FastifyInstance, d: AdminDeps): void {
         audit.auth({ subject: 'admin', outcome: 'rate_limited', source: req.ip });
         return reply.code(429).send({ error: 'rate_limited', message: 'Too many failed sign-ins. Try again later.' });
       }
-      const u = db.prepare('SELECT * FROM admin_users WHERE username=?').get(b.username) as { id: string; password_hash: string; totp_secret: string | null; status: string } | undefined;
+      const u = db.prepare('SELECT * FROM admin_users WHERE username=?').get(b.username) as UserRow | undefined;
       if (verifying >= MAX_VERIFYING) return reply.code(429).send({ error: 'rate_limited', message: 'Sign-in is busy. Try again in a moment.' });
       verifying++;
       let okPw = false;
-      try { okPw = (await verifyPasswordAsync(b.password, u?.password_hash ?? DUMMY_HASH)) && !!u && u.status === 'active'; } finally { verifying--; }
+      try { okPw = (await verifyPasswordAsync(b.password, u?.password_hash ?? DUMMY_HASH)) && !!u && u.status === 'active' && !!u.password_set; } finally { verifying--; }
       if (!okPw) { loginLimit.fail(b.username, 'admin_login_fail', now); loginLimit.fail(`ip:${req.ip}`, 'admin_login_fail_ip', now); audit.auth({ subject: 'admin', adminId: u?.id ?? null, outcome: 'invalid', source: req.ip }); return reply.code(401).send({ error: 'invalid_credentials', message: 'Wrong username or password.' }); }
+      if (users.isExpired(u!, now)) {
+        users.enforceExpiry(u!, now);
+        audit.auth({ subject: 'admin', adminId: u!.id, outcome: 'expired', source: req.ip });
+        return reply.code(401).send({ error: 'expired', message: 'This account has expired. Ask the admin.' });
+      }
       if (u!.totp_secret) {
         if (!b.totp) return reply.code(401).send({ error: 'mfa_required', message: 'Enter the 6-digit code from your authenticator.' });
-        if (!verifyTotp(u!.totp_secret, b.totp, now)) { loginLimit.fail(b.username, 'admin_login_fail', now); audit.auth({ subject: 'admin', adminId: u!.id, outcome: 'mfa_failed', source: req.ip }); return reply.code(401).send({ error: 'mfa_failed', message: 'Wrong code.' }); }
+        // A code works once: a code already used (at sign-in, enrolment or setup) is refused like a wrong one.
+        if (!users.useTotp(u!.id, u!.totp_secret, b.totp, now)) { loginLimit.fail(b.username, 'admin_login_fail', now); audit.auth({ subject: 'admin', adminId: u!.id, outcome: 'mfa_failed', source: req.ip }); return reply.code(401).send({ error: 'mfa_failed', message: 'Wrong code.' }); }
       }
       const sid = randomToken(24), csrf = randomToken(16);
       db.prepare('INSERT INTO admin_sessions(id_hash,admin_id,csrf_token,created_at,last_seen_at,expires_at) VALUES (?,?,?,?,?,?)').run(Buffer.from(sha256Hex(sid), 'hex'), u!.id, csrf, now, now, now + SESSION_MS);
       db.prepare('UPDATE admin_users SET last_login_at=? WHERE id=?').run(now, u!.id);
       audit.auth({ subject: 'admin', adminId: u!.id, outcome: 'success', source: req.ip });
       reply.setCookie(COOKIE, sid, { httpOnly: true, sameSite: 'strict', secure: config.production, path: '/', maxAge: SESSION_MS / 1000 });
-      return { username: b.username, csrf, totp_enrolled: u!.totp_secret !== null };
+      // A user who must enrol 2FA signs in to a session that reaches only /api/me, /api/totp/* and /api/logout;
+      // setup_needed says so (the console's two-factor gate). The password is always set: the hub generates it.
+      return { username: b.username, csrf, totp_enrolled: u!.totp_secret !== null, role: u!.role, totp_required: users.totpRequired(u!), setup_needed: !users.ready(u!) };
     });
-    api.get('/api/me', async (req) => ({ username: req.admin!.username, csrf: req.admin!.csrf, totp_enrolled: req.admin!.totp, vault_alias: vault.alias, public_url: config.publicUrl }));
+    api.get('/api/me', async (req) => {
+      const u = req.admin!.user;
+      const me = { id: u.id, username: req.admin!.username, csrf: req.admin!.csrf, totp_enrolled: req.admin!.totp, vault_alias: vault.alias, role: u.role, display_name: u.display_name,
+        external: !!u.external, org: u.org, expires_at: u.expires_at, totp_required: users.totpRequired(u), setup_needed: !users.ready(u),
+        // POST /api/me/password refuses this user: on a demo hub the operator's password is ADMIN_PASSWORD in .env.
+        password_locked: passwordLocked(u), password_changed_at: u.password_changed_at ?? null };
+      // Members get their grants and decider teams, and no hub URL or demo state (§2).
+      // agents: the ones this person owns, with their effective scope, for Account (accountView.ts); no key, machine or secret.
+      // Each team adds what the delegation permits there (docs/authorization.md#owner-enforcement), and owner_enforcement
+      // says whether the hub enforces it yet.
+      if (u.role !== 'admin') {
+        const ops = d.ownerScope ? d.ownerScope.scopes(u.id) : new Map<string, Map<string, unknown[]>>();
+        const agents = ownedAgents(db, u.id, !!u.external).map((a) => ({ ...a, teams: a.teams.map((t) => ({ ...t, operations: ops.get(a.id)?.get(t.id) ?? [] })) }));
+        return { ...me, grants: users.grants(u.id), folder_grants: users.folderGrants(u.id), decider_teams: users.deciderTeams(u.id), deciding_now: d.routing.decidesFor(u.id),
+          agents, owner_enforcement: d.ownerScope ? d.ownerScope.enforced() : false };
+      }
+      return { ...me, public_url: config.publicUrl, demo: !!(config.demoMode && d.demo) };
+    });
+    /**
+     * Any signed-in user replaces their own password: the current one is checked (failures count like sign-ins), the new
+     * one follows the password rules, and the user's other sessions end while this one stays.
+     */
+    api.post('/api/me/password', async (req) => {
+      const b = body(z.object({ current: z.string().max(200), new: z.string().max(200) }).strict(), req);
+      const me = req.admin!, now = Date.now();
+      // On a demo hub the operator's password is ADMIN_PASSWORD in .env, which Replay signs in with.
+      if (passwordLocked(me.user))
+        throw new KeyError('invalid_state', "On a demo hub the operator's password comes from .env; Replay signs in with it.");
+      // Audited like a sign-in (an authentication event) and, since it comes from a signed-in session, as user.password_change_failed too:
+      // a wrong current password there points to a stolen session rather than guessing at the sign-in page.
+      const failed = (reason: 'invalid' | 'rate_limited') => {
+        audit.auth({ subject: 'admin', adminId: me.id, outcome: reason, source: req.ip });
+        audit.event({ kind: 'admin', id: me.id, role: me.role }, 'user.password_change_failed', { kind: 'user', id: me.id }, { reason });
+      };
+      if (loginLimit.blocked(me.username, 'admin_login_fail', now).blocked) {
+        failed('rate_limited');
+        throw new KeyError('rate_limited', 'Too many failed attempts. Try again later.');
+      }
+      const u = db.prepare('SELECT * FROM admin_users WHERE id=?').get(me.id) as unknown as UserRow;
+      if (!(await verifyPasswordAsync(b.current, u.password_hash))) {
+        loginLimit.fail(me.username, 'admin_login_fail', now);
+        failed('invalid');
+        throw new KeyError('invalid_credentials', 'The current password is wrong.');
+      }
+      users.setOwnPassword(u, b.new, Buffer.from(sha256Hex(req.cookies[COOKIE]!), 'hex'));
+      // The current password was proven: earlier wrong guesses against this username no longer count, including guesses
+      // others made at /api/login. They start a fresh count against a new password; the old one no longer works.
+      loginLimit.clear(me.username, 'admin_login_fail');
+      return { ok: true };
+    });
     api.post('/api/logout', async (req, reply) => {
       db.prepare('DELETE FROM admin_sessions WHERE id_hash=?').run(Buffer.from(sha256Hex(req.cookies[COOKIE]!), 'hex'));
       reply.clearCookie(COOKIE, { path: '/' });
@@ -133,16 +248,95 @@ export function registerAdminApi(f: FastifyInstance, d: AdminDeps): void {
       const s = secret.toUpperCase();
       return { secret: s, otpauth_uri: `otpauth://totp/Conclave:${encodeURIComponent(req.admin!.username)}?secret=${s}&issuer=Conclave` };
     });
-    api.post('/api/totp/confirm', async (req) => {
-      const { code } = body(z.object({ code: z.string() }), req);
+    /** Confirm enrolment with a code. Wrong codes count against the sign-in limit, per user; the confirming code is used up. */
+    api.post('/api/totp/confirm', async (req, reply) => {
+      const { code } = body(z.object({ code: z.string().max(10) }), req);
+      const now = Date.now(), scope = `totp:${req.admin!.id}`;
+      if (loginLimit.blocked(scope, 'totp_confirm_fail', now).blocked) return reply.code(429).send({ error: 'rate_limited', message: 'Too many wrong codes. Try again later.' });
       const row = db.prepare('SELECT value FROM system_settings WHERE key=?').get(`totp_pending:${req.admin!.id}`) as { value: string } | undefined;
       if (!row) throw new KeyError('invalid_state', 'start enrolment first');
       const secret = JSON.parse(row.value) as string;
-      if (!verifyTotp(secret, code, Date.now())) throw new KeyError('invalid_argument', 'wrong code');
-      db.prepare('UPDATE admin_users SET totp_secret=? WHERE id=?').run(secret, req.admin!.id);
+      const step = users.totpStep(secret, code, now);
+      if (step === null) { loginLimit.fail(scope, 'totp_confirm_fail', now); throw new KeyError('invalid_argument', 'wrong code'); }
+      db.prepare('UPDATE admin_users SET totp_secret=?, totp_last_step=? WHERE id=?').run(secret, step, req.admin!.id);
       db.prepare('DELETE FROM system_settings WHERE key=?').run(`totp_pending:${req.admin!.id}`);
       audit.event(actor(req), 'admin.totp_enrolled', { kind: 'admin', id: req.admin!.id });
       return { ok: true };
+    });
+
+    // ───── users ─────
+    registerUsersApi(api, users, actor, d.ownerScope, db);
+    // ───── decider routing ─────
+    // Needs you and For awareness (docs/dashboard-ux.md "Attention words"): one list per viewer; Home reads it whole, a
+    // team, a project and Blueprint Review read it filtered, and every entrance counts the same rows.
+    const bpRouting = new BpRouting(db, d.blueprint, d.routing);
+    // Checkout steps come from the checkout API itself (its needs_operator), read as the signed-in admin.
+    const checkoutNeeds = (req: FastifyRequest) => async () => {
+      const r = await f.inject({ method: 'GET', url: '/api/checkouts?open=1', headers: { cookie: req.headers.cookie ?? '' } });
+      return r.statusCode === 200 ? (r.json() as { checkouts: Awaited<ReturnType<CheckoutNeeds>> }).checkouts : [];
+    };
+    const needs = (req: FastifyRequest) => new NeedsYou(db, { routing: d.routing, bpRouting, blueprint: d.blueprint, teams: d.teams, onboarding: d.onboarding, attachments: d.taskAttachments, ...(d.checkouts ? { checkouts: checkoutNeeds(req) } : {}) });
+    const viewer = (req: FastifyRequest): Viewer => ({ id: req.admin!.id, isAdmin: req.admin!.role === 'admin', can: (pid, c) => !!req.member?.has(pid, c as never) });
+    const needsQuery = z.object({ team: z.string().max(100).optional(), project: z.string().max(100).optional(), review: z.enum(['1', 'true']).optional(), cursor: z.string().max(20).optional(), limit: z.coerce.number().int().min(1).max(NEEDS_PAGE_MAX).optional() }).strict();
+    api.get('/api/needs-you', async (req) => {
+      const q = needsQuery.parse(req.query ?? {}), f = { team: q.team, project: q.project, review: !!q.review }, v = viewer(req);
+      const list = await needs(req).list(v, f, { cursor: q.cursor, limit: q.limit });
+      return { ...list, awareness: needs(req).awareness(v, f) };
+    });
+    // A resolving action from any entrance: the row must still wait for this viewer at the version they saw (checked by
+    // reading that row's own queue only); then the source workflow's own route runs as this viewer and checks its rights
+    // again. The fresh count comes back with it, built once and counted for the entrance the action came from (`filter`).
+    const actFilter = z.object({ team: z.string().max(100).optional(), project: z.string().max(100).optional(), review: z.boolean().optional() }).strict();
+
+    api.post('/api/needs-you/act', async (req, reply) => {
+      const b = body(z.object({ id: z.string().min(1).max(300), version: z.string().max(100), action: z.string().min(1).max(40), note: z.string().max(2000).optional(), filter: actFilter.optional() }).strict(), req);
+      const v = viewer(req), n = needs(req);
+      const { act } = await n.check(v, b.id, b.version, b.action);
+      const r = await f.inject({ method: 'POST', url: act.path, headers: { cookie: req.headers.cookie ?? '', 'x-csrf-token': req.admin!.csrf, 'content-type': 'application/json' },
+        payload: JSON.stringify({ ...(act.body ?? {}), ...(b.note ? { [act.noteAs ?? 'note']: b.note } : {}) }) });
+      const total = await n.total(v, b.filter ?? {}), out = sourceReply(r);
+      if (r.statusCode >= 400) return reply.code(r.statusCode).send({ ...out, total });
+      return { ok: true, result: out, total };
+    });
+    // One endpoint hides a row for this viewer, by kind: a For awareness row is dismissed for its episode; a Needs you row
+    // is set aside with Later (record: the row id, episode: its version) until `until`, or until it changes when `until`
+    // is null or left out, and at most 7 days. The wrong kind for the row is refused. Bring back now ends a Later.
+    api.post('/api/needs-you/dismiss', async (req) => {
+      const b = body(z.object({ record: z.string().min(1).max(300), episode: z.string().max(200), kind: z.enum(['dismiss', 'later']).optional(), until: z.number().int().positive().nullable().optional() }).strict(), req);
+      if (b.kind !== 'later') {
+        if (b.until !== undefined) throw new KeyError('invalid_argument', 'A dismissal has no end time; only Later does.');
+        await needs(req).dismiss(viewer(req), b.record, b.episode);
+        return { ok: true };
+      }
+      return { ok: true, later: await needs(req).later(viewer(req), b.record, b.episode, b.until ?? null) };
+    });
+    api.post('/api/needs-you/bring-back', async (req) => {
+      const b = body(z.object({ record: z.string().min(1).max(300) }).strict(), req);
+      needs(req).bringBack(viewer(req), b.record);
+      return { ok: true };
+    });
+    // The attention settings (off by default): stall warnings per team, missed milestones per project. Audited.
+    api.put('/api/teams/:id/attention', async (req) => {
+      const b = body(z.object({ stall_warnings: z.boolean() }).strict(), req);
+      if (!db.prepare('UPDATE teams SET stall_warnings=? WHERE id=?').run(b.stall_warnings ? 1 : 0, idOf(req)).changes) throw new KeyError('not_found', 'team not found');
+      audit.event(actor(req), 'team.attention', { kind: 'team', id: idOf(req) }, { stall_warnings: b.stall_warnings });
+      // Switched off: its open stalled-member alerts have nothing left to say (Auditing → Alerts no longer lists them).
+      if (!b.stall_warnings) { audit.settle('stalled_member'); d.teams.forgetStalls(idOf(req)); }
+      return { stall_warnings: b.stall_warnings };
+    });
+    api.put('/api/projects/:id/attention', async (req) => {
+      const b = body(z.object({ missed_warnings: z.boolean() }).strict(), req);
+      if (!db.prepare('UPDATE projects SET missed_warnings=? WHERE id=?').run(b.missed_warnings ? 1 : 0, idOf(req)).changes) throw new KeyError('not_found', 'project not found');
+      audit.event(actor(req), 'project.attention', { kind: 'project', id: idOf(req) }, { missed_warnings: b.missed_warnings });
+      return { missed_warnings: b.missed_warnings };
+    });
+    api.get('/api/teams/:id/deciders', async (req) => d.routing.view(idOf(req)));
+    api.put('/api/teams/:id/deciders', async (req) => {
+      const b = z.object({
+        user_ids: z.array(z.string().max(100)).max(50),
+        ceiling: z.object({ actions: z.array(z.enum(CEILING_ACTIONS as [string, ...string[]])).min(1).max(20).optional(), folders: z.array(z.string().max(1024)).min(1).max(50).nullable().optional(), max_hours: z.number().int().optional() }).nullable().optional(),
+      }).parse(req.body ?? {});
+      return d.routing.setDeciders(idOf(req), b.user_ids, b.ceiling, actor(req));
     });
 
     // ───── PCs and agents ─────
@@ -150,23 +344,59 @@ export function registerAdminApi(f: FastifyInstance, d: AdminDeps): void {
       const b = body(z.object({ name: z.string(), description: z.string().nullable().optional() }), req);
       return { pc: keys.createMachine(b.name, b.description ?? null, actor(req)) };
     });
+    // A PC is known by its id, so a new name touches nothing else (docs/dashboard-ux.md, the PC page).
+    api.patch('/api/pcs/:id', async (req) => {
+      const b = body(z.object({ name: z.string().max(200) }), req);
+      return { pc: keys.renameMachine(idOf(req), b.name, actor(req)) };
+    });
     api.post('/api/pcs/:id/suspend', async (req) => { keys.setMachineStatus(idOf(req), 'suspended', actor(req)); return { pc: keys.machine(idOf(req)) }; });
     api.post('/api/pcs/:id/reactivate', async (req) => { keys.setMachineStatus(idOf(req), 'active', actor(req)); return { pc: keys.machine(idOf(req)) }; });
 
-    api.get('/api/agents', async () => ({ agents: keys.agents() }));
+    api.get('/api/agents', async (req) => {
+      if (!req.member) return { agents: keys.agents() };
+      // Members (§2): agents of granted teams with tasks; label, role and status, no credential, PC or key fields.
+      const ids = req.member.agents('tasks');
+      return { agents: keys.agents().filter((a) => ids.has(a.id)).map((a) => ({ id: a.id, label: a.label, role: a.role, status: a.status })) };
+    });
+    // owner_id: the console user who owns the agent (docs/authorization.md#agent-owners); the admin names it, never the hub.
+    const ownerId = z.string().min(1).max(100).nullable().optional();
     api.post('/api/agents', async (req) => {
-      const b = body(z.object({ label: z.string().min(1).max(80), project: z.string().nullable().optional() }), req);
-      return { agent: keys.createAgent(b.label, b.project ?? null, actor(req)) };
+      const b = body(z.object({ label: z.string().min(1).max(80), project: z.string().nullable().optional(), owner_id: ownerId }), req);
+      return { agent: keys.createAgent(b.label, b.project ?? null, actor(req), b.owner_id ?? null) };
     });
     api.patch('/api/agents/:id', async (req) => {
-      const b = body(z.object({ label: z.string().min(1).max(80).optional(), project: z.string().nullable().optional(), role: z.string().max(80).nullable().optional(), role_detail: z.string().max(500).nullable().optional() }), req);
-      return { agent: keys.updateAgent(idOf(req), b, actor(req)) };
+      const b = body(z.object({ label: z.string().min(1).max(80).optional(), project: z.string().nullable().optional(), role: z.string().max(80).nullable().optional(), role_detail: z.string().max(500).nullable().optional(), owner_id: ownerId }), req);
+      const { owner_id, ...rest } = b;
+      // A rename and an owner change in one request land together or not at all.
+      return tx(db, () => {
+        if (owner_id !== undefined) keys.setOwner(idOf(req), owner_id, actor(req));
+        return { agent: Object.keys(rest).length || owner_id === undefined ? keys.updateAgent(idOf(req), rest, actor(req)) : keys.agent(idOf(req)) };
+      });
+    });
+    // A person's agents: listed on their page, and handed to another person in one audited step (before or after they are disabled).
+    api.get('/api/agent-owners/:id/agents', async (req) => ({ agents: keys.ownedBy(idOf(req)) }));
+    api.post('/api/agent-owners/:id/reassign', async (req) => {
+      const b = body(z.object({ to: z.string().min(1).max(100) }).strict(), req);
+      return { ...keys.reassignOwner(idOf(req), b.to, actor(req)), ...ownersView() };
+    });
+    // Agent owners: the claim step for the agents that existed before owners, and the owner enforcement setting.
+    const ownersView = () => {
+      const claim = keys.ownerClaim(), by = claim ? db.prepare('SELECT username, display_name FROM admin_users WHERE id=?').get(claim.by) as { username: string; display_name: string | null } | undefined : undefined;
+      return { claim: claim ? { ...claim, by_label: by ? by.display_name || by.username : null } : null, enforcement: keys.ownerEnforcement(), unowned: keys.unownedCount() };
+    };
+    api.get('/api/agent-owners', async () => ownersView());
+    api.post('/api/agent-owners/claim', async (req) => { const c = keys.claimUnowned(actor(req)); return { claimed: c.agents, ...ownersView() }; });
+    api.put('/api/agent-owners/enforcement', async (req) => {
+      keys.setOwnerEnforcement(body(z.object({ on: z.boolean() }).strict(), req).on, actor(req));
+      return ownersView();
     });
 
     // ───── keys ─────
     const view = (c: Credential) => {
       const agent = c.agent_id ? keys.agent(c.agent_id) : null, pc = c.machine_id ? keys.machine(c.machine_id) : null;
+      const bound = c.bound_machine_id ? keys.machine(c.bound_machine_id) : null;
       return {
+        bound_pc: bound ? { id: bound.id, name: bound.name, status: bound.status } : null,
         ...c, effective_status: keys.effectiveStatus(c), masked_key: `ah_${c.kind === 'app_key' ? 'app' : 'ses'}_${c.key_id}_…`,
         agent: agent ? { id: agent.id, label: agent.label, role: agent.role } : null, pc: pc ? { id: pc.id, name: pc.name, status: pc.status } : null,
         live_logins: keys.liveLogins({ credentialId: c.id }).length,
@@ -180,8 +410,10 @@ export function registerAdminApi(f: FastifyInstance, d: AdminDeps): void {
     });
     api.post('/api/keys', async (req) => {
       const b = body(z.discriminatedUnion('kind', [
-        z.object({ kind: z.literal('session_key'), agent_id: z.string().optional(), new_agent: z.object({ label: z.string().min(1), project: z.string().nullable().optional() }).optional(),
-          label: z.string().min(1).max(120), template_id: z.string().nullable().optional(), expires_at: ts }),
+        z.object({ kind: z.literal('session_key'), agent_id: z.string().optional(), new_agent: z.object({ label: z.string().min(1), project: z.string().nullable().optional(), owner_id: ownerId }).optional(),
+          label: z.string().min(1).max(120), template_id: z.string().nullable().optional(), expires_at: ts,
+          // Bind the new key to this PC at once (the PC page's "New session key"); omitted or null: a free key.
+          machine_id: z.string().min(1).nullable().optional() }),
         z.object({ kind: z.literal('app_key'), machine_id: z.string(), app_name: z.string().min(1).max(60), label: z.string().optional() }),
       ]), req);
       if (b.kind === 'app_key') {
@@ -197,12 +429,12 @@ export function registerAdminApi(f: FastifyInstance, d: AdminDeps): void {
         };
       }
       if (!b.agent_id && !b.new_agent) throw new KeyError('invalid_argument', 'agent_id or new_agent is required');
-      const agentId = b.agent_id ?? keys.createAgent(b.new_agent!.label, b.new_agent!.project ?? null, actor(req)).id;
-      const r = keys.createSessionKey({ agentId, label: b.label, expiresAt: b.expires_at, templateId: b.template_id }, actor(req));
-      return {
-        key: view(r.credential), secret: r.secret,
-        handoff: `Your Conclave key: ${r.secret}\nCall session_login first with this key, then session_describe to state your role. Pass the returned session_token on every other call. Never put this key into anything you send.`,
-      };
+      // Checked before a new agent is made, so a bad PC leaves no agent behind.
+      const pc = b.machine_id ? keys.machine(b.machine_id) : null;
+      if (b.machine_id && !pc) throw new KeyError('not_found', 'PC not found');
+      if (pc?.status === 'retired') throw new KeyError('invalid_state', 'a key cannot be bound to a retired PC');
+      const agentId = b.agent_id ?? keys.createAgent(b.new_agent!.label, b.new_agent!.project ?? null, actor(req), b.new_agent!.owner_id ?? null).id;
+      return tx(db, () => keyPrompt(keys.createSessionKey({ agentId, label: b.label, expiresAt: b.expires_at, templateId: b.template_id, machineId: b.machine_id ?? null }, actor(req)), 'new', actor(req)));
     });
     api.get('/api/keys/:id', async (req) => {
       const c = cred(idOf(req));
@@ -216,17 +448,61 @@ export function registerAdminApi(f: FastifyInstance, d: AdminDeps): void {
       api.post(`/api/keys/:id/${path}`, async (req) => ({ key: view(fn(idOf(req), actor(req))) }));
     }
     api.post('/api/keys/:id/rotate', async (req) => {
-      const r = keys.rotate(idOf(req), actor(req));
-      return {
-        key: view(r.credential), secret: r.secret,
-        handoff: r.credential.kind === 'session_key'
-          ? `Your Conclave key was rotated. New key: ${r.secret}\nCall session_login with this key. Your permissions are unchanged. Never put this key into anything you send.` : undefined,
-      };
+      // Rotate secret, and Make a new prompt for a key that never logged in: the same act, audited as key.rotate.
+      // reason: could the key have leaked; delivery: a key prompt, or Collect on the key's PC by its Codex wake, offered only for
+      // a routine rotation of a key that has logged in (docs/onboarding.md#collect-on-a-pc-the-codex-wake-picks-up-a-routine-rotation).
+      const b = body(z.object({ reason: z.enum(['routine', 'suspected_leak']).optional(), delivery: z.enum(['prompt', 'collect']).optional() }), req);
+      const old = cred(idOf(req));
+      const delivery = b.delivery ?? 'prompt';
+      let offer: ReturnType<KeyCollections['offer']> | null = null;
+      if (delivery === 'collect') {
+        if (old.kind !== 'session_key' || !d.keyCollections) throw new KeyError('invalid_argument', 'Only a session key can be collected.');
+        if (b.reason !== 'routine') throw new KeyError('invalid_state', 'Collect is only for a routine rotation. After a suspected leak, rotate the PC\'s app key too (or re-enrol the PC), then use a key prompt.');
+        offer = d.keyCollections.offer(old.id);
+        if (!offer.ok) throw new KeyError('invalid_state', offer.message ?? 'Collect is not offered for this key.', { reason: offer.reason });
+      }
+      return tx(db, () => {
+        const r = keys.rotate(old.id, actor(req), { reason: b.reason ?? null, delivery });
+        if (offer) return { key: view(keys.credential(r.credential.id)!), collection: d.keyCollections!.arm(r.credential.id, offer, actor(req)) };
+        return r.credential.kind === 'session_key' ? keyPrompt(r, old.first_used_at ? 'rotated' : 'reissued', actor(req)) : { key: view(r.credential), secret: r.secret };
+      });
+    });
+    // The key page's collection line and whether Collect would be offered for the next rotation.
+    api.get('/api/keys/:id/collect', async (req) => {
+      const c = cred(idOf(req));
+      if (!d.keyCollections || c.kind !== 'session_key') return { offer: null, collection: null };
+      return { offer: d.keyCollections.offer(c.id), collection: d.keyCollections.latest(c.id) };
+    });
+    // Cancel: the open collection is void and the key keeps no usable secret.
+    api.post('/api/keys/:id/collect/cancel', async (req) => {
+      const c = cred(idOf(req));
+      if (!d.keyCollections) throw new KeyError('invalid_state', 'This key has no open collection.');
+      return { collection: d.keyCollections.cancel(c.id, actor(req)) };
+    });
+    // Show a key prompt instead: the open collection is void and today's key prompt is made for the same key.
+    api.post('/api/keys/:id/collect/prompt', async (req) => {
+      const c = cred(idOf(req));
+      if (!d.keyCollections) throw new KeyError('invalid_state', 'This key has no open collection.');
+      return tx(db, () => {
+        // A collection that has not ended (open, picked up, confirmed, signed in) is ended first, so it cannot later blank
+        // the prompt's key; after it ended (expired, failed, a conflict) the prompt is made directly.
+        if (LIVE_STATUSES.includes(d.keyCollections!.latest(c.id)?.status ?? '')) d.keyCollections!.cancel(c.id, actor(req), 'prompt_instead');
+        return keyPrompt(keys.reissueSecret(c.id, 'pickup'), 'rotated', actor(req));
+      });
     });
     api.post('/api/keys/:id/end-logins', async (req) => ({ ended: keys.endLogins(idOf(req), actor(req)) }));
+    // PC binding: {machine_id} binds a session key to that PC, {machine_id: null} makes it free.
+    api.put('/api/keys/:id/binding', async (req) => {
+      const b = body(z.object({ machine_id: z.string().min(1).nullable() }), req);
+      return { key: view(keys.setBinding(idOf(req), b.machine_id, actor(req))) };
+    });
     api.patch('/api/keys/:id', async (req) => {
       const b = body(z.object({ expires_at: ts }), req);
       return { key: view(keys.setExpiry(idOf(req), b.expires_at, actor(req))) };
+    });
+    api.put('/api/keys/:id/live-limit', async (req) => {
+      const b = body(z.object({ max_live_sessions: z.number().int().min(1).max(500) }), req);
+      return { key: view(keys.setLiveLimit(idOf(req), b.max_live_sessions, actor(req))) };
     });
     api.get('/api/keys/:id/rules', async (req) => { const c = cred(idOf(req)); return { rules: keys.rules(c.policy_id), version: keys.policyVersion(c.policy_id) }; });
     api.put('/api/keys/:id/rules', async (req) => {
@@ -246,13 +522,21 @@ export function registerAdminApi(f: FastifyInstance, d: AdminDeps): void {
       const c = cred(idOf(req));
       return { version: keys.applyTemplate(c.id, b.template_id, actor(req)), rules: keys.rules(c.policy_id) };
     });
-    api.get('/api/keys/:id/effective', async (req) => {
-      const c = cred(idOf(req));
-      const q = req.query as { app_key_id?: string };
-      const rules = keys.rules(c.policy_id);
-      const capCred = q.app_key_id ? cred(q.app_key_id) : null;
-      const cap = capCred ? keys.rules(capCred.policy_id) : [];
-      const tools = [...BASE_TOOLS, ...DEFAULT_TOOLS, ...GRANTED_TOOLS].map((t) => {
+    // The access inspector shows the owner ceilings (docs/authorization.md#owner-enforcement): whose grant caps the agent,
+    // why (its own owner, or work handed over by another owner's agent), and the operations each one allows.
+    const withCeilings = (c: { agent_id: string | null }, cap: Rule[]): Cap => (d.ownerScope && c.agent_id ? d.ownerScope.cap(c.agent_id, cap) : cap);
+    // A task ceiling names the task (title, status, team and its originating owner, for the inspector) and how its owner is involved (via).
+    // The team lets the console open the task: its route needs both the team and the task.
+    const taskRef = (id: string | undefined) => {
+      if (!id) return null;
+      const t = db.prepare('SELECT id, title, status, team_id, origin_owner_id o FROM tasks WHERE id=?').get(id) as { id: string; title: string; status: string; team_id: string | null; o: string | null } | undefined;
+      if (!t) return { id, title: null, status: null, team_id: null, origin_owner: null };
+      return { id: t.id, title: t.title, status: t.status, team_id: t.team_id, origin_owner: t.o && d.ownerScope ? d.ownerScope.label(t.o) : null };
+    };
+    /** The key's tools as the Tools tab shows them: base tools always, default tools unless denied, the rest by rule. */
+    function effectiveTools(c: Credential, capCred: Credential | null = null): { tool: string; allowed: boolean; reason: string; source?: unknown }[] {
+      const rules = keys.rules(c.policy_id), cap = withCeilings(c, capCred ? keys.rules(capCred.policy_id) : []);
+      return [...BASE_TOOLS, ...DEFAULT_TOOLS, ...GRANTED_TOOLS].map((t) => {
         if ((BASE_TOOLS as readonly string[]).includes(t)) return { tool: t, allowed: true, reason: 'always available when logged in' };
         if ((DEFAULT_TOOLS as readonly string[]).includes(t)) {
           const no = explicitlyDenied(rules, cap, 'tool.invoke', `tool:${t}`);
@@ -261,11 +545,46 @@ export function registerAdminApi(f: FastifyInstance, d: AdminDeps): void {
         const dec = authorize(rules, cap, 'tool.invoke', `tool:${t}`);
         return { tool: t, allowed: dec.allowed, reason: dec.reason, source: dec.source };
       });
+    }
+    /**
+     * A session key's key prompt (docs/onboarding.md#key-prompts-a-new-rotated-or-reissued-session-key). A known PC gets a
+     * single-use pickup code and the key's secret is made at pickup, so it never leaves the hub here; a free key with no PC
+     * gets its raw key, the one accepted exception. `handoff` is the prompt text, for the screens that only show text.
+     */
+    function keyPrompt(r: { credential: Credential; secret: string }, reason: 'new' | 'rotated' | 'reissued', a: Actor) {
+      const t = keys.keyTarget(r.credential.id), c = keys.credential(r.credential.id)!;
+      const agent = keys.agent(c.agent_id!)?.label ?? c.label;
+      // The login and work-loop tools every session has are left out: the line says what the rules decide, for this key on
+      // the PC it is sent to, the way a real call decides (mcp/tools.ts): the key's rules with its temporary grants, capped by
+      // that PC's app key (the client's, else the newest active one) with the owner ceilings. task_list is decided the same
+      // way: team rules give it, so a team member that a deny rule or the app key refuses is not told it has it.
+      const capApp = t.pc ? db.prepare(`SELECT id FROM credentials WHERE kind='app_key' AND machine_id=? AND status='active' AND (expires_at IS NULL OR expires_at>?)
+        ORDER BY (app_name=?) DESC, created_at DESC LIMIT 1`).get(t.pc.id, Date.now(), t.client_app ?? '') as { id: string } | undefined : undefined;
+      const rules = keys.rulesFor(c.id), cap = withCeilings(c, capApp ? keys.rulesFor(capApp.id) : []);
+      const tools = toolsLine([...DEFAULT_TOOLS, ...GRANTED_TOOLS, 'task_list'].map((tool) => ({ tool,
+        allowed: (DEFAULT_TOOLS as readonly string[]).includes(tool) ? !explicitlyDenied(rules, cap, 'tool.invoke', `tool:${tool}`) : authorize(rules, cap, 'tool.invoke', `tool:${tool}`).allowed })));
+      if (t.pc && t.session_var) {
+        const p = keys.armPickup(c.id, t.pc.id, t.session_var, a);
+        const text = pickupPrompt({ hubUrl: config.publicUrl, setupSha256: d.clientFiles.file('setup.mjs')?.sha256 ?? null, code: p.code, expiresAt: p.expires_at, pc: t.pc.name,
+          sessionVar: t.session_var, agent, client: clientOf(t.client_app), folder: t.folder, tools, reason });
+        return { key: view(keys.credential(c.id)!), prompt: { text, mode: 'pickup' as const, pc: t.pc.name, session_var: t.session_var, client: clientOf(t.client_app), expires_at: p.expires_at, note: t.note }, handoff: text };
+      }
+      const text = secretPrompt({ secret: r.secret, agent, tools, reason });
+      return { key: view(c), secret: r.secret, prompt: { text, mode: 'secret' as const, pc: null, session_var: t.session_var, client: clientOf(t.client_app) }, handoff: text };
+    }
+    const ceilingsView = (cap: Cap) => cap.owners ? cap.owners.map((l) => ({ owner_id: l.owner, owner: l.label, basis: l.basis, task_id: l.task ?? null, task: taskRef(l.task), via: l.via ?? null, allows: l.rules.filter((r) => r.effect === 'allow').map((r) => ({ actions: r.actions, resource: r.resource })), denies: l.rules.filter((r) => r.effect === 'deny').map((r) => ({ actions: r.actions, resource: r.resource })) })) : null;
+    api.get('/api/keys/:id/effective', async (req) => {
+      const c = cred(idOf(req));
+      const q = req.query as { app_key_id?: string };
+      const rules = keys.rules(c.policy_id);
+      const capCred = q.app_key_id ? cred(q.app_key_id) : null;
+      const cap = withCeilings(c, capCred ? keys.rules(capCred.policy_id) : []);
+      const tools = effectiveTools(c, capCred);
       const folders = (await vault.list([])).filter((e) => e.type === 'folder').map((e) => ({
         path: e.path, list: canReach(rules, cap, 'fs.list', e.path), read: canReach(rules, cap, 'fs.read', e.path),
       }));
       const root = `/${vault.alias}`;
-      return { rules, app_key_cap: cap, tools, folders, root: { path: root, list: canReach(rules, cap, 'fs.list', root), read: canReach(rules, cap, 'fs.read', root) } };
+      return { rules, app_key_cap: [...cap], owner_ceilings: ceilingsView(cap), tools, folders, root: { path: root, list: canReach(rules, cap, 'fs.list', root), read: canReach(rules, cap, 'fs.read', root) } };
     });
 
     api.post('/api/simulate', async (req) => {
@@ -273,20 +592,34 @@ export function registerAdminApi(f: FastifyInstance, d: AdminDeps): void {
       const c = cred(b.credential_id), app = b.app_credential_id ? cred(b.app_credential_id) : null;
       const resource = withSlash(b.resource);
       try { parseResource(resource); } catch (e) { throw new KeyError('invalid_argument', (e as Error).message); }
-      return { decision: authorize(keys.rules(c.policy_id), app ? keys.rules(app.policy_id) : [], b.action, resource) };
+      const cap = withCeilings(c, app ? keys.rules(app.policy_id) : []);
+      const decision = authorize(keys.rules(c.policy_id), cap, b.action, resource);
+      return { decision: decision.owner ? { ...decision, owner: { owner_id: decision.owner.owner, owner: decision.owner.label, basis: decision.owner.basis, task: taskRef(decision.owner.task), via: decision.owner.via ?? null } } : decision, owner_ceilings: ceilingsView(cap) };
     });
 
     registerPhase2(api, { db, keys, setup: d.setup, links: d.links, config, audit }, actor);
     registerPhase3(api, { db, keys, messaging: d.messaging }, actor);
-    registerTeams(api, { db, keys, teams: d.teams }, actor);
-    registerPhase5(api, { db, keys, audit, ...d.phase5 }, actor);
+    registerTeams(api, { db, keys, teams: d.teams, routing: d.routing, openPart: (id, a, o) => { d.blueprint.openTeamPart(id, { kind: 'operator', id: a.id }, o); }, setupOf: (id) => d.onboarding.setupOfTeam(id), attachments: d.taskAttachments }, actor);
+    if (d.taskAttachments) registerAttachmentApi(api, { attachments: d.taskAttachments, store: d.store });
+    registerMemberBoard(api, { db, keys, teams: d.teams, attachments: d.taskAttachments });
+    registerWorkFeed(api, { db });
+    registerPhase5(api, { db, keys, audit, routing: d.routing, ...d.phase5 }, actor);
     registerGraphAdmin(api, { db, audit, graph: d.graph }, actor);
     registerVaultApi(api, { db, keys, audit, vault, store: d.store }, actor);
-    registerResetApi(api, { db, audit, config, loginLimit, maintenance: d.phase5.maintenance }, actor);
+    registerVaultLinksApi(api, { vault });
+    registerVaultWriteApi(api, { db, audit, vault, store: d.store }, actor);
+    registerResetApi(api, { db, audit, config, loginLimit, users, maintenance: d.phase5.maintenance }, actor);
+    if (config.demoMode && d.demo) registerDemoApi(api, { demo: d.demo, audit }, actor);
     registerTelemetryApi(api, { db, audit }, actor);
     registerFeedbackApi(api, { feedback: d.feedback }, actor);
+    registerHardwareApi(api, { hardware: d.hardware }, actor);
     registerDirectivesApi(api, { directives: d.directives }, actor);
-    registerDecisionsApi(api, { db, decisions: d.decisions, teams: d.teams, vault }, actor);
+    registerOnboardingApi(api, { keys, onboarding: d.onboarding, files: d.clientFiles, config }, actor);
+    if (d.checkouts && d.checkoutKeys) registerCheckoutApi(api, { checkouts: d.checkouts, checkoutKeys: d.checkoutKeys, teams: d.teams, label: (a) => keys.agent(a)?.label ?? a }, actor);
+    if (d.mirror) registerMirrorApi(api, d.mirror, actor);
+    registerDecisionsApi(api, { db, decisions: d.decisions, teams: d.teams, vault, routing: d.routing }, actor);
+    const bpSources = new Sources(db, vault);
+    registerBlueprintApi(api, { db, blueprint: d.blueprint, routing: d.routing, bpRouting, sources: bpSources, meetings: new Meetings(db, vault, bpSources) }, actor);
 
     // ───── templates ─────
     api.get('/api/templates', async () => ({ templates: keys.templates() }));
@@ -349,4 +682,5 @@ export function registerAdminApi(f: FastifyInstance, d: AdminDeps): void {
       return { alerts: rows };
     });
   });
+  return routes;
 }

@@ -7,6 +7,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { buildApp, type App } from '../src/app.js';
 import type { Config } from '../src/config.js';
 import { newId } from '../src/util/ids.js';
+import { testConfig, adminLogin } from './hub.js';
 
 const sys = { kind: 'system' as const, id: null };
 let app: App, base = '', cookie = '', csrf = '', appKey = '', pcId = '', vaultDir = '';
@@ -46,19 +47,12 @@ beforeAll(async () => {
   for (const d of ['Projects/Open', 'Projects/Closed', 'Vol', 'Lock']) mkdirSync(join(vaultDir, d), { recursive: true });
   writeFileSync(join(vaultDir, 'Projects/Open/a.md'), 'open note\n');
   writeFileSync(join(vaultDir, 'Projects/Closed/b.md'), 'closed note\n');
-  const config: Config = {
-    dataDir: join(dir, 'data'), dbFile: join(dir, 'data', 't.db'), vaultDir, vaultAlias: 'vault', port: 0, host: '127.0.0.1', pepper: 'test-pepper',
-    publicUrl: 'http://hub.test', production: false, adminUsername: 'admin', adminPassword: 'correct horse battery', publicDir: join(process.cwd(), 'public'), logLevel: 'silent', allowedOrigins: [],
-    vaultScanSeconds: 0, vaultWatch: false, maintenanceSeconds: 0,
-    alerts: { denialMax: 3, loginMax: 3, volumeFloor: 5 },
-  };
+  const config: Config = testConfig(dir, { vaultDir, alerts: { denialMax: 3, loginMax: 3, volumeFloor: 5 } });
   app = await buildApp(config);
   await app.store.ready;
   await app.fastify.listen({ port: 0, host: '127.0.0.1' });
   base = `http://127.0.0.1:${(app.fastify.server.address() as { port: number }).port}`;
-  const r = await fetch(`${base}/api/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ username: 'admin', password: 'correct horse battery' }) });
-  cookie = r.headers.get('set-cookie')!.split(';')[0]!;
-  csrf = ((await r.json()) as { csrf: string }).csrf;
+  ({ cookie, csrf } = await adminLogin(base));
   pcId = (await api('POST', '/pcs', { name: 'pc' })).body.pc.id;
   appKey = app.keys.createAppKey({ machineId: pcId, appName: 'claude-code', maxLiveSessions: 100 }, sys).secret;
 });
@@ -213,6 +207,13 @@ describe('alert rules', () => {
     const rows = alertsOf('forbidden_path', p.cred.id);
     expect(rows).toHaveLength(1);
     expect(JSON.parse(rows[0].details).repeats).toBe(2);
+  });
+
+  it('paths inside prose arguments raise no forbidden-path alert', async () => {
+    const p = mk('writer', FULL);
+    const S = await login(p.secret);
+    await S('file_read', { path: '/vault/missing.md', note: 'see ../secret and /home/x/.claude/settings.json.' });
+    expect(alertsOf('forbidden_path', p.cred.id)).toHaveLength(0);
   });
 
   it('unusual write volume fires once above the hourly floor', async () => {

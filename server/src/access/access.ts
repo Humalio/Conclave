@@ -16,6 +16,8 @@ const ACTION_RE = /^[a-z_]+(\.[a-z_*]+)*$|^\*$/;
 export interface RequestRow {
   id: string; credential_id: string; agent_id: string; actions: string[]; resource: string; justification: string;
   requested_duration_s: number | null; status: string; decided_by: string | null; decision_note: string | null; decided_at: number | null; created_at: number;
+  /** The team the request is routed to (docs/multi-user.md §1.3); null: the admin decides. */
+  team_id: string | null;
 }
 type Raw = Omit<RequestRow, 'actions'> & { actions: string };
 
@@ -44,11 +46,13 @@ export function resourceWithin(narrow: string, wide: string): boolean {
 
 export class Access {
   constructor(private readonly db: Db, private readonly keys: Keys, private readonly audit: Audit) {}
+  /** Resolves the team a new request is routed to (set by the app from the decider routing). */
+  routeTeam?: (agentId: string, taskRef: string | null) => string | null;
 
   private view(r: Raw): RequestRow { return { ...r, actions: JSON.parse(r.actions) as string[] }; }
   get(id: string): RequestRow | null { const r = this.db.prepare('SELECT * FROM access_requests WHERE id=?').get(id) as Raw | undefined; return r ? this.view(r) : null; }
 
-  request(cred: { id: string }, agentId: string, i: { actions: string[]; resource: string; reason: string; duration?: unknown }): RequestRow {
+  request(cred: { id: string }, agentId: string, i: { actions: string[]; resource: string; reason: string; duration?: unknown; task_ref?: string }): RequestRow {
     if (!i.actions.length || !i.actions.every((a) => ACTION_RE.test(a))) throw new KeyError('invalid_argument', 'actions must look like ["fs.update"]');
     const resource = i.resource.startsWith('/') ? `path:${i.resource}` : i.resource;
     try { parseResource(resource); } catch (e) { throw new KeyError('invalid_argument', (e as Error).message); }
@@ -56,9 +60,10 @@ export class Access {
     const n = (this.db.prepare("SELECT COUNT(*) n FROM access_requests WHERE credential_id=? AND status='pending'").get(cred.id) as { n: number }).n;
     if (n >= MAX_PENDING) throw new KeyError('rate_limited', `You already have ${MAX_PENDING} pending requests. Wait for a decision.`);
     const id = newId.request();
-    this.db.prepare('INSERT INTO access_requests(id,credential_id,agent_id,actions,resource,justification,requested_duration_s,created_at) VALUES (?,?,?,?,?,?,?,?)')
-      .run(id, cred.id, agentId, JSON.stringify(i.actions), resource, i.reason, parseDuration(i.duration), Date.now());
-    this.audit.event({ kind: 'agent', id: agentId }, 'access.request', { kind: 'access_request', id }, { actions: i.actions, resource });
+    const teamId = this.routeTeam?.(agentId, i.task_ref ?? null) ?? null;
+    this.db.prepare('INSERT INTO access_requests(id,credential_id,agent_id,actions,resource,justification,requested_duration_s,created_at,team_id) VALUES (?,?,?,?,?,?,?,?,?)')
+      .run(id, cred.id, agentId, JSON.stringify(i.actions), resource, i.reason, parseDuration(i.duration), Date.now(), teamId);
+    this.audit.event({ kind: 'agent', id: agentId }, 'access.request', { kind: 'access_request', id }, { actions: i.actions, resource, team: teamId });
     return this.get(id)!;
   }
 

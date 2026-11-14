@@ -1,0 +1,2 @@
+# Migrations are hashed at startup; keep them LF in every checkout (see docs/getting-started.md).
+*.sql text eol=lf

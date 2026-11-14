@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildApp, type App } from '../src/app.js';
 import type { Config } from '../src/config.js';
+import { testConfig, adminLogin } from './hub.js';
 
 const sys = { kind: 'system' as const, id: null };
 const PASSWORD = 'correct horse battery';
@@ -33,16 +34,11 @@ beforeEach(async () => {
   const vaultDir = join(dir, 'vault');
   mkdirSync(vaultDir, { recursive: true });
   writeFileSync(join(vaultDir, 'note.md'), '# Note\n');
-  const config: Config = {
-    dataDir: join(dir, 'data'), dbFile: join(dir, 'data', 't.db'), vaultDir, vaultAlias: 'vault', port: 0, host: '127.0.0.1', pepper: 'test-pepper',
-    publicUrl: 'http://hub.test', production: false, adminUsername: 'admin', adminPassword: PASSWORD, publicDir: join(process.cwd(), 'public'), logLevel: 'silent', allowedOrigins: [],
-  };
+  const config: Config = testConfig(dir, { vaultDir, adminPassword: PASSWORD, vaultScanSeconds: undefined, vaultWatch: undefined, maintenanceSeconds: undefined });
   app = await buildApp(config);
   await app.fastify.listen({ port: 0, host: '127.0.0.1' });
   base = `http://127.0.0.1:${(app.fastify.server.address() as { port: number }).port}`;
-  const r = await fetch(`${base}/api/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ username: 'admin', password: PASSWORD }) });
-  cookie = r.headers.get('set-cookie')!.split(';')[0]!;
-  csrf = ((await r.json()) as { csrf: string }).csrf;
+  ({ cookie, csrf } = await adminLogin(base, 'admin', PASSWORD));
 });
 afterEach(async () => { await app.close(); });
 

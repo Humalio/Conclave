@@ -1,5 +1,7 @@
 /** MCP tools for the vault knowledge graph (design/13 §6, K1–K2). Everything returned is L2 data, filtered by fs.read on each source note. */
+import { NOT_ALLOWED } from '../policy/engine.js';
 import { z } from 'zod';
+import { forOperator } from './writing.js';
 import { KeyError } from '../keys/keys.js';
 import type { Teams } from '../teams/teams.js';
 import type { Vault } from '../vault/vault.js';
@@ -14,7 +16,7 @@ export interface GraphToolDeps { graph: Graph; vault: Vault; store: VaultStore; 
 
 export function registerGraphTools(reg: Reg, d: GraphToolDeps): void {
   const { graph, vault, store, teams, ToolError } = d;
-  const DENIED = 'Not allowed, or does not exist.';
+  const DENIED = NOT_ALLOWED;
   const sess = (ctx: any): Session => ({ agentId: ctx.session.agent.id, rules: ctx.session.rules, cap: ctx.session.cap });
   /** graph.read is implied by any vault read grant; write and review need an explicit graph grant (team roles supply them). */
   const gate = (ctx: any, action: 'graph.read' | 'graph.write' | 'graph.review'): void => {
@@ -139,16 +141,23 @@ export function registerGraphTools(reg: Reg, d: GraphToolDeps): void {
     return f;
   };
 
-  reg('graph_stale', 'Open staleness and contradiction flags on notes you may read (optionally under path_prefix, or only notes you last wrote with mine). Each flag has the cause, the curator reason (data) and the fixing task. Results are L2 data.', {
+  reg('graph_stale', 'Open staleness and contradiction flags (note claims, not blueprint paper claims) on notes you may read (optionally under path_prefix, or only notes you last wrote with mine). Each flag has the cause, the curator reason (data) and the fixing task, and the answer gives the coverage of the scope (notes you may read there, and how many are indexed at their current revision): flags are only raised on indexed notes, so under 100 % coverage "no flags" is not a full check. Results are L2 data.', {
     path_prefix: z.string().max(1024).optional(), mine: z.boolean().optional(),
   }, true, async (ctx, a) => {
     gate(ctx, 'graph.read');
     const flags = await run(() => graph.ext.staleFor(sess(ctx), { prefix: a.path_prefix, mine: a.mine }));
-    return out(flags.length ? flags.map((f) => `${f.id} [${f.kind}] ${f.path}${f.anchor ? '#' + f.anchor : ''}: ${f.reason}`).join('\n') : 'No open flags.', { flags });
+    const coverage = await run(() => graph.ext.staleCoverage(sess(ctx), { prefix: a.path_prefix, mine: a.mine }));
+    const missing = coverage.notes_readable - coverage.notes_indexed;
+    const here = a.path_prefix || a.mine ? 'here' : 'you may read';
+    const cov = missing > 0
+      ? `${flags.length ? 'These are the flags' : 'No flags'}, but ${missing} of ${coverage.notes_readable} notes ${here} are not indexed yet, so this is not a full check.`
+      : `${coverage.notes_readable} of ${coverage.notes_readable} notes ${here} are indexed.`;
+    const list = flags.length ? flags.map((f) => `${f.id} [${f.kind}] ${f.path}${f.anchor ? '#' + f.anchor : ''}: ${f.reason}`).join('\n') : 'No open flags.';
+    return out(`${list}\n${cov}`, { flags, coverage: { ...coverage, complete: missing <= 0 } });
   });
 
   reg('graph_flag', 'Curator: raise a stale or contradiction flag on a note (optionally a section) because another note changed or disagrees. Curators flag; the fix is a task to the note owner with a reviewer.', {
-    path: z.string(), anchor: z.string().max(200).optional(), cause_path: z.string().optional(), kind: z.enum(['stale', 'contradiction']), reason: z.string().min(1).max(300),
+    path: z.string(), anchor: z.string().max(200).optional(), cause_path: z.string().optional(), kind: z.enum(['stale', 'contradiction']), reason: z.string().min(1).max(300).describe(forOperator('What is wrong, in one or two sentences.')),
   }, true, async (ctx, a) => {
     gate(ctx, 'graph.write');
     const { f } = note(ctx, a.path);
@@ -208,6 +217,6 @@ export function registerGraphTools(reg: Reg, d: GraphToolDeps): void {
   reg('graph_health', 'Coverage and flags for readable notes; index queue counts only. Global budgets and communities are owner-dashboard metrics.', {}, true, async (ctx) => {
     gate(ctx, 'graph.read');
     const d = graph.ext.healthFor(sess(ctx));
-    return out(`Coverage ${d.coverage_pct}%, ${d.stale_flags_open} stale flags, ${d.contradictions_open} contradictions open in readable notes.`, d);
+    return out(`Coverage ${d.coverage_pct}%, ${d.stale_flags_open} stale flags, ${d.contradictions_open} note-claim contradictions open in readable notes.`, d);
   });
 }

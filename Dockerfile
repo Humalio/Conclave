@@ -6,6 +6,7 @@ COPY server/tsconfig.json ./
 COPY server/scripts ./scripts
 COPY server/src ./src
 COPY bridge /bridge
+COPY deploy/client /deploy/client
 RUN npm run build && npm prune --omit=dev
 
 FROM node:24-slim
@@ -15,6 +16,11 @@ COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY server/package.json ./
 COPY server/public ./public
+# The Early Echo story, used only when DEMO_MODE=1 (docs/showcase.md#demo-mode): the Replay bar resets the hub to its
+# start and runs eval/run.mjs in-process. Read only; without DEMO_MODE nothing loads it.
+COPY eval/vault /eval/vault
+COPY eval/story /eval/story
+COPY eval/run.mjs /eval/run.mjs
 RUN mkdir -p /data /vault && chown -R node:node /data /app
 USER node
 VOLUME /data

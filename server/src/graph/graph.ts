@@ -2,6 +2,7 @@
  * Vault knowledge graph, K1–K2 (design/13). The hub has no LLM: it parses, diffs, generates candidates, schedules
  * jobs, enforces budgets and validates what curator sessions submit. Every claim carries note + section + revision + exact quote.
  */
+import { NOT_ALLOWED } from '../policy/engine.js';
 import type { Db } from '../db/db.js';
 import { tx } from '../db/db.js';
 import type { Keys } from '../keys/keys.js';
@@ -9,12 +10,13 @@ import { KeyError } from '../keys/keys.js';
 import type { Teams, Who } from '../teams/teams.js';
 import type { Vault } from '../vault/vault.js';
 import type { VaultStore, RevisionEvent, FileRow } from '../vault/store.js';
-import type { Rule } from '../policy/engine.js';
+import type { Rule, Cap } from '../policy/engine.js';
 import { authorize } from '../policy/engine.js';
 import { randomToken, sha256Hex } from '../util/crypto.js';
 import { parse, fmTarget, minhash, jaccard, estTokens, norm, type Parsed } from './parse.js';
 import type { Audit } from '../audit/audit.js';
 import { GraphExt } from './kg2.js';
+import { inMirrorFolder } from '../mirror/folder.js';
 
 export interface GraphOpts { verifyRate: number; editorOfferMs: number; communityMinMs: number; folderMinNotes: number; mergeReviewClaims: number; repMinChecked: number; repMaxRate: number; debounceMs: number; leaseMs: number; maxInputTokens: number; nearDup: number; impactMin: number; maxAttempts: number; burstFiles: number }
 export const DEFAULT_GRAPH_OPTS: GraphOpts = { verifyRate: 0.1, editorOfferMs: 5 * 60_000, communityMinMs: 15 * 60_000, folderMinNotes: 3, mergeReviewClaims: 5, repMinChecked: 5, repMaxRate: 0.2, debounceMs: 120_000, leaseMs: 10 * 60_000, maxInputTokens: 6000, nearDup: 0.6, impactMin: 0.2, maxAttempts: 3, burstFiles: 50 };
@@ -27,7 +29,7 @@ const INSTRUCTION_LIKE = /\b(ignore (all |any |the )?(previous|prior|above)|disr
 const STOP = new Set('the and for with that this what which when where who how are was were from have has not but can does did about into your you our their its they them then than also any all use used using'.split(' '));
 
 export interface Candidate { path: string; file_id: string; anchor: string; heading: string | null; score: number; reasons: { kind: string; weight: number; evidence?: string }[] }
-export interface Session { agentId: string; rules: Rule[]; cap: Rule[] }
+export interface Session { agentId: string; rules: Rule[]; cap: Cap }
 export interface SectionRow { file_id: string; anchor: string; heading: string; rev: string; hash: string; start: number; end: number; tokens_est: number; minhash: string | null; indexed_hash: string | null }
 export interface JobRow { offered_to?: string | null; offered_until?: number | null; exclude_agent?: string | null; batch_of?: string | null; id: string; type: string; priority: number; tier: string; scope_ref: string; input_json: string | null; dedupe_key: string; state: string; leased_by: string | null; lease_until: number | null; attempts: number; tokens_est: number; revision: string | null; origin: string | null; not_before: number }
 export interface JobInput { batch?: (JobInput & { job_id: string })[]; file_id: string; path: string; revision: string; origin: string; sections: { anchor: string; heading: string; hash: string; tokens_est: number; text: string; truncated?: boolean }[] }
@@ -80,8 +82,47 @@ export class Graph {
   // ───────────── K1: on a write ─────────────
   onRevision(e: RevisionEvent): void {
     if (e.revision === 'tombstone') { this.forget(e.fileId); return; }
-    if (!e.bytes || e.op === 'rename' || !/\.md$/i.test(e.path)) return;
-    this.indexRevision(e.fileId, e.path, e.revision, e.bytes.toString('utf8'), e.origin, e.agentId);
+    // A rename, or recovery's report of a file's committed state (docs/vault.md), says where the note is now: one that
+    // is no longer a Markdown note outside 99 Conclave/ leaves the graph, and its links follow its current path.
+    const placed = e.op === 'rename' || e.op === 'recover';
+    if (!/\.md$/i.test(e.path) || inMirrorFolder(e.path)) { if (placed) this.forget(e.fileId); return; }
+    if (!e.bytes) return;
+    const text = e.bytes.toString('utf8');
+    // A rename writes no content: it is no one's read-before-write provenance.
+    this.indexRevision(e.fileId, e.path, e.revision, text, e.origin, e.op === 'rename' ? null : e.agentId);
+    if (placed) this.relink(e.fileId, e.path, text);
+  }
+
+  /**
+   * Links follow a note's current path after a rename or a recovery (docs/vault.md): its own links are resolved again from
+   * where it is now, a link elsewhere that named it by its old path or name no longer points at it, and one that names
+   * its new path or name now does. Idempotent: a second pass finds nothing to move.
+   */
+  private relink(fileId: string, path: string, text: string): void {
+    const now = Date.now();
+    const nameOf = (t: string) => `name:${t.split('/').pop()!.replace(/\.md$/i, '').toLowerCase()}`;
+    // The link target a signal was made from, as refreshSignals wrote its evidence.
+    const targetOf = (s: { kind: string; evidence: string | null }): string | null => {
+      if (!s.evidence) return null;
+      if (s.kind.startsWith('fm_')) { const at = s.evidence.indexOf(': '); return at < 0 ? null : fmTarget(s.evidence.slice(at + 2)).target; }
+      return fmTarget(s.evidence.replace(/^!/, '')).target;
+    };
+    tx(this.db, () => {
+      this.refreshSignals(fileId, path, parse(text), now);
+      const rows = this.db.prepare("SELECT * FROM kg_signals WHERE (dst_file=? OR dst_file=?) AND src_file<>? AND (kind IN ('link','embed') OR kind LIKE 'fm_%')").all(fileId, nameOf(path), fileId) as
+        { src_file: string; src_anchor: string; dst_file: string; dst_anchor: string; kind: string; weight: number; evidence: string | null }[];
+      const del = this.db.prepare('DELETE FROM kg_signals WHERE src_file=? AND src_anchor=? AND dst_file=? AND dst_anchor=? AND kind=?');
+      const ins = this.db.prepare('INSERT OR REPLACE INTO kg_signals(src_file,src_anchor,dst_file,dst_anchor,kind,weight,evidence,seen_at) VALUES (?,?,?,?,?,?,?,?)');
+      for (const s of rows) {
+        const src = this.fileById(s.src_file), target = targetOf(s);
+        if (!src || src.deleted_at !== null || target === null) continue;
+        const dst = this.resolve(target, src.path);
+        const to = dst ? dst.id : nameOf(target);
+        if (to === s.dst_file) continue;
+        del.run(s.src_file, s.src_anchor, s.dst_file, s.dst_anchor, s.kind);
+        if (dst?.id !== s.src_file) ins.run(s.src_file, s.src_anchor, to, s.dst_anchor, s.kind, s.weight, s.evidence, now);
+      }
+    });
   }
 
   private forget(fileId: string): void {
@@ -97,6 +138,8 @@ export class Graph {
 
   /** Sections, signals, candidates and the index job for one new revision of a note. */
   indexRevision(fileId: string, path: string, revision: string, text: string, origin: string, agentId: string | null): { changed: string[]; removed: string[] } {
+    // The hub's copies in 99 Conclave/ stay out of the shared graph: no sections, signals or jobs (docs/vault.md).
+    if (inMirrorFolder(path)) return { changed: [], removed: [] };
     const p = parse(text);
     const old = new Map(this.sections(fileId).map((s) => [s.anchor, s]));
     const changed: string[] = [], removed: string[] = [];
@@ -304,7 +347,7 @@ export class Graph {
   /** Lazy coverage: a note read for the first time without an index gets a job. */
   touchRead(path: string): void {
     const f = this.store.fileByPath(path);
-    if (!f || !f.current_revision || !/\.md$/i.test(path)) return;
+    if (!f || !f.current_revision || !/\.md$/i.test(path) || inMirrorFolder(path)) return;
     const st = this.db.prepare('SELECT coverage FROM kg_note_state WHERE file_id=?').get(f.id) as { coverage: string } | undefined;
     if (st && st.coverage !== 'none' && st.coverage !== 'stale') return;
     if (this.db.prepare("SELECT 1 x FROM kg_jobs WHERE dedupe_key=? AND state IN ('queued','leased')").get(`index_note:${f.id}`)) return;
@@ -707,7 +750,7 @@ export class Graph {
   /** graph_upsert: ad-hoc entities and claims against the note's current text (same validation). */
   async upsert(agentId: string, path: string, payload: unknown): Promise<IngestReport> {
     const f = this.store.fileByPath(path);
-    if (!f || !f.current_revision) throw err('not_found', 'Not allowed, or does not exist.');
+    if (!f || !f.current_revision) throw err('not_found', NOT_ALLOWED);
     const buf = await this.store.getBlob(f.current_revision);
     if (!buf) throw err('not_found', 'The note text is not available.');
     const text = buf.toString('utf8');

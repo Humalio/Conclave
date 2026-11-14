@@ -10,7 +10,7 @@ export interface FeedbackApiDeps { feedback: Feedback }
 
 const filters = z.object({
   bucket: z.enum(['new', 'open', 'closed']).optional(), status: z.string().max(20).optional(), kind: z.enum(KINDS).optional(), tool: z.string().max(100).optional(),
-  team: z.string().max(100).optional(), agent: z.string().max(100).optional(), q: z.string().max(200).optional(), sort: z.enum(['impact', 'recent']).optional(),
+  team: z.string().max(100).optional(), agent: z.string().max(100).optional(), assignee: z.string().max(100).optional(), linked: z.enum(['linked', 'not_linked']).optional(), q: z.string().max(200).optional(), sort: z.enum(['impact', 'recent']).optional(),
   limit: z.coerce.number().int().min(1).max(500).optional(),
 });
 const limits = z.object({
@@ -47,6 +47,12 @@ export function registerFeedbackApi(api: FastifyInstance, d: FeedbackApiDeps, ac
     feedback.setStatus(idOf(req), b, actor(req));
     return feedback.detail(idOf(req));
   });
+  // Assign to one agent, or unassign with agent_id null (docs/feedback.md#assigning-a-report).
+  api.post('/api/feedback/:id/assign', async (req) => {
+    const b = body(z.object({ agent_id: z.string().min(1).max(100).nullable(), note: z.string().max(2000).nullable().optional() }).strict(), req);
+    feedback.assign(idOf(req), b.agent_id, b.note ?? null, actor(req));
+    return feedback.detail(idOf(req));
+  });
   api.post('/api/feedback/:id/merge', async (req) => {
     const b = body(z.object({ target_id: z.string().min(1).max(100) }), req);
     const r = feedback.merge(idOf(req), b.target_id, actor(req));
@@ -61,5 +67,17 @@ export function registerFeedbackApi(api: FastifyInstance, d: FeedbackApiDeps, ac
     feedback.note(idOf(req), body(z.object({ text: z.string().min(1).max(2000) }), req).text, actor(req));
     return feedback.detail(idOf(req));
   });
+  // Linked tasks (docs/feedback.md#linked-tasks): the operator links and unlinks any report and task.
+  api.post('/api/feedback/:id/tasks', async (req) => {
+    const b = body(z.object({ task_id: z.string().min(1).max(100) }).strict(), req);
+    feedback.link(idOf(req), b.task_id, actor(req));
+    return feedback.detail(idOf(req));
+  });
+  api.delete('/api/feedback/:id/tasks/:taskId', async (req) => {
+    feedback.unlink(idOf(req), (req.params as { taskId: string }).taskId, actor(req));
+    return feedback.detail(idOf(req));
+  });
+  // "From feedback" on the operator's task screen: every report linked to the task.
+  api.get('/api/feedback/by-task/:taskId', async (req) => ({ reports: feedback.reportsOfTask((req.params as { taskId: string }).taskId) }));
   api.delete('/api/feedback/:id', async (req) => { feedback.delete(idOf(req), actor(req)); return { ok: true }; });
 }

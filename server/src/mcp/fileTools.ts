@@ -1,5 +1,7 @@
 /** Vault write tools (design/08 "Files (the vault)"): create, update, patch, rename, delete, history, diff, restore, conflicts. */
+import { NOT_ALLOWED } from '../policy/engine.js';
 import { z } from 'zod';
+import type { OwnerScope } from '../policy/ownerScope.js';
 import type { Keys } from '../keys/keys.js';
 import type { Teams } from '../teams/teams.js';
 import type { Vault } from '../vault/vault.js';
@@ -11,7 +13,7 @@ import { authorize } from '../policy/engine.js';
 type Out = { text: string; data: Record<string, unknown> };
 type Reg = (name: string, description: string, shape: z.ZodRawShape, needsToken: boolean, fn: (ctx: any, a: any) => Promise<Out>) => void;
 type ToolErrorCtor = new (code: string, message: string, extra?: Record<string, unknown>) => Error;
-export interface FileToolDeps { store: VaultStore; vault: Vault; keys: Keys; teams: Teams; ToolError: ToolErrorCtor; hint?: (agentId: string, relPath: string) => string | null }
+export interface FileToolDeps { store: VaultStore; vault: Vault; keys: Keys; teams: Teams; ToolError: ToolErrorCtor; hint?: (agentId: string, relPath: string) => string | null; ownerScope?: OwnerScope }
 
 const BASE = z.string().max(100).describe('The revision (sha256:...) you last read; use "absent" for a file that does not exist');
 
@@ -21,7 +23,7 @@ export function registerFileWriteTools(reg: Reg, d: FileToolDeps): void {
     const h = hint?.(ctx.session.agent.id, rel.join('/')) ?? null;
     return { text: h ? `${text}\n${h}` : text, data: h ? { ...data, graph_hint: h } : data };
   };
-  const DENIED = 'Not allowed, or does not exist.';
+  const DENIED = NOT_ALLOWED;
 
   /** Who is writing, plus a re-check run just before the commit point (the key may have been revoked meanwhile). */
   const who = (ctx: any, action: string, paths: string[]): Who => {
@@ -33,7 +35,9 @@ export function registerFileWriteTools(reg: Reg, d: FileToolDeps): void {
         const c = keys.credential(s.cred.id);
         if (!c || keys.effectiveStatus(c) !== 'active') throw new VaultError('denied', DENIED);
         for (const p of paths) {
-          const dec = authorize(keys.rulesFor(s.cred.id), keys.rulesFor(ctx.app.id), action, `path:${p}`, { isPaused: teams.isPaused });
+          // At commit: the key's current rules, the app key's cap and the owner ceilings as they are now.
+          const appCap = keys.rulesFor(ctx.app.id), cap = d.ownerScope ? d.ownerScope.cap(s.agent.id, appCap) : appCap;
+          const dec = authorize(keys.rulesFor(s.cred.id), cap, action, `path:${p}`, { isPaused: teams.isPaused });
           if (!dec.allowed) throw dec.source === 'paused' ? new ToolError('paused', 'The team is paused.') : new VaultError('denied', DENIED);
         }
       },
@@ -127,10 +131,10 @@ export function registerFileWriteTools(reg: Reg, d: FileToolDeps): void {
     if (!file) throw new ToolError('not_found', DENIED);
     const revisions = visible(ctx, store.revisions(file.id, 1000)).slice(0, a.limit ?? 50).map((r) => ({
       revision: r.revision, parent_revision: r.parent_revision, op: r.op, origin: r.origin, recovered: !!r.recovered, path: r.path_at_revision, size: r.size, at: r.created_at,
-      by: r.agent_id ? { agent_id: r.agent_id, label: label(r.agent_id) } : r.admin_id ? { admin_id: r.admin_id } : null,
+      by: r.agent_id ? { agent_id: r.agent_id, label: label(r.agent_id) } : store.personLabel(r.author_kind, r.user_id) ?? (r.admin_id ? { kind: 'operator', label: 'Operator' } : null),
     }));
     return {
-      text: `${path}: ${revisions.length} revision(s), current ${file.current_revision ?? 'deleted'}\n${revisions.map((r) => `${new Date(r.at).toISOString()} ${r.op} [${r.origin}] ${r.revision}${r.by && 'label' in r.by ? ` by ${r.by.label ?? r.by.agent_id}` : ''}`).join('\n')}`,
+      text: `${path}: ${revisions.length} revision(s), current ${file.current_revision ?? 'deleted'}\n${revisions.map((r) => `${new Date(r.at).toISOString()} ${r.op} [${r.origin}] ${r.revision}${r.by && 'label' in r.by ? ` by ${r.by.label ?? ('agent_id' in r.by ? r.by.agent_id : '')}` : ''}`).join('\n')}`,
       data: { trust: 'L2', path, current_revision: file.current_revision, deleted: file.deleted_at !== null, revisions },
     };
   });

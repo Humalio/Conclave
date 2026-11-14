@@ -56,13 +56,13 @@ docker compose version >/dev/null 2>&1 || die "Docker Compose v2 is required (th
 
 # ── vault ──────────────────────────────────────────────────────────────────────────────────────
 if [[ -z $vault && $demo -eq 0 ]]; then
-  ask vault "Vault folder (an Obsidian vault works; leave empty to start with a copy of the demo vault)" ""
+  ask vault "Vault folder (an Obsidian vault works; leave empty to start with a copy of the Early Echo vault)" ""
   [[ -z $vault ]] && demo=1
 fi
 if [[ $demo -eq 1 ]]; then
   vault="$root/vault"
   if [[ -e $vault ]]; then echo "Using the existing ./vault (not overwritten)."
-  else cp -r demo/vault "$vault"; echo "Copied the demo vault to ./vault."; fi
+  else cp -r eval/vault "$vault"; echo "Copied the Early Echo vault to ./vault."; fi
 fi
 vault="${vault/#\~/$HOME}"
 [[ -d $vault ]] || die "vault folder not found: $vault"

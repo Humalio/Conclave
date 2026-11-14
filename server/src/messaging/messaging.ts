@@ -6,6 +6,7 @@ import type { Keys } from '../keys/keys.js';
 import type { Links } from '../links/links.js';
 import type { Rule } from '../policy/engine.js';
 import { authorize } from '../policy/engine.js';
+import type { OwnerScope } from '../policy/ownerScope.js';
 import { randomToken } from '../util/crypto.js';
 
 export const MAX_BODY_BYTES = 64 * 1024;
@@ -43,10 +44,13 @@ export class Messaging {
   }
   /** May this agent (any of its usable session keys, plus links) do this? Used for the receiving side, which has no login in this request. */
   agentAllows(agentId: string, action: string, resource: string): boolean {
-    const link = this.linkRules(agentId);
+    const link = this.linkRules(agentId), owners = this.owners(agentId);
     const creds = this.keys.credentials({ kind: 'session_key', agentId }).filter((c) => !['revoked', 'expired'].includes(this.keys.effectiveStatus(c)));
-    return creds.some((c) => authorize([...this.keys.rulesFor(c.id), ...link], [], action, resource).allowed);
+    return creds.some((c) => authorize([...this.keys.rulesFor(c.id), ...link], owners, action, resource).allowed);
   }
+  /** Owner ceilings for the receiving side (docs/authorization.md#owner-enforcement); set by app.ts. */
+  ownerScope: OwnerScope | null = null;
+  private owners(agentId: string) { return this.ownerScope ? this.ownerScope.cap(agentId, []) : []; }
 
   /**
    * May this agent read this room: membership plus grants, as message_read decides. `login` gives a live login's
@@ -63,7 +67,7 @@ export class Messaging {
     };
     if (login) return ok(login.rules, login.cap);
     return this.keys.credentials({ kind: 'session_key', agentId }).filter((c) => !['revoked', 'expired'].includes(this.keys.effectiveStatus(c)))
-      .some((c) => ok(this.keys.rulesFor(c.id), []));
+      .some((c) => ok(this.keys.rulesFor(c.id), this.owners(agentId)));
   }
 
   // ───── rooms ─────

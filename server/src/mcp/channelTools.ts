@@ -1,4 +1,5 @@
 /** Data channel tools (design/08 "Data channels") and file_download. Off by default: a key needs channel.use. */
+import { NOT_ALLOWED } from '../policy/engine.js';
 import { promises as fs } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
@@ -15,7 +16,7 @@ type Out = { text: string; data: Record<string, unknown> };
 type Reg = (name: string, description: string, shape: z.ZodRawShape, needsToken: boolean, fn: (ctx: any, a: any) => Promise<Out>) => void;
 type ToolErrorCtor = new (code: string, message: string, extra?: Record<string, unknown>) => Error;
 export interface ChannelToolDeps { channels: Channels; shares: Shares; vault: Vault; keys: Keys; teams: Teams; msgr: Messaging; ToolError: ToolErrorCtor }
-const DENIED = 'Not allowed, or does not exist.';
+const DENIED = NOT_ALLOWED;
 const id = z.string().max(100);
 
 export function registerChannelTools(reg: Reg, d: ChannelToolDeps): void {
@@ -44,7 +45,7 @@ export function registerChannelTools(reg: Reg, d: ChannelToolDeps): void {
     const kind = i > 0 ? (a.to as string).slice(0, i) : '', target = i > 0 ? (a.to as string).slice(i + 1) : '';
     if (!['agent', 'vault', 'share'].includes(kind) || !target) throw new ToolError('invalid_argument', 'to must be agent:<id>, vault:<path> or share:<id>.');
     const bridge = a.local_path !== undefined;
-    const from = { agentId: s.agent.id, credId: s.cred.id, machineId: ctx.app.machine_id as string | null };
+    const from = { agentId: s.agent.id, credId: s.cred.id, machineId: ctx.app.machine_id as string | null, appId: ctx.app.id as string };
     const local = bridge ? channels.resolveLocal(from.machineId, a.local_path, 'local_path') : undefined;
     if (!bridge && (a.size === undefined || !a.sha256)) throw new ToolError('invalid_argument', 'Give local_path (bridge mode), or size and sha256 (inline mode).');
     let c: ChannelRow;
@@ -52,20 +53,20 @@ export function registerChannelTools(reg: Reg, d: ChannelToolDeps): void {
       need(ctx, 'channel.open', `agent:${target}`);
       const t = keys.agent(target);
       if (!t || t.id === s.agent.id || t.archived_at || t.status === 'archived' || !msgr.agentAllows(t.id, 'channel.accept', `agent:${s.agent.id}`)) throw new ToolError('denied', DENIED);
-      c = channels.open({ from, targetKind: 'agent', target: t.id, toAgentId: t.id, direction: 'send', mode: bridge ? 'bridge' : 'inline', fromLocalPath: local, framing: 'tar', size: a.size, sha256: a.sha256, purpose: a.purpose });
+      c = channels.open({ from, openedWith: 'channel_open', targetKind: 'agent', target: t.id, toAgentId: t.id, direction: 'send', mode: bridge ? 'bridge' : 'inline', fromLocalPath: local, framing: 'tar', size: a.size, sha256: a.sha256, purpose: a.purpose });
     } else if (kind === 'vault') {
       const { path } = vault.normalise(target);
       const base = a.base_revision ?? 'absent';
       ctx.need(base === 'absent' ? 'fs.create' : 'fs.update', path);
       teams.guardWrite(s.agent.id);
-      c = channels.open({ from, targetKind: 'vault', target: path, direction: 'send', mode: bridge ? 'bridge' : 'inline', fromLocalPath: local, framing: 'raw', size: a.size, sha256: a.sha256, baseRevision: base, purpose: a.purpose });
+      c = channels.open({ from, openedWith: 'channel_open', targetKind: 'vault', target: path, direction: 'send', mode: bridge ? 'bridge' : 'inline', fromLocalPath: local, framing: 'raw', size: a.size, sha256: a.sha256, baseRevision: base, purpose: a.purpose });
     } else {
       const sh = shares.mustAuthor(target, s.agent.id);
       if (sh.status !== 'open') throw new ToolError('invalid_state', 'This share is closed.');
       need(ctx, 'share.upload', `share:${sh.id}`);
       teams.guardWrite(s.agent.id);
       if (!bridge && !a.share_path) throw new ToolError('invalid_argument', 'Inline uploads into a share need share_path (the file\'s path in the share).');
-      c = channels.open({ from, targetKind: 'share', target: sh.id, direction: 'send', mode: bridge ? 'bridge' : 'inline', fromLocalPath: local, framing: 'tar', sharePath: a.share_path, size: a.size, sha256: a.sha256, purpose: a.purpose });
+      c = channels.open({ from, openedWith: 'channel_open', targetKind: 'share', target: sh.id, direction: 'send', mode: bridge ? 'bridge' : 'inline', fromLocalPath: local, framing: 'tar', sharePath: a.share_path, size: a.size, sha256: a.sha256, purpose: a.purpose });
     }
     return {
       text: `Channel ${c.id} opened (${c.mode} mode, ${c.status}).${c.status === 'offered' ? ' Waiting for the receiver to accept (10 minutes).' : ''}`,
@@ -126,20 +127,20 @@ export function registerChannelTools(reg: Reg, d: ChannelToolDeps): void {
     const { path, rel } = vault.normalise(a.path);
     ctx.need('fs.download', path);
     ctx.need('fs.read', path);
-    const from = { agentId: s.agent.id, credId: s.cred.id, machineId: ctx.app.machine_id as string | null };
+    const from = { agentId: s.agent.id, credId: s.cred.id, machineId: ctx.app.machine_id as string | null, appId: ctx.app.id as string };
     const real = await vault.resolve(rel).catch(() => { throw new ToolError('not_found', DENIED); });
     const st = await fs.stat(real);
     if (!st.isFile()) throw new ToolError('invalid_argument', 'This is a folder.');
     if (a.local_path !== undefined) {
       const dest = channels.resolveLocal(from.machineId, a.local_path, 'local_path');
       const sha256 = await hashFile(real);
-      const c = channels.open({ from, targetKind: 'vault', target: path, direction: 'download', mode: 'bridge', toLocalPath: dest, framing: 'raw', size: st.size, sha256, purpose: `download ${path}` });
+      const c = channels.open({ from, openedWith: 'file_download', targetKind: 'vault', target: path, direction: 'download', mode: 'bridge', toLocalPath: dest, framing: 'raw', size: st.size, sha256, purpose: `download ${path}` });
       return { text: `Your PC's bridge is saving ${path} to ${dest} (channel ${c.id}, ${st.size} bytes).`, data: { channel_id: c.id, mode: 'bridge', status: c.status, size: st.size, sha256, save_to: dest } };
     }
     if (st.size > channels.cfg.inlineMax) throw new ToolError('too_large', `This file is ${st.size} bytes; the inline cap is ${channels.cfg.inlineMax}. Pass local_path to have your bridge save it.`);
     const bytes = await fs.readFile(real);
     const sha256 = `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
-    const c = channels.open({ from, targetKind: 'vault', target: path, direction: 'download', mode: 'inline', framing: 'raw', size: bytes.length, sha256, purpose: `download ${path}`, preload: bytes });
+    const c = channels.open({ from, openedWith: 'file_download', targetKind: 'vault', target: path, direction: 'download', mode: 'inline', framing: 'raw', size: bytes.length, sha256, purpose: `download ${path}`, preload: bytes });
     return { text: `Channel ${c.id} holds ${path} (${bytes.length} bytes). Read it with channel_receive.`, data: { channel_id: c.id, mode: 'inline', status: c.status, size: bytes.length, sha256 } };
   });
 }

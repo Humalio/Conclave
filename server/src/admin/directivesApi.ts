@@ -18,10 +18,16 @@ export function registerDirectivesApi(api: FastifyInstance, d: DirectivesApiDeps
   api.get('/api/directives', async (req) => {
     const q = z.object({ status: z.enum(['active', 'retired', 'all']).optional(), category: z.enum([...CATEGORY_IDS, 'none']).optional(), tag: z.string().max(32).optional() }).parse(req.query ?? {});
     return { directives: directives.list(q.status ?? 'active', { category: q.category, tag: q.tag }), reports: directives.reports('open'), unreviewed: directives.unreviewed(),
-      categories: CATEGORIES.map(([id, label]) => ({ id, label })) };
+      categories: CATEGORIES.map(([id, label]) => ({ id, label })), projects: directives.projects() };
   });
+  // Before saving (docs/directives.md#project-reach): who it would reach, gain and lose with this scope or this target kept off.
+  api.post('/api/directives/preview', async (req) => {
+    const b = body(z.object({ id: z.string().max(100).optional(), scope: scope.optional(), exempt: z.object({ target_kind: z.enum(['agent', 'team', 'project']), target_ref: z.string().min(1).max(200) }).optional() }), req);
+    return directives.preview({ id: b.id, scope: b.scope ? { kind: b.scope.kind, ref: b.scope.ref ?? null } : undefined, exempt: b.exempt ? { kind: b.exempt.target_kind, ref: b.exempt.target_ref } : undefined });
+  });
+  api.get('/api/directives/projects', async () => ({ projects: directives.projects() }));
   api.get('/api/directives/categories', async () => ({ categories: CATEGORIES.map(([id, label]) => ({ id, label })) }));
-  api.get('/api/directives/unreviewed-count', async () => ({ count: directives.unreviewedCount() }));
+  api.get('/api/directives/unreviewed-count', async () => ({ count: directives.unreviewedCount(), suggestions: directives.openReportCount() }));
   api.get('/api/directives/:id', async (req) => directives.detail(idOf(req)));
   api.post('/api/directives', async (req) => {
     const b = body(z.object({ title: z.string().min(1).max(120), body: z.string().min(1).max(20000), scope, source: z.string().max(500).nullable().optional(), category: category.optional(), tags: tags.optional() }), req);
@@ -44,10 +50,17 @@ export function registerDirectivesApi(api: FastifyInstance, d: DirectivesApiDeps
     return { directive: directives.merge(b.ids, { title: b.title, body: b.body, scope: { kind: b.scope.kind, ref: b.scope.ref ?? null }, category: b.category, tags: b.tags }, actor(req)) };
   });
   api.post('/api/directives/:id/retire', async (req) => ({ directive: directives.retire(idOf(req), body(z.object({ note: z.string().max(500).nullable().optional() }), req).note ?? null, actor(req)) }));
+  // Keep a directive off an agent, a team or a project; DELETE applies it there again (the row stays as history).
+  api.post('/api/directives/:id/exemptions', async (req) => {
+    const b = body(z.object({ target_kind: z.enum(['agent', 'team', 'project']), target_ref: z.string().min(1).max(200), note: z.string().max(500).nullable().optional() }), req);
+    return directives.exempt(idOf(req), { kind: b.target_kind, ref: b.target_ref, note: b.note ?? null }, actor(req));
+  });
+  api.delete('/api/directives/:id/exemptions/:exemptionId', async (req) =>
+    directives.unexempt(idOf(req), (req.params as { exemptionId: string }).exemptionId, actor(req)));
   api.get('/api/directive-reports', async (req) => ({ reports: directives.reports(z.object({ status: z.enum(['open', 'all']).optional() }).parse(req.query ?? {}).status ?? 'open') }));
   api.post('/api/directive-reports/:id/adopt', async (req) => {
-    const b = body(z.object({ title: z.string().min(1).max(120).optional(), body: z.string().min(1).max(20000).optional(), scope: scope.optional(), directive_id: z.string().max(100).optional() }), req);
-    return directives.adopt(idOf(req), { title: b.title, body: b.body, scope: b.scope ? { kind: b.scope.kind, ref: b.scope.ref ?? null } : undefined, directive_id: b.directive_id }, actor(req));
+    const b = body(z.object({ title: z.string().min(1).max(120).optional(), body: z.string().min(1).max(20000).optional(), scope: scope.optional(), directive_id: z.string().max(100).optional(), category: category.optional() }), req);
+    return directives.adopt(idOf(req), { title: b.title, body: b.body, scope: b.scope ? { kind: b.scope.kind, ref: b.scope.ref ?? null } : undefined, directive_id: b.directive_id, category: b.category }, actor(req));
   });
   api.post('/api/directive-reports/:id/retire', async (req) => ({ report: directives.dismiss(idOf(req), body(z.object({ note: z.string().max(500).nullable().optional() }), req).note ?? null, actor(req)) }));
   api.get('/api/agents/:id/directives', async (req) => directives.agentView(idOf(req)));

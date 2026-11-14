@@ -8,9 +8,10 @@ import type { Audit, Actor } from '../audit/audit.js';
 import type { Config } from '../config.js';
 import type { Maintenance } from '../safety/retention.js';
 import { Reset, RESET_PARTS } from '../safety/reset.js';
-import { verifyPasswordAsync, verifyTotp } from '../util/crypto.js';
+import { verifyPasswordAsync } from '../util/crypto.js';
+import type { Users } from './users.js';
 
-export interface ResetDeps { db: Db; audit: Audit; config: Config; loginLimit: RateLimit; maintenance: Maintenance }
+export interface ResetDeps { db: Db; audit: Audit; config: Config; loginLimit: RateLimit; users: Users; maintenance: Maintenance }
 
 const partsOf = (raw: unknown): string[] => {
   const list = Array.isArray(raw) ? raw : String(raw ?? '').split(',');
@@ -29,13 +30,17 @@ export function registerResetApi(api: FastifyInstance, d: ResetDeps, actor: (req
     const b = z.object({ parts: z.array(z.string()).min(1), confirm: z.string(), password: z.string(), totp: z.string().optional() }).parse(req.body ?? {});
     if (b.confirm !== 'RESET') throw new KeyError('invalid_argument', 'Type RESET to confirm.');
     const parts = partsOf(b.parts);
-    // Destructive: re-check the operator's password (and code) and count failures like sign-ins.
+    // Destructive: re-check the admin's password (and code, which is used up like one at sign-in) and count failures like sign-ins.
     const admin = req.admin!, now = Date.now();
-    if (d.loginLimit.blocked(admin.username, 'admin_login_fail', now).blocked) throw new KeyError('rate_limited', 'Too many failed attempts. Try again later.');
+    if (d.loginLimit.blocked(admin.username, 'admin_login_fail', now).blocked) {
+      d.audit.auth({ subject: 'admin', adminId: admin.id, outcome: 'rate_limited', source: req.ip });
+      throw new KeyError('rate_limited', 'Too many failed attempts. Try again later.');
+    }
     const u = d.db.prepare('SELECT password_hash, totp_secret FROM admin_users WHERE id=?').get(admin.id) as { password_hash: string; totp_secret: string | null };
-    const ok = (await verifyPasswordAsync(b.password, u.password_hash)) && (!u.totp_secret || (!!b.totp && verifyTotp(u.totp_secret, b.totp, now)));
+    const ok = (await verifyPasswordAsync(b.password, u.password_hash)) && (!u.totp_secret || (!!b.totp && d.users.useTotp(admin.id, u.totp_secret, b.totp, now)));
     if (!ok) {
       d.loginLimit.fail(admin.username, 'admin_login_fail', now);
+      d.audit.auth({ subject: 'admin', adminId: admin.id, outcome: 'invalid', source: req.ip });
       throw new KeyError('invalid_credentials', u.totp_secret ? 'Password or code is incorrect.' : 'Password is incorrect.');
     }
     const result = reset.run(parts);

@@ -68,10 +68,21 @@ export function registerPhase2(api: FastifyInstance, d: Phase2Deps, actor: (r: F
       ...v, session_keys: sessionKeys, links: links.forAgent(id),
       invocations: db.prepare('SELECT tool,result,error_code,duration_ms,created_at FROM tool_invocations WHERE agent_id=? ORDER BY created_at DESC LIMIT 30').all(id),
       accesses: db.prepare('SELECT path,action,decision,created_at FROM resource_access_events WHERE agent_id=? ORDER BY created_at DESC LIMIT 30').all(id),
-      notices: db.prepare('SELECT seq,kind,body,created_at FROM agent_notices WHERE agent_id=? ORDER BY seq DESC LIMIT 50').all(id),
+      // The agent page's Inbox: the 50 newest notices with whether each is still current and, for what an admin sent,
+      // who sent it (from the send's audit entry; null for sends from before the entry recorded the seq). Reading confirms nothing.
+      notices: (() => {
+        const sent = new Map((db.prepare(`SELECT CAST(json_extract(e.details,'$.seq') AS INTEGER) seq, e.actor_id id, COALESCE(u.display_name,u.username) name
+          FROM audit_events e LEFT JOIN admin_users u ON u.id=e.actor_id
+          WHERE e.action='agent.notice' AND e.target_kind='agent' AND e.target_id=? AND e.actor_kind='admin' AND json_extract(e.details,'$.seq') IS NOT NULL`)
+          .all(id) as { seq: number; id: string; name: string | null }[]).map((r) => [r.seq, { id: r.id, name: r.name }]));
+        return keys.recentNotices(id, 50).map((n) => ({ ...n, sent_by: sent.get(n.seq) ?? null }));
+      })(),
+      viewer_id: req.admin?.id ?? null,
       // Highest notice any of this agent's logins has confirmed with session_ack; each new login is shown pending notices again.
       notices_acked_seq: (db.prepare('SELECT COALESCE(MAX(t.notice_acked_seq),0) s FROM session_tokens t JOIN credentials c ON c.id=t.session_credential_id WHERE c.agent_id=?').get(id) as { s: number }).s,
       role_note: keys.agent(id)!.role_note ?? null,
+      // The console user who owns the agent (docs/authorization.md#agent-owners); null: unowned.
+      owner: ((o) => o ? { id: o.id, label: o.display_name || o.username, status: o.status } : null)(db.prepare('SELECT u.id, u.username, u.display_name, u.status FROM agents a JOIN admin_users u ON u.id=a.owner_user_id WHERE a.id=?').get(id) as { id: string; username: string; display_name: string | null; status: string } | undefined),
       // Standing instructions from teams: the playbook of each team role this agent holds (agents read it with team_info).
       playbooks: db.prepare(`SELECT t.id team_id, t.name team_name, t.status team_status, m.role, r.playbook FROM team_members m JOIN teams t ON t.id=m.team_id
         LEFT JOIN team_roles r ON r.team_id=m.team_id AND r.role=m.role WHERE m.agent_id=? ORDER BY t.name`).all(id),
@@ -85,7 +96,7 @@ export function registerPhase2(api: FastifyInstance, d: Phase2Deps, actor: (r: F
     const b = z.object({ kind: z.enum(['directive', 'message']), body: z.string().trim().min(1).max(4000) }).parse(req.body ?? {});
     keys.notify(id, b.kind, b.body);
     const n = db.prepare('SELECT seq,kind,body,created_at FROM agent_notices WHERE agent_id=? ORDER BY seq DESC LIMIT 1').get(id);
-    audit.event(actor(req), 'agent.notice', { kind: 'agent', id }, { kind: b.kind, chars: b.body.length, text: b.body.slice(0, 200) });
+    audit.event(actor(req), 'agent.notice', { kind: 'agent', id }, { kind: b.kind, chars: b.body.length, text: b.body.slice(0, 200), seq: (n as { seq: number }).seq });
     return { notice: n };
   });
   api.post('/api/sessions/:agentId/archive', async (req) => {
@@ -107,10 +118,18 @@ export function registerPhase2(api: FastifyInstance, d: Phase2Deps, actor: (r: F
   api.delete('/api/links/:id', async (req) => { links.remove(p(req), actor(req)); return { ok: true }; });
 
   // ───── PCs: bridge, folders, setup ─────
+  // Agents that called tools through this PC's app keys in the last 7 days (newest first), for the PCs table and the PC page.
+  const pcAgents = db.prepare(`SELECT i.agent_id id, a.label label, MAX(i.created_at) last_at FROM tool_invocations i JOIN agents a ON a.id=i.agent_id
+    WHERE i.app_credential_id IN (SELECT id FROM credentials WHERE machine_id=? AND kind='app_key') AND i.created_at>? AND i.agent_id IS NOT NULL
+    GROUP BY i.agent_id ORDER BY last_at DESC`);
   const pcView = (id: string) => {
     const m = keys.machine(id)!;
     const appKeys = keys.credentials({ kind: 'app_key', machineId: id });
-    return { ...m, bridge: setup.bridgeInfo(id), folders: setup.folders(id), app_keys: appKeys.length };
+    const agents = pcAgents.all(id, Date.now() - 7 * 86400_000) as { id: string; label: string; last_at: number }[];
+    const bridge = setup.bridgeInfo(id);
+    // Last seen: the latest of a call through its app keys and a bridge heartbeat.
+    const last_seen_at = Math.max(0, ...appKeys.map((c) => c.last_used_at ?? 0), bridge.last_seen_at ?? 0) || null;
+    return { ...m, bridge, folders: setup.folders(id), app_keys: appKeys.length, agents, last_seen_at };
   };
   api.get('/api/pcs', async () => ({ pcs: keys.machines().map((m) => pcView(m.id)) }));
   api.post('/api/pcs/:id/setup', async (req) => {
@@ -128,7 +147,21 @@ export function registerPhase2(api: FastifyInstance, d: Phase2Deps, actor: (r: F
   for (const s of ['approve', 'reject'] as const) api.post(`/api/pcs/:id/folders/:path/${s}`, decide(s === 'approve' ? 'approved' : 'rejected'));
 
   // ───── topology ─────
-  api.get('/api/topology', async () => {
+  api.get('/api/topology', async (req) => {
+    if (req.member) {
+      const m = req.member, agents = m.agents('topology'), rooms = new Set(m.rooms('topology'));
+      const edges = (since: number) => (db.prepare(`SELECT m.sender_agent_id s, r.id room, r.kind kind, COUNT(*) n, MAX(m.created_at) last FROM messages m JOIN rooms r ON r.id=m.room_id
+        WHERE m.created_at>? AND m.sender_agent_id IS NOT NULL AND r.direct_key IS NULL GROUP BY m.sender_agent_id, r.id`).all(since) as { s: string; room: string; kind: string; n: number; last: number }[])
+        .filter((e) => rooms.has(e.room) && agents.has(e.s));
+      const teamIds = m.teams('topology');
+      const teams = teamIds.map((id) => db.prepare('SELECT id, name, room_id FROM teams WHERE id=?').get(id) as { id: string; name: string; room_id: string | null })
+        .map((t) => ({ ...t, agents: (db.prepare('SELECT m.agent_id, a.label, m.role FROM team_members m JOIN agents a ON a.id=m.agent_id WHERE m.team_id=? AND m.removed_at IS NULL').all(t.id) as { agent_id: string; label: string; role: string }[]) }));
+      return {
+        message_edges: edges(Date.now() - 3600_000).map((e) => ({ from: e.s, to: e.room, room_id: e.room, room_kind: e.kind, count: e.n })),
+        comm_edges: edges(Date.now() - 7 * 86400_000).map((e) => ({ from: e.s, to: e.room, room_id: e.room, room_kind: e.kind, count: e.n, last_at: e.last })),
+        pcs: [], teams,
+      };
+    }
     const logins = allLogins();
     const edgeRows = db.prepare(`SELECT m.sender_agent_id s, r.id room, r.kind kind, r.direct_key dk, COUNT(*) n FROM messages m JOIN rooms r ON r.id=m.room_id
       WHERE m.created_at>? AND m.sender_agent_id IS NOT NULL GROUP BY m.sender_agent_id, r.id`).all(Date.now() - 3600_000) as { s: string; room: string; kind: string; dk: string | null; n: number }[];
@@ -171,7 +204,7 @@ export function registerPhase2(api: FastifyInstance, d: Phase2Deps, actor: (r: F
         live_agents: new Set(keys.liveLogins().map((l) => keys.credential(l.session_credential_id)?.agent_id)).size,
         open_alerts: n("SELECT COUNT(*) n FROM security_alerts WHERE status='open'"), pending_folders: n("SELECT COUNT(*) n FROM machine_folders WHERE status='proposed'"),
         messages_24h: n('SELECT COUNT(*) n FROM messages WHERE created_at>=?', start), conversations: n('SELECT COUNT(*) n FROM rooms WHERE archived_at IS NULL'),
-        tasks_open: n("SELECT COUNT(*) n FROM tasks WHERE status NOT IN ('done','cancelled')"), tasks_done_24h: n("SELECT COUNT(*) n FROM task_events WHERE to_status='done' AND created_at>=?", start),
+        tasks_open: n("SELECT COUNT(*) n FROM tasks WHERE status NOT IN ('done','cancelled','discarded','backlog')"), tasks_done_24h: n("SELECT COUNT(*) n FROM task_events WHERE to_status='done' AND created_at>=?", start),
         teams_running: n("SELECT COUNT(*) n FROM teams WHERE status='running'"), teams_paused: n("SELECT COUNT(*) n FROM teams WHERE status='paused'"),
         tool_calls_24h: n('SELECT COUNT(*) n FROM tool_invocations WHERE created_at>=?', start), denials_24h: n("SELECT COUNT(*) n FROM tool_invocations WHERE result='denied' AND created_at>=?", start),
       },

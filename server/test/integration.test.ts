@@ -7,6 +7,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { buildApp, type App } from '../src/app.js';
 import type { Config } from '../src/config.js';
 import { totp } from '../src/util/crypto.js';
+import { testConfig } from './hub.js';
 
 const sys = { kind: 'system' as const, id: null };
 let app: App, base: string, appKey: string, appCredId: string;
@@ -43,10 +44,7 @@ beforeAll(async () => {
     mkdirSync(join(vaultDir, p, '..'), { recursive: true });
     writeFileSync(join(vaultDir, p), text);
   }
-  const config: Config = {
-    dataDir: join(dir, 'data'), dbFile: join(dir, 'data', 't.db'), vaultDir, vaultAlias: 'vault', port: 0, host: '127.0.0.1', pepper: 'test-pepper',
-    publicUrl: 'http://hub.test', production: false, adminUsername: 'admin', adminPassword: 'correct horse battery', publicDir: join(process.cwd(), 'public'), logLevel: 'silent', allowedOrigins: ['http://ok.test'],
-  };
+  const config: Config = testConfig(dir, { vaultDir, allowedOrigins: ['http://ok.test'], vaultScanSeconds: undefined, vaultWatch: undefined, maintenanceSeconds: undefined });
   app = await buildApp(config);
   await app.fastify.listen({ port: 0, host: '127.0.0.1' });
   base = `http://127.0.0.1:${(app.fastify.server.address() as { port: number }).port}`;
@@ -112,6 +110,33 @@ describe('permissions are per session key', () => {
     const search = async (t: string) => (await call('file_search', { session_token: t, query: 'LAUNCH' })).structuredContent.hits.map((h: any) => h.path).sort();
     expect(await search(ta)).toEqual(['/vault/Projects/Alpha/plan.md']);
     expect(await search(tb)).toEqual(['/vault/Projects/Beta/plan.md']);
+  });
+  it('file_list and file_search say when permissions hide entries, instead of looking empty', async () => {
+    const { call, login } = await connect();
+    // fs.list on the folder itself but on nothing in it: not an empty folder.
+    const only = (await login(newSession([...rulesFor('Projects/Alpha/**'), { effect: 'allow', actions: ['fs.list'], resource: 'path:/vault/Private' }]).secret)).token;
+    const none = (await call('file_list', { session_token: only, path: '/vault/Private' })).structuredContent;
+    expect(none.entries).toEqual([]);
+    expect(none.hidden_by_permissions).toBe(true);
+    expect(none.note).toMatch(/not empty.*access_request/);
+    // Partly visible: what may be seen is listed, with a note.
+    const partly = await call('file_list', { session_token: only, path: '/vault/Projects' });
+    expect(partly.structuredContent.entries.map((e: any) => e.name)).toEqual(['Alpha']);
+    expect(partly.structuredContent.note).toMatch(/Some entries.*hidden.*access_request/);
+    expect(partly.content[0].text).toContain('access_request');
+    // A prefix with nothing readable and searchable is refused, not "No matches".
+    const refused = await call('file_search', { session_token: only, query: 'launch', path_prefix: '/vault/Private' });
+    expect(refused.isError).toBe(true);
+    expect(refused.structuredContent.error).toBe('denied');
+    expect(refused.content[0].text).toMatch(/may not search \/vault\/Private.*access_request/);
+    // A prefix partly readable: hits plus a note that some files were skipped.
+    const part = (await call('file_search', { session_token: only, query: 'launch', path_prefix: '/vault/Projects' })).structuredContent;
+    expect(part.hits.map((h: any) => h.path)).toEqual(['/vault/Projects/Alpha/plan.md']);
+    expect(part.note).toMatch(/not searched.*access_request/);
+    // Full access: no notes.
+    const all = (await login(newSession(rulesFor('**')).secret)).token;
+    expect((await call('file_list', { session_token: all, path: '/vault/Projects' })).structuredContent.hidden_by_permissions).toBeUndefined();
+    expect((await call('file_search', { session_token: all, query: 'launch', path_prefix: '/vault/Projects' })).structuredContent.hidden_by_permissions).toBeUndefined();
   });
   it('hidden folders, traversal and bad paths are refused', async () => {
     const s = newSession(rulesFor('**'));
@@ -187,6 +212,67 @@ describe('key lifecycle', () => {
     app.keys.setExpiry(s.credential.id, Date.now() - 1000, sys);
     expect((await call('session_login', { session_key: s.secret })).structuredContent.error).toBe('key_inactive');
   });
+  // The three tests below log in through app keys of their own and close their clients, so the shared appKey's
+  // live-session budget (max_live_sessions) is left as it was for the tests after them.
+  const closeAll = async (...cs: { c: Client }[]) => { for (const x of cs) await x.c.close().catch(() => undefined); };
+  // FR-KEYS-02/AC1 (tokens are app-bound). A token bound to app key A is unknown through app key B: the agent logs in again there.
+  it('FR-KEYS-02/AC1: a login cannot be used through another app key', async () => {
+    const s = newSession(rulesFor('**'));
+    const A = await connect(newAppKey('first-app').secret), B = await connect(newAppKey('second-app').secret);
+    try {
+      const t = (await A.login(s.secret)).token;
+      const via = await B.call('file_list', { session_token: t, path: '/vault' });
+      expect(via.isError).toBe(true);
+      expect(via.structuredContent.error).toBe('login_required');
+      expect(via.content[0]!.text).toMatch(/session_login/);
+      // The login through A is untouched, and logging in through B gives a token of its own.
+      expect((await A.call('file_list', { session_token: t, path: '/vault' })).isError).toBeFalsy();
+      const t2 = (await B.login(s.secret)).token;
+      expect(t2).toBeTruthy();
+      expect(t2).not.toBe(t);
+      expect((await B.call('file_list', { session_token: t2, path: '/vault' })).isError).toBeFalsy();
+      expect((await A.call('file_list', { session_token: t2, path: '/vault' })).structuredContent.error).toBe('login_required');
+    } finally { await closeAll(A, B); }
+  });
+  // FR-KEYS-02/AC1 (tokens follow key state). App and session keys are revoked independently.
+  it('FR-KEYS-02/AC1: revoking an app key ends every login through it', async () => {
+    const one = newSession(rulesFor('**')), two = newSession(rulesFor('**'));
+    const shared = newAppKey('shared-app'), other = newAppKey('other-app');
+    const S = await connect(shared.secret), O = await connect(other.secret);
+    try {
+      const t1 = (await S.login(one.secret)).token, t2 = (await S.login(two.secret)).token;
+      expect(app.keys.liveLogins({ credentialId: shared.credential.id })).toHaveLength(2);
+      app.keys.setStatus(shared.credential.id, 'revoked', 'test', sys);
+      // Both logins stop: the hub ended them, and the revoked app key no longer opens a connection.
+      expect(app.keys.liveLogins({ credentialId: shared.credential.id })).toHaveLength(0);
+      for (const t of [t1, t2]) await expect(S.call('session_whoami', { session_token: t })).rejects.toThrow();
+      await expect(connect(shared.secret)).rejects.toThrow();
+      const r = await fetch(`${base}/mcp`, { method: 'POST', headers: { Authorization: `Bearer ${shared.secret}`, 'content-type': 'application/json', accept: 'application/json, text/event-stream' }, body: '{}' });
+      expect(r.status).toBe(401);
+      // Each session key is still active and works through another app key.
+      for (const s of [one, two]) {
+        expect(app.keys.credential(s.credential.id)!.status).toBe('active');
+        const t = (await O.login(s.secret)).token;
+        expect(t).toBeTruthy();
+        expect((await O.call('file_list', { session_token: t, path: '/vault' })).isError).toBeFalsy();
+      }
+    } finally { await closeAll(S, O); }
+  });
+  // NFR-REL-01 (bounded requests). The hub refuses a request body above 2 MB; another agent's calls go on.
+  it('NFR-REL-01: an oversized request is refused cleanly', async () => {
+    const big = newSession(rulesFor('**')), other = newSession(rulesFor('Public/**'));
+    const own = newAppKey('big-request-app');
+    const A = await connect(own.secret), B = await connect(own.secret);
+    try {
+      const t = (await A.login(big.secret)).token, tb = (await B.login(other.secret)).token;
+      const body = JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'file_search', arguments: { session_token: t, query: 'x'.repeat(2 * 1024 * 1024 + 10) } } });
+      const r = await fetch(`${base}/mcp`, { method: 'POST', headers: { Authorization: `Bearer ${own.secret}`, 'content-type': 'application/json', accept: 'application/json, text/event-stream' }, body });
+      expect(r.status).toBe(413);
+      expect(JSON.stringify(await r.json().catch(() => ({})))).toMatch(/too large|Request body is too large/i);
+      expect((await B.call('file_read', { session_token: tb, path: '/vault/Public/readme.md' })).isError).toBeFalsy();
+      expect((await A.call('session_whoami', { session_token: t })).isError).toBeFalsy();
+    } finally { await closeAll(A, B); }
+  });
   it('a second login of the same key raises a concurrent_use alert', async () => {
     const s = newSession(rulesFor('**'));
     const one = await connect(), two = await connect();
@@ -234,7 +320,9 @@ describe('notices', () => {
     expect(r.structuredContent.notices[0].kind).toBe('permissions_changed');
     expect(r.structuredContent.grants.map((g: any) => g.resource)).toContain('path:/vault/Private/**');
     const again = await call('access_list', { session_token: t });
-    expect(again.structuredContent.notices).toHaveLength(1);
+    // Shown once: the next answer only counts it until session_ack.
+    expect(again.structuredContent.notices).toBeUndefined();
+    expect(again.structuredContent.notices_pending).toBe(1);
     const ack = await call('session_ack', { session_token: t, notice_seq: r.structuredContent.notices[0].seq });
     expect(ack.structuredContent.notices).toBeUndefined();
     expect((await call('access_list', { session_token: t })).structuredContent.notices).toBeUndefined();
@@ -337,7 +425,8 @@ describe('admin API', () => {
     expect(tpl).toBeTruthy();
     const sk = (await json('POST', '/keys', { kind: 'session_key', new_agent: { label: 'Writer-1', project: 'Alpha' }, label: 'ses', template_id: tpl.id })).body;
     secret = sk.secret; sessionKeyId = sk.key.id;
-    expect(sk.handoff).toContain('Call session_login first');
+    expect(sk.handoff).toContain(`Key: ${sk.secret}`);
+    expect(sk.prompt.mode).toBe('secret');
     expect(secret).toMatch(/^ah_ses_/);
     const got = JSON.stringify((await json('GET', `/keys/${sessionKeyId}`)).body) + JSON.stringify((await json('GET', '/keys')).body);
     expect(got).not.toContain(secret.split('_')[3]);
@@ -385,10 +474,14 @@ describe('admin API', () => {
     const en = (await json('POST', '/totp/enroll')).body;
     expect(en.otpauth_uri).toContain('otpauth://totp/');
     expect((await json('POST', '/totp/confirm', { code: '000000' })).status).toBe(400);
-    expect((await json('POST', '/totp/confirm', { code: totp(en.secret, Date.now()) })).status).toBe(200);
+    const at = Date.now();
+    expect((await json('POST', '/totp/confirm', { code: totp(en.secret, at) })).status).toBe(200);
     const r1 = await req('POST', '/login', { username: 'admin', password: 'correct horse battery' }, { cookie: false, csrf: false });
     expect(r1.status).toBe(401); expect(((await r1.json()) as any).error).toBe('mfa_required');
-    const r2 = await req('POST', '/login', { username: 'admin', password: 'correct horse battery', totp: totp(en.secret, Date.now()) }, { cookie: false, csrf: false });
+    // The code that confirmed enrolment is spent; the next one signs in.
+    const spent = await req('POST', '/login', { username: 'admin', password: 'correct horse battery', totp: totp(en.secret, at) }, { cookie: false, csrf: false });
+    expect(((await spent.json()) as any).error).toBe('mfa_failed');
+    const r2 = await req('POST', '/login', { username: 'admin', password: 'correct horse battery', totp: totp(en.secret, at, 1) }, { cookie: false, csrf: false });
     expect(r2.status).toBe(200);
   });
 });

@@ -7,8 +7,10 @@ import { mkdtempSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildApp, type App } from '../src/app.js';
+import { intakeOpen } from './intake.js';
 import type { Config } from '../src/config.js';
 import type { Who } from '../src/teams/teams.js';
+import { testConfig } from './hub.js';
 
 const sys = { kind: 'system' as const, id: null };
 let app: App;
@@ -48,13 +50,9 @@ beforeAll(async () => {
   const dir = mkdtempSync(join(tmpdir(), 'ahedge-'));
   const vaultDir = join(dir, 'vault');
   mkdirSync(vaultDir, { recursive: true });
-  const config: Config = {
-    dataDir: join(dir, 'data'), dbFile: join(dir, 'data', 't.db'), vaultDir, vaultAlias: 'vault', port: 0, host: '127.0.0.1', pepper: 'test-pepper',
-    publicUrl: 'http://hub.test', production: false, adminUsername: 'admin', adminPassword: 'correct horse battery', publicDir: join(process.cwd(), 'public'), logLevel: 'silent', allowedOrigins: [],
-    vaultScanSeconds: 0, vaultWatch: false, maintenanceSeconds: 0,
-    graph: { debounceMs: 0, verifyRate: 0 },
-  };
+  const config: Config = testConfig(dir, { vaultDir, graph: { debounceMs: 0, verifyRate: 0 } });
   app = await buildApp(config);
+  intakeOpen(app);
   await app.store.ready;
   C = mk('coord', []); K1 = mk('cur-1', ALL); K2 = mk('cur-2', ALL); WK = mk('worker', ALL); R = mk('reviewer', ALL); RD = mk('pub-reader', PUB);
   const t = app.teams.create({ name: 'Edge', goal: 'edge cases', members: [{ agent_id: C.id, role: 'coordinator' }, { agent_id: K1.id, role: 'curator' }, { agent_id: K2.id, role: 'curator' }, { agent_id: WK.id, role: 'worker' }, { agent_id: R.id, role: 'reviewer' }] }, sys);
@@ -140,7 +138,7 @@ describe('flags and fix tasks (problem 7, E-10..E-13)', () => {
     app.teams.start_task(who(WK), taskId);
     await put(WK, 'F2/Note.md', '## Price\n\nWe charge 12.\n');
     app.teams.submit(who(WK), { task_id: taskId, summary: 'updated' });
-    app.teams.review(who(R), { task_id: taskId, decision: 'approve', comments: 'ok' });
+    app.teams.review(who(R), { task_id: taskId, decision: 'approve', comments: 'ok', version: 1000 });
     expect((app.db.prepare('SELECT status s FROM kg_flags WHERE id=?').get(flag) as { s: string }).s).toBe('fixed');
   });
 
