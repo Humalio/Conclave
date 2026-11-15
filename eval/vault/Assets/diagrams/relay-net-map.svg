@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 180" font-family="system-ui, sans-serif" font-size="12" fill="none" stroke="#8a919c" stroke-width="1.5">
+  <title>The Meridian Net: forty relays from Corvel Station outward; Tern-9 is the last, eleven light-hours out</title>
+  <defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10 z" fill="#8a919c" stroke="none"/></marker></defs>
+  <path d="M40 90 H 600" stroke-dasharray="2 6"/>
+  <g fill="#8a919c" stroke="none">
+    <circle cx="40" cy="90" r="9"/>
+    <circle cx="100" cy="90" r="3"/><circle cx="150" cy="90" r="3"/><circle cx="200" cy="90" r="3"/><circle cx="250" cy="90" r="3"/><circle cx="300" cy="90" r="3"/><circle cx="350" cy="90" r="3"/><circle cx="400" cy="90" r="3"/><circle cx="450" cy="90" r="3"/><circle cx="500" cy="90" r="3"/>
+  </g>
+  <circle cx="600" cy="90" r="9" stroke="#d08a3c"/>
+  <path d="M590 70 C 560 40, 480 40, 452 70" marker-end="url(#a)" stroke="#4f9fb8"/>
+  <g fill="#8a919c" stroke="none" text-anchor="middle">
+    <text x="40" y="125">Corvel Station</text><text x="40" y="141">case office, labs</text>
+    <text x="300" y="125">relays 2–39, one every 17 light-minutes</text>
+    <text x="600" y="125" fill="#d08a3c">Tern-9</text><text x="600" y="141" fill="#d08a3c">relay 40, 11 light-hours</text>
+    <text x="520" y="32" fill="#4f9fb8">the reply comes back along the Net</text>
+    <text x="320" y="170">not to scale</text>
+  </g>
+</svg>

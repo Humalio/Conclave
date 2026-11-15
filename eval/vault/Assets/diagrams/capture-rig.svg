@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 200" font-family="system-ui, sans-serif" font-size="12" fill="none" stroke="#8a919c" stroke-width="1.5">
+  <title>CAP-014 air-gapped rig: receiver bay 2, no firmware, ORRIN disconnected, hand-clocked tape</title>
+  <defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10 z" fill="#8a919c" stroke="none"/></marker></defs>
+  <rect x="20" y="60" width="140" height="70" rx="6" stroke="#4f9fb8"/><rect x="230" y="60" width="140" height="70" rx="6"/><rect x="440" y="60" width="160" height="70" rx="6" stroke="#d08a3c"/>
+  <path d="M160 95 H 226" marker-end="url(#a)"/><path d="M370 95 H 436" marker-end="url(#a)"/>
+  <rect x="230" y="160" width="140" height="30" rx="4" stroke-dasharray="4 4"/>
+  <path d="M300 160 V 134" stroke-dasharray="4 4"/>
+  <g fill="#8a919c" stroke="none" text-anchor="middle">
+    <text x="90" y="90" fill="#4f9fb8">cold face, 40 K</text><text x="90" y="106" fill="#4f9fb8">tiles T-1 to T-6</text>
+    <text x="300" y="90">receiver, no firmware</text><text x="300" y="106">quartz reference</text>
+    <text x="520" y="90" fill="#d08a3c">hand clock</text><text x="520" y="106" fill="#d08a3c">paper tape + recorder</text>
+    <text x="300" y="180">ORRIN: disconnected</text>
+    <text x="320" y="35">600 transmissions above 0.32, read out once after the 600th</text>
+  </g>
+</svg>

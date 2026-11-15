@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 220" font-family="system-ui, sans-serif" font-size="12" fill="none" stroke="#8a919c" stroke-width="1.5">
+  <title>Timing chain, echo 47: TSU input B fires 0.71 s before input A</title>
+  <defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10 z" fill="#8a919c" stroke="none"/></marker></defs>
+  <rect x="20" y="30" width="130" height="40" rx="6"/><rect x="20" y="90" width="130" height="40" rx="6"/><rect x="20" y="150" width="130" height="40" rx="6"/>
+  <path d="M150 50 H 200" marker-end="url(#a)"/><path d="M150 110 H 200" marker-end="url(#a)"/><path d="M150 170 H 200" marker-end="url(#a)"/>
+  <path d="M210 190 H 620"/>
+  <g stroke="#d08a3c"><path d="M366 120 V 190"/></g><path d="M561 60 V 190"/>
+  <path d="M370 100 H 557" stroke="#4f9fb8" marker-end="url(#a)"/>
+  <g fill="#8a919c" stroke="none" text-anchor="middle" font-size="11">
+    <text x="85" y="55" font-size="12">master oscillator</text><text x="85" y="115" font-size="12">sequencer (A)</text><text x="85" y="175" font-size="12">pickup loop (B)</text>
+    <text x="250" y="206">06.0</text><text x="335" y="206">06.2</text><text x="420" y="206">06.4</text><text x="505" y="206">06.6</text><text x="590" y="206">06.8–07.0</text>
+    <text x="366" y="112" fill="#d08a3c">22:14:06.290 B</text>
+    <text x="561" y="52">22:14:07.000 A, send</text>
+    <text x="463" y="92" fill="#4f9fb8">0.71 s</text>
+    <text x="420" y="20">echo 47 · 3 Mar 2191 · TSU log, both inputs</text>
+  </g>
+</svg>

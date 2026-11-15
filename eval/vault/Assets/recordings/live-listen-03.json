@@ -1,0 +1,60 @@
+{
+  "recording": "live-listen-03",
+  "echo": 47,
+  "listen": "LL-03",
+  "stand": "Tern-9 dish test stand, receiver bay 2",
+  "start": "2191-03-03T22:14:05.000",
+  "format": {
+    "magic": "EELL03",
+    "header_bytes": 64,
+    "version": 1,
+    "sample_rate_hz": 5000,
+    "samples_per_channel": 25000,
+    "layout": "interleaved float32 little-endian, one frame per sample"
+  },
+  "channels": [
+    {
+      "index": 0,
+      "name": "transmit_power"
+    },
+    {
+      "index": 1,
+      "name": "receiver_strain_ue"
+    },
+    {
+      "index": 2,
+      "name": "dish_temp_K"
+    },
+    {
+      "index": 3,
+      "name": "clock_phase_ns"
+    }
+  ],
+  "events": [
+    {
+      "t_s": 0.58,
+      "at": "22:14:05.580",
+      "what": "dish-house microphone (separate archive): ticking starts, no send yet"
+    },
+    {
+      "t_s": 1.29,
+      "at": "22:14:06.290",
+      "what": "reply stamped on TSU input B (no send yet)"
+    },
+    {
+      "t_s": 2,
+      "at": "22:14:07.000",
+      "what": "send command on TSU input A; power climbs to 0.34 (profile 0.25); 1.92 kHz line in strain starts"
+    },
+    {
+      "t_s": 5,
+      "at": "22:14:10.000",
+      "what": "end of the 3.0 s send; end of window"
+    }
+  ],
+  "tsu_events": [
+    "22:14:06.290 input B (reply)",
+    "22:14:07.000 input A (send)"
+  ],
+  "notes": "Raw stand recording, unedited. TSU events come from the timestamp unit log, not from the clock_phase channel. CAP-016 page 3 is withheld; this file is not."
+}

@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 150" font-family="system-ui, sans-serif" font-size="12" fill="none" stroke="#8a919c" stroke-width="1.5">
+  <title>The Echo Case milestones M1 to M7, June 2191 to March 2192</title>
+  <path d="M30 80 H 610"/>
+  <g fill="#8a919c" stroke="none">
+    <circle cx="60" cy="80" r="5"/><circle cx="95" cy="80" r="5"/><circle cx="130" cy="80" r="5" fill="#d08a3c"/><circle cx="250" cy="80" r="5" fill="#d08a3c"/>
+    <circle cx="400" cy="80" r="5"/><circle cx="500" cy="80" r="5"/><circle cx="580" cy="80" r="5" fill="#4f9fb8"/>
+  </g>
+  <g fill="#8a919c" stroke="none" text-anchor="middle" font-size="11">
+    <text x="60" y="65">M1</text><text x="95" y="65">M2</text><text x="130" y="65" fill="#d08a3c">M3</text><text x="250" y="65" fill="#d08a3c">M4</text>
+    <text x="400" y="65">M5</text><text x="500" y="65">M6</text><text x="580" y="65" fill="#4f9fb8">M7</text>
+    <text x="60" y="102">30 Jun</text><text x="95" y="118">15 Jul</text><text x="130" y="102">31 Jul</text><text x="250" y="102">30 Sep</text>
+    <text x="400" y="102">15 Dec</text><text x="500" y="102">31 Jan</text><text x="580" y="102">1 Mar</text>
+    <text x="190" y="140" fill="#d08a3c">critical path: M3 → M4 → M5</text>
+    <text x="320" y="24">echo model · dish review · explanation · live listen · refit · disclosure · first deliberate reply</text>
+  </g>
+</svg>

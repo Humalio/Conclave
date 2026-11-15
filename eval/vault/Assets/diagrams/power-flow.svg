@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 170" font-family="system-ui, sans-serif" font-size="12" fill="none" stroke="#8a919c" stroke-width="1.5">
+  <title>Power flow: reactor to capacitor bank to feed petals to dump, 90 s ramp, 40 ms send</title>
+  <defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10 z" fill="#8a919c" stroke="none"/></marker></defs>
+  <rect x="20" y="55" width="120" height="60" rx="6"/><rect x="190" y="55" width="120" height="60" rx="6"/>
+  <rect x="360" y="55" width="120" height="60" rx="6" stroke="#d08a3c"/><rect x="530" y="55" width="90" height="60" rx="6" stroke="#4f9fb8"/>
+  <path d="M140 85 H186" marker-end="url(#a)"/><path d="M310 85 H356" marker-end="url(#a)"/><path d="M480 85 H526" marker-end="url(#a)" stroke-dasharray="4 4"/>
+  <path d="M420 115 V 145 H 250 V 119" marker-end="url(#a)"/>
+  <g fill="#8a919c" stroke="none" text-anchor="middle">
+    <text x="80" y="82">reactor</text><text x="80" y="98">2.5 MW tap</text>
+    <text x="250" y="82">capacitor bank</text><text x="250" y="98">2.10 GJ</text>
+    <text x="420" y="82" fill="#d08a3c">feed petals</text><text x="420" y="98" fill="#d08a3c">18.4 A at P 0.62</text>
+    <text x="575" y="82" fill="#4f9fb8">dump</text><text x="575" y="98" fill="#4f9fb8">410 K</text>
+    <text x="163" y="45">recharge 14 min</text><text x="333" y="45">ramp 90 s</text><text x="503" y="45">send 40 ms</text>
+    <text x="335" y="162">surge dump path (margin ≥ 15 %)</text>
+  </g>
+</svg>
