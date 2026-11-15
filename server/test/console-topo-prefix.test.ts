@@ -1,6 +1,6 @@
 /**
  * Topology node names (dashboard-ux.md, Topology): when every agent shown carries the same name prefix up to " · ", " - "
- * or ": " (such as "BIRAZ · "), the node's name and initials leave it out; the tooltip, the focus panel and the connection
+ * or ": " (such as "ECHO · "), the node's name and initials leave it out; the tooltip, the focus panel and the connection
  * list keep the full label. sharedPrefix is loaded from public/app.js in vm.
  */
 import { describe, it, expect } from 'vitest';
@@ -17,21 +17,21 @@ const sp = ctx.sharedPrefix!;
 
 describe('the shared name prefix', () => {
   it('is found up to each separator when every label has it', () => {
-    expect(sp(['BIRAZ · Coordinator', 'BIRAZ · Developer 1', 'BIRAZ · Code Reviewer'])).toBe('BIRAZ · ');
+    expect(sp(['ECHO · Coordinator', 'ECHO · Developer 1', 'ECHO · Code Reviewer'])).toBe('ECHO · ');
     expect(sp(['Lab - Writer', 'Lab - Reader'])).toBe('Lab - ');
     expect(sp(['Ops: Watcher', 'Ops: Pager'])).toBe('Ops: ');
   });
   it('is not stripped when one label lacks it or has another one', () => {
-    expect(sp(['BIRAZ · Coordinator', 'Conclave · Coordinator'])).toBe('');
-    expect(sp(['BIRAZ · Coordinator', 'Scout'])).toBe('');
-    expect(sp(['BIRAZ Coordinator', 'BIRAZ Developer'])).toBe('');
+    expect(sp(['ECHO · Coordinator', 'Conclave · Coordinator'])).toBe('');
+    expect(sp(['ECHO · Coordinator', 'Scout'])).toBe('');
+    expect(sp(['ECHO Coordinator', 'ECHO Developer'])).toBe('');
   });
   it('stops at the first separator, and never leaves a name empty', () => {
     expect(sp(['A · B · C', 'A · B · D'])).toBe('A · ');
-    expect(sp(['BIRAZ · ', 'BIRAZ · Developer'])).toBe('');
+    expect(sp(['ECHO · ', 'ECHO · Developer'])).toBe('');
   });
   it('needs at least two labels', () => {
-    expect(sp(['BIRAZ · Coordinator'])).toBe('');
+    expect(sp(['ECHO · Coordinator'])).toBe('');
     expect(sp([])).toBe('');
   });
 });

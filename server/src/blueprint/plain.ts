@@ -3,6 +3,7 @@
  * summary/Records split, private codes and the glossary that defines them, and acceptance criteria that say nothing to
  * check. Pure functions, no database: blueprint.ts feeds them live rows.
  */
+import { KINDS } from './kinds.js';
 
 /** The heading that starts the Records part of a body (§1.1). Only the first match outside a fenced code block counts. */
 const RECORDS = /^#{2,3}[ \t]*Records[ \t]*$/i;
@@ -186,41 +187,102 @@ export function classifySource(text: string): 'vault' | 'outside' | null {
   return null;
 }
 
-/** The sources an item cites (E4.1): evidence, manuscript, source fields, [[wikilinks]] and paths in the body. */
-export function citedSources(item: { body: string | null; fields: Record<string, unknown> | null }): string[] {
-  const out: string[] = [], seen = new Set<string>();
-  const add = (raw: string) => {
-    let s = raw.trim().replace(/^[<("'`]+|[>)"'`.,;:]+$/g, '');
+/** Blueprint key forms (kinds.ts) that can stand for an item in cited text; a module's bare capitals and SUM/ARCH would match ordinary words. */
+const KEY_FORMS = Object.entries(KINDS).filter(([k, s]) => k !== 'module' && k !== 'ac' && !s.single).map(([, s]) => s.key);
+/** An AC is <parent>/ACn; the parent must look like a key (a capital first, a digit last), so Notes/AC1 stays a path. */
+const AC_FORM = /^[A-Z][A-Za-z0-9.-]*\d\/AC\d+$/;
+/** True when a cited text has the form of a Blueprint key (PAP-1/C8, FR-TEAM-04/AC2, H-L1-02): an item, never a file. */
+export function isItemKey(text: string): boolean {
+  const t = String(text ?? '').trim();
+  return !!t && (AC_FORM.test(t) || KEY_FORMS.some((re) => re.test(t)));
+}
+
+const OPEN: Record<string, string> = { '(': ')', '[': ']', '<': '>' };
+const CLOSE: Record<string, string> = { ')': '(', ']': '[', '>': '<' };
+const count = (s: string, c: string) => s.split(c).length - 1;
+/** Quotes and end punctuation off both ends; a bracket only when it has no partner, so "Meeting (2024)" keeps its own. */
+export function trimCited(raw: string): string {
+  let s = String(raw ?? '').trim(), was = '';
+  while (s !== was) {
+    was = s;
+    s = s.replace(/^["'`]+|["'`.,;:]+$/g, '').trim();
+    const a = s[0] ?? '', z = s.at(-1) ?? '';
+    if (OPEN[a] && OPEN[a] === z && count(s.slice(1, -1), a) === count(s.slice(1, -1), z)) s = s.slice(1, -1);
+    else if (CLOSE[z] && count(s, z) > count(s, CLOSE[z]!)) s = s.slice(0, -1);
+    else if (OPEN[a] && count(s, a) > count(s, OPEN[a]!)) s = s.slice(1);
+    s = s.trim();
+  }
+  return s;
+}
+
+const WIKI = /\[\[([^\]\n]+?)\]\]/g;
+/** A wikilink's target: before its label (|) and heading (#). */
+const wikiTarget = (inner: string) => inner.split('|')[0]!.split('#')[0]!.trim();
+const hasExt = (s: string) => /\.[A-Za-z0-9]{1,8}$/.test(s.trim());
+/**
+ * A source field's text in parts: on new lines and ;, then on commas, except that a comma stays inside a name when the
+ * text before it has no extension and the text after it, up to .md, has no slash ("Notes/Smith, 2020.md" is one file,
+ * "a.md, b.md" two), then before a path that starts with /.
+ */
+function fieldParts(v: string): string[] {
+  const out: string[] = [];
+  for (const seg of v.split(/[\n;]+/)) {
+    const bits = seg.split(',');
+    for (let i = 0; i < bits.length; i++) {
+      let cur = bits[i]!;
+      while (i + 1 < bits.length && !hasExt(cur) && !/^\s*[0-9a-f]{7,40}\s*$/.test(cur) && /^[^/]*\.md$/i.test(bits[i + 1]!.trim())) cur += `,${bits[++i]}`;
+      out.push(...cur.split(/\s+(?=\/)/));
+    }
+  }
+  return out;
+}
+
+/**
+ * The one parser for what an item cites (E4.1; docs/blueprint.md §2.7 "Reading what is cited"), used by every pass here,
+ * by bp_write's warnings and by Meetings: evidence, manuscript and source fields, [[wikilinks]] anywhere in the body, and
+ * paths above Records. Wikilinks are taken whole first; then a text in the form of a Blueprint key is an item (`keys`),
+ * never a file; then what is left is split; brackets are trimmed only when unbalanced.
+ */
+export function citedRefs(item: { body: string | null; fields: Record<string, unknown> | null }): { sources: string[]; keys: string[] } {
+  const sources: string[] = [], keys: string[] = [], seen = new Set<string>();
+  const add = (raw: string, wiki = false) => {
+    const s = wiki ? raw.trim() : trimCited(raw);
     if (!s || seen.has(s) || s.length > 400) return;
     if (/^bp:|^share:|^task:/.test(s)) return; // references to other Conclave things, not files
-    seen.add(s); out.push(s);
+    seen.add(s);
+    if (!wiki && isItemKey(s)) keys.push(s); else sources.push(s);
   };
   const f = item.fields ?? {};
   for (const k of ['evidence', 'manuscript', 'source']) {
     const v = f[k];
     if (typeof v !== 'string' || !v.trim()) continue;
-    for (const part of v.split(/[\n;,]+|\s+(?=\/|\[\[)/)) {
-      const w = /\[\[([^\]|#]+)/.exec(part);
-      if (w) { add(w[1]!); continue; }
-      const p = part.trim();
-      if (classifySource(p)) add(p);
+    for (const m of v.matchAll(WIKI)) add(wikiTarget(m[1]!), true);
+    for (const part of fieldParts(v.replace(WIKI, ' '))) {
+      const p = trimCited(part);
+      if (isItemKey(p) || classifySource(p)) add(p);
     }
   }
   // [[Wikilinks]] are vault links wherever they stand. Other paths count only above Records: Records hold repository
   // paths, hashes and ids for the record (§1.1), so a path there is not a vault source and is never reported missing.
-  const whole = String(item.body ?? '');
-  for (const m of whole.replace(/```[\s\S]*?```/g, ' ').matchAll(/\[\[([^\]|#\n]+)/g)) add(m[1]!);
-  const body = splitBody(whole).summary.replace(/```[\s\S]*?```/g, ' ');
-  for (const m of body.matchAll(/`([^`\n]+)`/g)) { const p = m[1]!.trim(); if (/\.md$/i.test(p) || (/^[^\s]+\/[^\s]+$/.test(p) && !/^https?:/i.test(p))) add(p); }
-  for (const m of body.replace(/`[^`\n]*`/g, ' ').replace(/\]\([^)]*\)/g, ' ').matchAll(/(?:^|\s)((?:\/)?[\p{L}\p{N}_ .()-]+(?:\/[\p{L}\p{N}_ .()-]+)+\.md)\b/gu)) add(m[1]!);
-  return out;
+  const whole = String(item.body ?? '').replace(/```[\s\S]*?```/g, ' ');
+  for (const m of whole.matchAll(WIKI)) add(wikiTarget(m[1]!), true);
+  const body = splitBody(String(item.body ?? '')).summary.replace(/```[\s\S]*?```/g, ' ').replace(WIKI, ' ');
+  for (const m of body.matchAll(/`([^`\n]+)`/g)) { const p = m[1]!.trim(); if (isItemKey(p) || /\.md$/i.test(p) || (/^[^\s]+\/[^\s]+$/.test(p) && !/^https?:/i.test(p))) add(p); }
+  const prose = body.replace(/`[^`\n]*`/g, ' ').replace(/\]\([^)]*\)/g, ' ');
+  for (const m of prose.matchAll(/(?:^|\s)((?:\/)?(?:[\p{L}\p{N}_ .()-]|(?<!\.\w{1,8}),(?=[^/,\n]*\.md))+(?:\/(?:[\p{L}\p{N}_ .()-]|(?<!\.\w{1,8}),(?=[^/,\n]*\.md))+)+\.md)\b/gu)) add(m[1]!);
+  return { sources, keys };
+}
+
+/** The sources an item cites (E4.1): evidence, manuscript, source fields, [[wikilinks]] and paths in the body; keys left out. */
+export function citedSources(item: { body: string | null; fields: Record<string, unknown> | null }): string[] {
+  return citedRefs(item).sources;
 }
 
 // ───── warnings (proposal §4 and addendum E2, E4.6): never refusals ─────
-export type WarningKind = 'undefined_code' | 'empty_ac' | 'code_first' | 'final_unsupported' | 'unlinked_evidence' | 'source_missing';
+export type WarningKind = 'undefined_code' | 'empty_ac' | 'code_first' | 'final_unsupported' | 'unlinked_evidence' | 'source_missing' | 'key_missing';
 export interface Warning {
   key: string; kind: WarningKind; tokens?: string[]; title: string; message: string;
-  /** unlinked_evidence: the item that mentions the shared code; final_unsupported: the verdict; source_missing: the cited text. */
+  /** unlinked_evidence: the item that mentions the shared code; final_unsupported: the verdict; source_missing and key_missing: the cited text. */
   other?: string; verdict?: string; source?: string;
 }
 export interface PlainCheck { warnings: Warning[]; pending: { key: string; tokens: string[] }[] }
@@ -239,6 +301,8 @@ export const warn = {
     message: `${key} has no evidence, but ${other} mentions ${token}. Link it if it backs the claim: {op: link, from: ${other}, to: ${key}, rel: evidence}.` }),
   source_missing: (key: string, title: string, text: string): Warning => ({ key, kind: 'source_missing', title, source: text,
     message: `${key} cites ${text}, which is not in the vault, so the operator cannot open it. Put the file in your team's vault folder, or ask your coordinator to, and cite it as [[name]].` }),
+  key_missing: (key: string, title: string, text: string): Warning => ({ key, kind: 'key_missing', title, source: text,
+    message: `${key} cites ${text}, which is no item in this Blueprint. Fix the key, or link the item it means.` }),
 };
 
 /** The short form bp_read {plain: "issues"} and the console list show (§2.2 plain_issues). */
@@ -250,6 +314,7 @@ export function issueText(w: Warning): string {
     case 'final_unsupported': return w.verdict === 'contradicted' ? 'final, but its evidence contradicts it' : 'final, but no decided evidence backs it';
     case 'unlinked_evidence': return `no evidence, but ${w.other} mentions ${w.tokens?.[0]}`;
     case 'source_missing': return `cites ${w.source}, which is not in the vault`;
+    case 'key_missing': return `cites ${w.source}, which is no item in this Blueprint`;
   }
 }
 

@@ -53,7 +53,7 @@ export function registerDecisionsApi(api: FastifyInstance, d: DecisionsApiDeps, 
     return { decision: out(req, d) };
   });
   api.post('/api/decisions/:id/answer', async (req) => {
-    const b = body(z.object({ option: z.string().max(8).nullable().optional(), text: z.string().max(4000).nullable().optional() }), req);
+    const b = body(z.object({ option: z.string().max(8).nullable().optional(), text: z.string().max(4000).nullable().optional(), item_rev: z.number().int().nullable().optional(), options_version: z.number().int().min(1).nullable().optional() }), req);
     return { decision: out(req, await decisions.answer(idOf(req), b, decider(req))) };
   });
   /** A relayed answer (recorded by the coordinator, L1): confirm it as the operator's, or overturn it with another answer. */

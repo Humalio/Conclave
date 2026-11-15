@@ -40,7 +40,7 @@ export const ATTACH_LIMITS = {
 export const ATTACH_INLINE_MAX = MB;
 /** The team total's Needs-you row shows from this share of the limit. */
 export const TEAM_WARN_AT = 0.8;
-/** A cancelled or discarded task's attachments are deleted this long after the task closes (Bruno, 19 Nov). */
+/** A cancelled or discarded task's attachments are deleted this long after the task closes (the operator, 19 Nov). */
 export const ATTACH_DELETE_AFTER_MS = 30 * 24 * 3600_000;
 const TERMINAL = ['done', 'cancelled', 'discarded'];
 const CLOSED = ['cancelled', 'discarded'];

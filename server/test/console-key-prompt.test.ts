@@ -118,8 +118,15 @@ describe('console: where the guard applies', () => {
     expect((await run('none', true)).ok).toBe(1);
   });
   it('no prompt or key screen offers a download', () => {
+    // Add PC's one exception: the link to the connector installer on GitHub Releases (docs/connector.md, "Add PC"). It
+    // carries no key: it is only the configured release URL, never a Blob or a data URL.
+    const rel = /\$\{made\.download_url \? `<div class="jn-dl">[^\n]*?<\/div>` : ''\}/;
+    expect(fn('joinSheet')).toMatch(rel);
+    const line = fn('joinSheet').match(rel)![0];
+    expect(line).toContain('<a href="${esc(made.download_url)}" target="_blank" rel="noopener noreferrer">');
+    expect(line).not.toMatch(/Blob\(|data:|createObjectURL|code|prompt/);
     for (const f of ['secretView', 'obPromptSheet', 'joinSheet', 'keyPromptNote']) {
-      expect(fn(f), f).not.toMatch(/download|Download|Blob\(/);
+      expect(fn(f).replace(rel, ''), f).not.toMatch(/download|Download|Blob\(/);
     }
   });
 });

@@ -10,6 +10,7 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import type { Db } from '../db/db.js';
+import { delegateAt } from '../checkout/via.js';
 import { KeyError } from '../keys/keys.js';
 
 export const WORK_MAX = 50;
@@ -26,7 +27,7 @@ interface TaskEv { id: number; task_id: string; from_status: string | null; to_s
 interface PlanEv { decided: string | null; id: number; team_id: string | null; project_id: string; project_key: string; project_name: string; proposal_id: string | null; kind: string; actor_kind: string; actor_id: string | null; version: number | null; added: string; removed: string; changed: string; moves: string | null; note: string | null; created_at: number;
   team_name: string | null; actor_label: string | null }
 export interface WorkEvent {
-  id: string; kind: 'task' | 'plan'; at: number; team: { id: string | null; name: string }; project: { id: string; key: string; name: string } | null; actor: { kind: string; id: string | null; label: string | null };
+  id: string; kind: 'task' | 'plan'; at: number; team: { id: string | null; name: string }; project: { id: string; key: string; name: string } | null; actor: { kind: string; id: string | null; label: string | null; via?: string };
   task: { id: string; title: string; status: string; refs: string[] } | null; from: string | null; to: string | null; tool: string | null; round: number | null;
   plan: { event: string; version: number | null; added: string[]; removed: string[]; changed: string[]; moves: { key: string; status: string | null; was: string | null }[]; proposal_id: string | null;
     /** Requirements the team's coordinator agreed under coordinator_decides_blueprint (docs/blueprint.md §4). */
@@ -72,14 +73,16 @@ export function workFeed(db: Db, o: { limit: number; before?: string; since?: nu
   const arr = (s: string | null) => { try { const v = JSON.parse(s || '[]'); return Array.isArray(v) ? v : []; } catch { return []; } };
   /** A console user's id (the admin's or a decider's) is not shown to a member. */
   const who = (kind: string, id: string | null) => (o.member && (kind === 'admin' || kind === 'operator') ? null : id);
+  /** An agent's event while it ran for a collaborator carries their name ("via Lena", docs/checkout.md §9.1). */
+  const via = (kind: string, id: string | null, at: number) => { const v = kind === 'agent' ? delegateAt(db, id, at) : null; return v ? { via: v } : {}; };
   const all: WorkEvent[] = [
     ...tasks.map((e): WorkEvent => ({
-      id: `t${e.id}`, kind: 'task', at: e.created_at, team: { id: e.team_id, name: e.team_name }, project: e.project_id ? { id: e.project_id, key: e.project_key!, name: e.project_name! } : null, actor: { kind: e.actor_kind, id: who(e.actor_kind, e.actor_id), label: e.actor_kind === 'admin' ? 'Operator' : e.actor_kind === 'system' ? 'Hub' : e.actor_label ?? e.actor_id },
+      id: `t${e.id}`, kind: 'task', at: e.created_at, team: { id: e.team_id, name: e.team_name }, project: e.project_id ? { id: e.project_id, key: e.project_key!, name: e.project_name! } : null, actor: { kind: e.actor_kind, id: who(e.actor_kind, e.actor_id), label: e.actor_kind === 'admin' ? 'Operator' : e.actor_kind === 'system' ? 'Hub' : e.actor_label ?? e.actor_id, ...via(e.actor_kind, e.actor_id, e.created_at) },
       task: { id: e.task_id, title: e.title, status: e.status, refs: refs(e.plan_refs) }, from: e.from_status, to: e.to_status, tool: e.tool, round: e.to_status === 'changes_requested' ? e.round : null, plan: null, note: excerpt(e.note),
       flag: e.tool === 'task_create' && e.relayed ? 'relayed' : e.note === AWAITING_APPROVAL ? 'awaiting_approval' : null,
     })),
     ...plans.map((p): WorkEvent => ({
-      id: `p${p.id}`, kind: 'plan', at: p.created_at, team: { id: p.team_name === null ? null : p.team_id, name: p.team_name ?? p.project_name }, project: { id: p.project_id, key: p.project_key, name: p.project_name }, actor: { kind: p.actor_kind, id: who(p.actor_kind, p.actor_id), label: p.actor_kind === 'admin' || p.actor_kind === 'operator' ? 'Operator' : p.actor_kind === 'system' ? 'Hub' : p.actor_label ?? p.actor_id },
+      id: `p${p.id}`, kind: 'plan', at: p.created_at, team: { id: p.team_name === null ? null : p.team_id, name: p.team_name ?? p.project_name }, project: { id: p.project_id, key: p.project_key, name: p.project_name }, actor: { kind: p.actor_kind, id: who(p.actor_kind, p.actor_id), label: p.actor_kind === 'admin' || p.actor_kind === 'operator' ? 'Operator' : p.actor_kind === 'system' ? 'Hub' : p.actor_label ?? p.actor_id, ...via(p.actor_kind, p.actor_id, p.created_at) },
       task: null, from: null, to: null, tool: null, round: null, plan: { event: p.kind, version: p.version, added: arr(p.added), removed: arr(p.removed), changed: arr(p.changed), moves: arr(p.moves), proposal_id: p.proposal_id, decided: arr(p.decided) }, note: excerpt(p.note), flag: null,
     })),
   ].sort(order);

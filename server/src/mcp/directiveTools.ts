@@ -34,7 +34,7 @@ export function registerDirectiveTools(reg: Reg, dirs: Directives, ToolError: To
         ...(a.ack ? { acked: L.map((d) => ({ id: d.id, version: d.version })) } : {}) } };
   });
   reg('directives_report', 'Suggest a rule you follow that is not a hub directive yet (a rules file, a prompt section, an instruction from chat). It goes to your team as a suggestion for the operator, who adopts it as a directive or tells you to stop; you get a notice either way. It is ignored when a directive in force for you already says the same thing. Once per rule; reporting the same title again updates your suggestion. You may propose a category; the operator confirms or changes it.', {
-    title: z.string().min(1).max(120).describe(forOperator('The rule in a few words.')), source: z.string().max(500).optional().describe('Where it lives: a file path, a prompt, "chat with Bruno, 6 Nov"'),
+    title: z.string().min(1).max(120).describe(forOperator('The rule in a few words.')), source: z.string().max(500).optional().describe('Where it lives: a file path, a prompt, "chat with the operator, 6 Nov"'),
     summary: z.string().min(1).max(1000).describe(forOperator('What it asks you to do, in a few lines.')), text: z.string().max(20000).optional().describe('The rule\'s own text, if you have it'),
     category: z.enum(CATEGORY_IDS).optional().describe(`Your proposed category, one of: ${catList}. The operator confirms it when reviewing.`),
   }, true, async (ctx, a) => {

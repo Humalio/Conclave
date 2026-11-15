@@ -8,7 +8,7 @@ export const TOOLS = [
   'message_send', 'message_read', 'message_ack', 'message_history', 'room_list', 'room_create', 'room_join', 'room_leave', 'room_invite',
   'team_info', 'team_recruit', 'team_complete', 'team_pause', 'team_resume', 'work_next', 'work_ack',
   'task_create', 'task_update', 'task_list', 'task_assign', 'task_claim', 'task_start', 'task_progress', 'task_submit', 'task_withdraw', 'task_review',
-  'task_complete', 'task_block', 'task_unblock', 'task_cancel', 'team_ask', 'team_ask_update', 'team_decisions', 'file_create', 'file_update', 'file_patch',
+  'task_reopen', 'task_complete', 'task_block', 'task_unblock', 'task_cancel', 'team_ask', 'team_ask_update', 'team_decisions', 'file_create', 'file_update', 'file_patch',
   'file_rename', 'file_delete', 'file_history', 'file_diff', 'file_restore', 'file_conflicts', 'share_create', 'share_upload', 'share_list',
   'share_info', 'share_read', 'share_diff', 'share_comment', 'share_suggest', 'share_feedback', 'share_resolve', 'share_download',
   'share_promote', 'share_close', 'graph_related', 'graph_impact', 'graph_query', 'graph_context', 'graph_summary', 'graph_job_submit',

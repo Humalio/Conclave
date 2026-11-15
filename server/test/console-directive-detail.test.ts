@@ -4,7 +4,7 @@
  * (an agent, team or project sheet that leaves out the directive's own target) and exemption events in History; the
  * Work → Directives list reads reach_label; the agent page's Directives card has a muted "Kept off k rules" line from
  * `exempted`. The screen's one-line header and its agent list (search, Team filter, state chips, filters in the route) follow
- * the approved mockup (docs/mockups/directives.html). Static, like console-tdirs.test.ts: it reads public/app.js, checks the source, and renders the pieces with
+ * the approved directive screen. Static, like console-tdirs.test.ts: it reads public/app.js, checks the source, and renders the pieces with
  * their own helpers and stubs.
  */
 import { describe, it, expect } from 'vitest';
@@ -35,10 +35,10 @@ const helpers = ['const esc = ', 'const ic = ', 'const plural = ', 'const raw = 
 const DETAIL = {
   same: [], reports: [], exempt_count: 1, kept_off: 2,
   directive: { id: 'dir_hub', title: 'Log every call', body: 'Log it.', status: 'active', reviewed_at: 1, version: 2, updated_at: 1, scope_kind: 'hub', scope_ref: null,
-    scope_label: 'all agents', reach_label: 'All agents except team BIRAZ Research', except_label: 'Except team BIRAZ Research', tags: [] },
+    scope_label: 'all agents', reach_label: 'All agents except team ECHO Research', except_label: 'Except team ECHO Research', tags: [] },
   coverage: [{ agent_id: 'ag_1', label: 'scribe', read: 'current', version: 2, acked_at: 1 }],
-  exemptions: [{ id: 'dex_1', target_kind: 'team', target_ref: 'team_bz', label: 'team BIRAZ Research', note: 'they log elsewhere', created_by: 'adm_1', created_by_label: 'Bruno', created_at: 3000 }],
-  exemptions_removed: [{ id: 'dex_0', target_kind: 'project', target_ref: 'APPS', label: 'project APPS', note: null, created_by: 'adm_1', created_by_label: 'Bruno', created_at: 1500, removed_by: 'adm_1', removed_by_label: 'Bruno', removed_at: 2500 }],
+  exemptions: [{ id: 'dex_1', target_kind: 'team', target_ref: 'team_bz', label: 'team ECHO Research', note: 'they log elsewhere', created_by: 'adm_1', created_by_label: 'Ben', created_at: 3000 }],
+  exemptions_removed: [{ id: 'dex_0', target_kind: 'project', target_ref: 'APPS', label: 'project APPS', note: null, created_by: 'adm_1', created_by_label: 'Ben', created_at: 1500, removed_by: 'adm_1', removed_by_label: 'Ben', removed_at: 2500 }],
   versions: [{ version: 2, title: 'Log every call', change_note: 'Sharper', created_at: 2000 }, { version: 1, title: 'Log calls', change_note: null, created_at: 1000 }],
 };
 const renderDetail = async (admin = true, data: unknown = DETAIL, arg = 'dir_hub') => {
@@ -68,7 +68,7 @@ describe('directive screen', () => {
     expect(r.b.startsWith('<div class="dir-meta">')).toBe(true);
     // The key–value card is gone: reach, version and date sit in the meta line and move to the agent list and History.
     expect(r.b).not.toContain('pcard kvc');
-    expect(r.b).toContain('data-dgo="dirAg" title="Go to the agent list">All agents except team BIRAZ Research</button>');
+    expect(r.b).toContain('data-dgo="dirAg" title="Go to the agent list">All agents except team ECHO Research</button>');
     expect(r.b).toContain('data-dgo="dirHist" title="Go to History">v2, date</button>');
     const iText = r.b.indexOf('class="sec dir-text"'), iKept = r.b.indexOf('Kept off · 1'), iAgents = r.b.indexOf('id="dirAg"'), iHist = r.b.indexOf('id="dirHist"');
     expect(iText).toBeGreaterThan(0);
@@ -81,10 +81,10 @@ describe('directive screen', () => {
     // Kept off keeps its heading (it carries a count); the agent list and History stand under a divider, still named for assistive tech.
     expect(r.b).toContain('class="sec dir-sec" id="dirAg" tabindex="-1" aria-label="Agents"');
     expect(r.b).toContain('class="sec dir-sec" id="dirHist" tabindex="-1" aria-label="History"');
-    expect(r.b).toContain('Team BIRAZ Research');
-    expect(r.b).toContain('By Bruno · they log elsewhere, t3000 ago');
+    expect(r.b).toContain('Team ECHO Research');
+    expect(r.b).toContain('By Ben · they log elsewhere, t3000 ago');
     expect(r.b).toContain('data-dir-again="dex_1"');
-    expect(r.here.meta).toBe('All agents except team BIRAZ Research · v2 · 1 of 1 read');
+    expect(r.here.meta).toBe('All agents except team ECHO Research · v2 · 1 of 1 read');
   });
 
   it('offers Keep off… in the actions bar and the dbar menu to admins only', async () => {
@@ -107,18 +107,18 @@ describe('directive screen', () => {
   it('interleaves exemption events with versions in History, newest first', async () => {
     const { r } = await renderDetail();
     const h = r.b.slice(r.b.indexOf('id="dirHist"'));
-    const order = ['Kept off team BIRAZ Research', 'Applied again to project APPS', 'v2 · Log every call', 'Kept off project APPS', 'v1 · Log calls'].map((s) => h.indexOf(s));
+    const order = ['Kept off team ECHO Research', 'Applied again to project APPS', 'v2 · Log every call', 'Kept off project APPS', 'v1 · Log calls'].map((s) => h.indexOf(s));
     expect(order.every((i) => i > -1)).toBe(true);
     expect([...order].sort((p, q) => p - q)).toEqual(order);
     // The author leads the meta, so it survives truncation on phones; the note follows.
-    expect(h).toContain('By Bruno · they log elsewhere');
+    expect(h).toContain('By Ben · they log elsewhere');
     expect(h).not.toContain('they log elsewhere · by');
   });
 
   it('a retired directive lists its exemptions under History only, with no agent list', async () => {
     const { r } = await renderDetail(true, { ...DETAIL, coverage: [], kept_off: 0, directive: { ...DETAIL.directive, status: 'retired' } });
     expect(r.b).not.toContain('Kept off · ');
-    expect(r.b).toContain('Kept off team BIRAZ Research');
+    expect(r.b).toContain('Kept off team ECHO Research');
     expect(r.a).not.toContain('dirKeepOff');
     expect(r.b).not.toContain('id="dirAg"');
     // The reach is plain text (there is no list to go to) and the line says it is retired.
@@ -168,7 +168,7 @@ describe('keep-off sheet', () => {
     { id: 'prj_old', key: 'OLD', name: 'Old', status: 'closed', agent_ids: [] }];
   const scope = (cur: unknown, o: unknown) => {
     const S = { agents: [{ id: 'ag_1', label: 'scribe', project: 'APPS', status: 'active' }, { id: 'ag_2', label: 'clerk', project: null, status: 'active' }],
-      teams: [{ id: 'team_bz', name: 'BIRAZ Research', status: 'running' }, { id: 'team_cd', name: 'Conclave Developers', status: 'running' }] };
+      teams: [{ id: 'team_bz', name: 'ECHO Research', status: 'running' }, { id: 'team_cd', name: 'Conclave Developers', status: 'running' }] };
     // eslint-disable-next-line @typescript-eslint/no-implied-eval
     return new Function('S', 'DIR_PROJ', `${helpers}\n${fields}\nreturn dirScopeFields;`)(S, DIR_PROJ)(cur, o).html as string;
   };
@@ -187,7 +187,7 @@ describe('keep-off sheet', () => {
 
   /* The sheet itself, with fbSheet stubbed: the choices it offers per kind, and what onGo does with the hub's answer. */
   const S2 = { agents: [{ id: 'ag_1', label: 'scribe', status: 'active' }, { id: 'ag_2', label: 'clerk', status: 'active' }, { id: 'ag_3', label: 'ops', status: 'active' }],
-    teams: [{ id: 'team_bz', name: 'BIRAZ Research', status: 'running', agent_ids: ['ag_1', 'ag_2'] }, { id: 'team_cd', name: 'Conclave Developers', status: 'running', agent_ids: ['ag_3'] },
+    teams: [{ id: 'team_bz', name: 'ECHO Research', status: 'running', agent_ids: ['ag_1', 'ag_2'] }, { id: 'team_cd', name: 'Conclave Developers', status: 'running', agent_ids: ['ag_3'] },
       { id: 'team_mx', name: 'Mixed', status: 'running', agent_ids: ['ag_2', 'ag_3'] }] };
   const openKeepOff = async (d: Record<string, unknown>, post: (p: string, b: unknown) => Promise<unknown>) => {
     const el: Record<string, { value?: string; innerHTML?: string; hidden?: boolean; onchange?: () => void }> = { '#dsK': { value: 'agent' }, '#dsR': { value: '' }, '#dsRF': {} };
@@ -251,10 +251,10 @@ describe('Work → Directives list', () => {
   };
   it('row meta uses reach_label when a rule is kept off somewhere', () => {
     expect(dirRow).toContain('d.reach_label');
-    const h = render({ reach_label: 'All agents except team BIRAZ Research', except_label: 'Except team BIRAZ Research', exempt_count: 1 });
-    expect(h).toContain('<span class="only-d">Except team BIRAZ Research · </span>');
-    expect(h).toContain('<span class="only-m">All agents except team BIRAZ Research · </span>');
-    expect(h).toContain('title="All agents except team BIRAZ Research"');
+    const h = render({ reach_label: 'All agents except team ECHO Research', except_label: 'Except team ECHO Research', exempt_count: 1 });
+    expect(h).toContain('<span class="only-d">Except team ECHO Research · </span>');
+    expect(h).toContain('<span class="only-m">All agents except team ECHO Research · </span>');
+    expect(h).toContain('title="All agents except team ECHO Research"');
   });
   it('the except part comes from except_label, not from parsing reach_label', () => {
     // A team named "All except ops": its scope label holds the word, the except part is still only the exemptions.
@@ -296,7 +296,7 @@ describe('agent page Directives card', () => {
 
 describe('directive agent list', () => {
   type C = { agent_id: string; label: string; read: string; version: number | null; acked_at: number | null; teams: { id: string; name: string; role: string }[] };
-  const CD = { id: 'team_cd', name: 'Conclave Developers' }, BZ = { id: 'team_bz', name: 'BIRAZ Research' };
+  const CD = { id: 'team_cd', name: 'Conclave Developers' }, BZ = { id: 'team_bz', name: 'ECHO Research' };
   const COV: C[] = [
     { agent_id: 'ag_1', label: 'scribe', read: 'current', version: 2, acked_at: 5, teams: [{ ...CD, role: 'worker' }] },
     { agent_id: 'ag_2', label: 'clerk', read: 'unread', version: null, acked_at: null, teams: [{ ...BZ, role: 'coordinator' }] },
@@ -322,7 +322,7 @@ describe('directive agent list', () => {
 
   it('each row names its teams and roles, when it confirmed, and its state', () => {
     const h = H.dirAgRow(COV[2]) as string;
-    expect(h).toContain('Conclave Developers · coordinator, BIRAZ Research · worker · confirmed v1 t4 ago');
+    expect(h).toContain('Conclave Developers · coordinator, ECHO Research · worker · confirmed v1 t4 ago');
     expect(h).toContain('Out of date · v1');
     expect(h).toContain('role="listitem"');
     expect(H.dirAgRow(COV[3])).toContain('has not confirmed it');
@@ -332,7 +332,7 @@ describe('directive agent list', () => {
     const h = body({ at: ['team_bz'] });
     expect(order(h)).toEqual(['ag_2', 'ag_3']);
     expect(chip(h, '')).toEqual(['true', '2']);
-    expect(h).toContain('<b>2 of 4 agents</b> · BIRAZ Research');
+    expect(h).toContain('<b>2 of 4 agents</b> · ECHO Research');
     expect(h).toContain('data-dag-clr');
     expect(order(body({ at: ['team_bz', 'team_cd'] }))).toEqual(['ag_2', 'ag_3', 'ag_1']);
   });

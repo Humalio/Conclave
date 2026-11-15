@@ -21,6 +21,8 @@ export type DecisionStatus = 'open' | 'needs_info' | 'answered' | 'declined' | '
 /** A relayed answer: recorded by the coordinator (L1) until the operator confirms it (L0) or overturns it. */
 export type RelayState = 'pending' | 'confirmed' | 'overturned';
 export interface DecisionOption { key: string; label: string; effect?: string | null }
+/** A question a Blueprint write opens for a requirement it marks unclear (Decisions.askForItem, docs/blueprint.md §2.7). */
+export interface ItemAsk { id: string; team_id: string; agent_id: string; key: string; question: string; options?: DecisionOption[]; recommended?: string; context?: string | null; dry: boolean; capped: boolean }
 export interface DecisionRow {
   id: string; team_id: string; task_id: string | null; blocks_task: number; agent_id: string; credential_id: string | null;
   question: string; context: string | null; options: string; recommended: string | null; refs: string; needed_by: number | null;
@@ -35,10 +37,16 @@ export interface DecisionView extends Omit<DecisionRow, 'options' | 'refs' | 'bl
   agent_label: string | null; team_name: string | null; task_title: string | null; answered_by_name: string | null;
   /** L1 while the answer is relayed and not yet confirmed by the operator; L0 otherwise. */
   trust: 'L0' | 'L1'; relayed_by_label: string | null; relayed_label: string | null;
+  /** 1 as asked; one more for each correction of the options (docs/decisions.md, "Correcting the options"). */
+  options_version: number;
+  /** Every version of the options, oldest first; empty while they were never corrected. */
+  option_history: { version: number; options: DecisionOption[]; recommended: string | null; changed_by: string; changed_by_label: string | null; changed_at: number }[];
 }
 
 /** An agent may have this many questions waiting for the operator at once: questions stay deliberate. */
 export const MAX_OPEN_PER_AGENT = 5;
+/** team_ask's limits, also for a question a Blueprint write opens (the tool schema says the same). */
+export const MAX_QUESTION = 300, MAX_OPTIONS = 6;
 const OPEN: DecisionStatus[] = ['open', 'needs_info'];
 const err = (code: string, msg: string) => new KeyError(code, msg);
 /** Where an unblocked task stands now, for its assignee (it returns to the status it was blocked from). */
@@ -71,6 +79,7 @@ export class Decisions {
       task_title: d.task_id ? this.teams.task(d.task_id)?.title ?? null : null, answered_by_name: admin,
       trust: d.relay_state === 'pending' ? 'L1' : 'L0', relayed_by_label: d.relayed_by ? this.keys.agent(d.relayed_by)?.label ?? d.relayed_by : null,
       relayed_label: d.relayed_option ? options.find((o) => o.key === d.relayed_option)?.label ?? d.relayed_option : null,
+      ...this.optionHistory(d.id),
     };
   }
 
@@ -88,6 +97,14 @@ export class Decisions {
     return rows.map((d) => this.view(d));
   }
   get(id: string): DecisionView { return this.view(this.must(id)); }
+  private optionHistory(id: string): Pick<DecisionView, 'options_version' | 'option_history'> {
+    const rows = this.db.prepare('SELECT version, options, recommended, changed_by, changed_at FROM decision_versions WHERE decision_id=? ORDER BY version').all(id) as
+      { version: number; options: string; recommended: string | null; changed_by: string; changed_at: number }[];
+    return {
+      options_version: rows.length ? rows[rows.length - 1]!.version : 1,
+      option_history: rows.map((r) => ({ ...r, options: JSON.parse(r.options) as DecisionOption[], changed_by_label: this.keys.agent(r.changed_by)?.label ?? null })),
+    };
+  }
   /** Open questions per team, for the team list and the Work badge. */
   openCounts(): Record<string, number> {
     return Object.fromEntries((this.db.prepare("SELECT team_id, COUNT(*) n FROM decisions WHERE status IN ('open','needs_info') GROUP BY team_id").all() as { team_id: string; n: number }[]).map((r) => [r.team_id, r.n]));
@@ -110,52 +127,123 @@ export class Decisions {
     if (a.project !== undefined && (!own || (a.project !== own.id && a.project !== own.key))) {
       throw err('invalid_argument', `Team ${team.name} is in project ${own?.key ?? '(none yet)'}, and its refs resolve there. Leave project out${own ? `, or name ${own.key}` : ''}.`);
     }
-    const question = a.question.trim();
-    if (!question) throw err('invalid_argument', 'Ask a question.');
-    const options = (a.options ?? []).map((o) => ({ key: o.key.trim(), label: o.label.trim(), effect: o.effect?.trim() || null }));
-    const keys = options.map((o) => o.key);
-    if (options.length === 1) throw err('invalid_argument', 'Give two or more options, or none for a free answer.');
-    if (new Set(keys).size !== keys.length || options.some((o) => !o.key || !o.label)) throw err('invalid_argument', 'Each option needs a unique key and a label.');
-    if (a.recommended !== undefined && !keys.includes(a.recommended)) throw err('invalid_argument', 'recommended must be one of the option keys.');
+    const { question, options } = this.checkQuestion(a);
     if (a.needed_by !== undefined && a.needed_by < Date.now()) throw err('invalid_argument', 'needed_by is in the past.');
-    const open = (this.db.prepare("SELECT COUNT(*) n FROM decisions WHERE agent_id=? AND status IN ('open','needs_info')").get(w.agentId) as { n: number }).n;
-    if (open >= MAX_OPEN_PER_AGENT) throw err('rate_limited', `You already have ${open} questions waiting for the operator. Wait for answers, or withdraw one with team_ask_update.`);
+    this.checkOpenCap(w.agentId);
     if (a.task_id && this.db.prepare("SELECT 1 FROM decisions WHERE task_id=? AND blocks_task=1 AND status IN ('open','needs_info')").get(a.task_id)) {
       throw err('invalid_state', 'This task already waits for an answer. Add to that question with team_ask_update instead.');
     }
     const refs = this.teams.checkRefsPublic(team.id, a.refs);
-    const id = `dec_${randomToken(10)}`, now = Date.now();
+    const id = `dec_${randomToken(10)}`;
     tx(this.db, () => {
       if (a.task_id) this.teams.blockForDecision(w, team.id, a.task_id, question, id);
-      this.db.prepare(`INSERT INTO decisions(id,team_id,task_id,blocks_task,agent_id,credential_id,question,context,options,recommended,refs,needed_by,status,created_at,updated_at,make_decision,project_id)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'open',?,?,?,?)`).run(id, team.id, a.task_id ?? null, a.task_id ? 1 : 0, w.agentId, w.credId, question, a.context?.trim() || null,
-        JSON.stringify(options), a.recommended ?? null, JSON.stringify(refs), a.needed_by ?? null, now, now, a.decision ? 1 : 0, own?.id ?? null);
+      this.insert(id, team, w.agentId, w.credId, { ...a, question, options, refs, project_id: own?.id ?? null });
     });
-    const who = this.keys.agent(w.agentId)?.label ?? w.agentId;
-    // A fixed notice: the question is the agent's words (L1). Coordinators read it with team_decisions.
-    this.teams.notifyCoordinators(team.id, 'decision_asked', `${who} asked the operator question ${id}.${a.task_id ? ` It blocks task ${a.task_id} until answered.` : ''} Read it with team_decisions.`, w.agentId);
-    this.audit.event({ kind: 'agent', id: w.agentId }, 'decision.ask', { kind: 'decision', id }, { team: team.name, task: a.task_id ?? null });
-    try { this.onAsked?.(id, team.id); } catch { /* routing records must never fail a question */ }
+    this.announce(id, team, w.agentId, a.task_id ?? null);
     return this.get(id);
   }
+  /**
+   * A question a Blueprint write opens for the requirement it marks unclear (`unclear_ask` with the question's text,
+   * docs/blueprint.md §2.7): the writing agent's, naming the requirement, inside the write's transaction (the item exists by
+   * then). `dry` (a check or a proposal being filed) only validates; `capped` is false when the operator applies a proposal,
+   * so the agent's open-question limit never refuses the operator's apply.
+   */
+  askForItem(a: ItemAsk): void {
+    const { question, options } = this.checkQuestion(a);
+    if (a.capped) this.checkOpenCap(a.agent_id);
+    if (a.dry) return;
+    const team = this.db.prepare('SELECT id, name, project_id FROM teams WHERE id=?').get(a.team_id) as { id: string; name: string; project_id: string | null } | undefined;
+    if (!team) throw err('not_found', 'team not found');
+    this.insert(a.id, team, a.agent_id, null, { question, options, recommended: a.recommended, context: a.context ?? undefined, refs: [a.key], project_id: team.project_id });
+    this.announce(a.id, team, a.agent_id, null);
+  }
+  /** The question and its options, trimmed and checked (team_ask and a Blueprint write's unclear_ask share the rules). */
+  checkQuestion(a: { question: string; options?: DecisionOption[]; recommended?: string }): { question: string; options: { key: string; label: string; effect: string | null }[] } {
+    const question = a.question.trim();
+    if (!question) throw err('invalid_argument', 'Ask a question.');
+    if (question.length > MAX_QUESTION) throw err('invalid_argument', `A question holds at most ${MAX_QUESTION} characters; put the rest in context.`);
+    const options = (a.options ?? []).map((o) => ({ key: o.key.trim(), label: o.label.trim(), effect: o.effect?.trim() || null }));
+    const keys = options.map((o) => o.key);
+    if (options.length === 1) throw err('invalid_argument', 'Give two or more options, or none for a free answer.');
+    if (options.length > MAX_OPTIONS) throw err('invalid_argument', `Give at most ${MAX_OPTIONS} options.`);
+    if (new Set(keys).size !== keys.length || options.some((o) => !o.key || !o.label)) throw err('invalid_argument', 'Each option needs a unique key and a label.');
+    if (a.recommended !== undefined && !keys.includes(a.recommended)) throw err('invalid_argument', 'recommended must be one of the option keys.');
+    return { question, options };
+  }
+  private checkOpenCap(agentId: string): void {
+    const open = (this.db.prepare("SELECT COUNT(*) n FROM decisions WHERE agent_id=? AND status IN ('open','needs_info')").get(agentId) as { n: number }).n;
+    if (open >= MAX_OPEN_PER_AGENT) throw err('rate_limited', `You already have ${open} questions waiting for the operator. Wait for answers, or withdraw one with team_ask_update.`);
+  }
+  private insert(id: string, team: { id: string }, agentId: string, credId: string | null, a: { question: string; options: { key: string; label: string; effect: string | null }[]; refs: string[]; project_id: string | null; context?: string; recommended?: string; task_id?: string; needed_by?: number; decision?: boolean }): void {
+    const now = Date.now();
+    this.db.prepare(`INSERT INTO decisions(id,team_id,task_id,blocks_task,agent_id,credential_id,question,context,options,recommended,refs,needed_by,status,created_at,updated_at,make_decision,project_id)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'open',?,?,?,?)`).run(id, team.id, a.task_id ?? null, a.task_id ? 1 : 0, agentId, credId, a.question, a.context?.trim() || null,
+      JSON.stringify(a.options), a.recommended ?? null, JSON.stringify(a.refs), a.needed_by ?? null, now, now, a.decision ? 1 : 0, a.project_id);
+  }
+  private announce(id: string, team: { id: string; name: string }, agentId: string, taskId: string | null): void {
+    const who = this.keys.agent(agentId)?.label ?? agentId;
+    // A fixed notice: the question is the agent's words (L1). Coordinators read it with team_decisions.
+    this.teams.notifyCoordinators(team.id, 'decision_asked', `${who} asked the operator question ${id}.${taskId ? ` It blocks task ${taskId} until answered.` : ''} Read it with team_decisions.`, agentId);
+    this.audit.event({ kind: 'agent', id: agentId }, 'decision.ask', { kind: 'decision', id }, { team: team.name, task: taskId });
+    try { this.onAsked?.(id, team.id); } catch { /* routing records must never fail a question */ }
+  }
   /** The asker adds information (also the reply to "needs info") or withdraws the question. */
-  update(w: Who, a: { decision_id: string; context?: string; withdraw?: boolean; relayed_answer?: string; chosen?: string; source?: string }): DecisionView {
+  update(w: Who, a: { decision_id: string; context?: string; withdraw?: boolean; relayed_answer?: string; chosen?: string; source?: string; options?: DecisionOption[]; recommended?: string }): DecisionView {
     const d = this.must(a.decision_id);
     if (a.relayed_answer !== undefined || a.chosen !== undefined || a.source !== undefined) return this.relay(w, d, a);
+    if (a.options !== undefined || a.recommended !== undefined) return this.correct(w, d, a);
     if (d.agent_id !== w.agentId) throw err('denied', NOT_ALLOWED);
     if (!OPEN.includes(d.status)) throw err('invalid_state', `The question is ${d.status}.`);
-    const now = Date.now();
+    const now = Date.now(), me = { kind: 'agent' as const, id: w.agentId };
     if (a.withdraw) {
       tx(this.db, () => {
         this.db.prepare("UPDATE decisions SET status='withdrawn', blocks_task=0, updated_at=? WHERE id=?").run(now, d.id);
-        if (d.task_id && d.blocks_task) this.teams.unblockAfterDecision(d.task_id, d.id, 'question withdrawn', { kind: 'agent', id: w.agentId });
+        if (d.task_id && d.blocks_task) this.teams.unblockAfterDecision(d.task_id, d.id, 'question withdrawn', me);
+        this.audit.event(me, 'decision.withdraw', { kind: 'decision', id: d.id }, { task: d.task_id, unblocked: !!(d.task_id && d.blocks_task) });
       });
       return this.get(d.id);
     }
     const add = a.context?.trim();
     if (!add) throw err('invalid_argument', 'Give context to add, or withdraw: true.');
     const context = [d.context, `${new Date(now).toISOString().slice(0, 16).replace('T', ' ')}: ${add}`].filter(Boolean).join('\n\n').slice(0, 20_000);
-    this.db.prepare("UPDATE decisions SET context=?, status='open', info_note=NULL, updated_at=? WHERE id=?").run(context, now, d.id);
+    tx(this.db, () => {
+      this.db.prepare("UPDATE decisions SET context=?, status='open', info_note=NULL, updated_at=? WHERE id=?").run(context, now, d.id);
+      this.audit.event(me, 'decision.context', { kind: 'decision', id: d.id }, { added: add.length, reply_to_needs_info: d.status === 'needs_info' });
+    });
+    return this.get(d.id);
+  }
+  /**
+   * Correct an open question's options or recommendation (docs/decisions.md, "Correcting the options"): its asker or the
+   * asking team's coordinator, only while unanswered. Every version is kept in decision_versions, the change is audited,
+   * the asker and the coordinators get an "options changed" notice, and an answer sent from the version before is refused
+   * with conflict so the console reloads the question.
+   */
+  private correct(w: Who, d: DecisionRow, a: { options?: DecisionOption[]; recommended?: string; context?: string; withdraw?: boolean }): DecisionView {
+    const coordinator = this.teams.roleOf(d.team_id, w.agentId) === 'coordinator';
+    if (d.agent_id !== w.agentId && !coordinator) throw err('denied', 'Only the agent who asked, or its team\'s coordinator, can change the options.');
+    if (d.agent_id !== w.agentId) this.teams.checkAsk(w, d.team_id);
+    if (a.withdraw || a.context !== undefined) throw err('invalid_argument', 'Change the options on their own: no context or withdraw in the same call.');
+    if (!OPEN.includes(d.status)) throw err('invalid_state', `The question is already ${d.status}; its options can no longer change.`);
+    const before = JSON.parse(d.options) as DecisionOption[];
+    const { options } = this.checkQuestion({ question: d.question, options: a.options ?? before, recommended: a.recommended });
+    const recommended = a.recommended !== undefined ? a.recommended : a.options !== undefined && d.recommended && !options.some((o) => o.key === d.recommended) ? null : d.recommended;
+    if (JSON.stringify(options) === JSON.stringify(before.map((o) => ({ key: o.key, label: o.label, effect: o.effect ?? null }))) && recommended === d.recommended) {
+      throw err('invalid_argument', 'Nothing changed: give the corrected options or recommendation.');
+    }
+    const now = Date.now(), me = { kind: 'agent' as const, id: w.agentId };
+    let version = 0;
+    tx(this.db, () => {
+      const last = (this.db.prepare('SELECT MAX(version) v FROM decision_versions WHERE decision_id=?').get(d.id) as { v: number | null }).v;
+      if (last === null) this.db.prepare('INSERT INTO decision_versions(decision_id,version,options,recommended,changed_by,changed_at) VALUES (?,?,?,?,?,?)').run(d.id, 1, d.options, d.recommended, d.agent_id, d.created_at);
+      version = (last ?? 1) + 1;
+      this.db.prepare('INSERT INTO decision_versions(decision_id,version,options,recommended,changed_by,changed_at) VALUES (?,?,?,?,?,?)').run(d.id, version, JSON.stringify(options), recommended, w.agentId, now);
+      this.db.prepare('UPDATE decisions SET options=?, recommended=?, updated_at=? WHERE id=?').run(JSON.stringify(options), recommended, now, d.id);
+      this.audit.event(me, 'decision.options', { kind: 'decision', id: d.id }, { version, from: { options: before.map((o) => o.key), recommended: d.recommended }, to: { options: options.map((o) => o.key), recommended } });
+    });
+    const by = this.keys.agent(w.agentId)?.label ?? w.agentId;
+    const msg = `${by} changed the options of question ${d.id} ("${d.question.slice(0, 200)}"): options changed, now version ${version}. Read it with team_decisions.`;
+    if (d.agent_id !== w.agentId) this.keys.notify(d.agent_id, 'decision', msg);
+    this.teams.notifyCoordinators(d.team_id, 'decision', msg, w.agentId);
     return this.get(d.id);
   }
   /**
@@ -201,15 +289,20 @@ export class Decisions {
   }
 
   // ───── the operator side ─────
-  async answer(id: string, a: { option?: string | null; text?: string | null }, actor: Actor & { kind: 'admin' }): Promise<DecisionView> {
+  async answer(id: string, a: { option?: string | null; text?: string | null; item_rev?: number | null; options_version?: number | null }, actor: Actor & { kind: 'admin' }): Promise<DecisionView> {
     const d = this.must(id);
     if (!OPEN.includes(d.status)) throw err('invalid_state', `The question is already ${d.status}.`);
+    // Answered from a screen that showed older options: refused, so the console reloads the question first.
+    if (a.options_version != null && a.options_version !== this.optionHistory(d.id).options_version) throw err('conflict', 'The options of this question changed while you had it open. Read them again before you answer.');
     const options = JSON.parse(d.options) as DecisionOption[], text = a.text?.trim() || null, option = a.option || null;
     if (option && !options.some((o) => o.key === option)) throw err('invalid_argument', 'Unknown option.');
     if (!option && !text) throw err('invalid_argument', 'Choose an option or write an answer.');
     const now = Date.now(), label = option ? options.find((o) => o.key === option)!.label : null;
     const answerLine = [label, text].filter(Boolean).join(' — ');
+    let cleared: string | null = null;
     tx(this.db, () => {
+      // An unclear requirement's question: the answer clears the mark in the same step, by the answerer (the item's revision records who).
+      cleared = this.clarified(d, text, actor, a.item_rev ?? null);
       this.db.prepare("UPDATE decisions SET status='answered', answer_option=?, answer_text=?, answered_by=?, answered_at=?, blocks_task=0, updated_at=? WHERE id=?").run(option, text, actor.id, now, now, d.id);
       if (d.task_id && d.blocks_task) this.teams.unblockAfterDecision(d.task_id, d.id, `answered: ${answerLine}`, actor);
     });
@@ -218,7 +311,7 @@ export class Decisions {
     const mine = task?.assignee_agent_id === d.agent_id, holder = task?.assignee_agent_id ? this.keys.agent(task.assignee_agent_id)?.label ?? task.assignee_agent_id : null;
     // The task went back to the status it was blocked from, not always to assigned.
     const back = task && d.blocks_task ? ` Task "${task.title}" (${task.id}) is ${mine || task.status === 'open' ? whereNow(task.status) : task.status === 'assigned' ? `assigned to ${holder} again` : `back with ${holder} (${task.status.replace('_', ' ')})`}.` : '';
-    const rec = adr ? ` Recorded as ${adr} in the blueprint.` : '';
+    const rec = (adr ? ` Recorded as ${adr} in the blueprint.` : '') + (cleared ? ` ${cleared} is no longer marked unclear.` : '');
     this.keys.notify(d.agent_id, 'decision', `The operator answered your question ${d.id} ("${d.question.slice(0, 200)}"): ${answerLine}.${rec}${back}`);
     this.teams.notifyCoordinators(d.team_id, 'decision', `The operator answered ${d.id} ("${d.question.slice(0, 200)}"): ${answerLine}.${rec}`, d.agent_id);
     // The worker of the blocked task hears it too when someone else (usually the coordinator) asked for it.
@@ -245,15 +338,24 @@ export class Decisions {
       return null;
     }
   }
+  /** An answer to an unclear requirement's question clears its mark (docs/blueprint.md §2.7); the operator's own id is the revision's actor. */
+  private clarified(d: DecisionRow, text: string | null, actor: Actor, itemRev: number | null = null): string | null {
+    return this.blueprint?.clarify({ id: d.id, team_id: d.team_id, refs: JSON.parse(d.refs) as string[] }, text, { kind: 'operator', id: actor.id }, itemRev) ?? null;
+  }
   /** The operator confirms a relayed answer: it becomes the operator's word (L0), and Blueprint decisions are recorded now. */
   async confirmRelay(id: string, actor: Actor & { kind: 'admin' }): Promise<DecisionView> {
     const d = this.must(id);
     if (d.relay_state !== 'pending') throw err('invalid_state', d.relay_state ? `The relayed answer was already ${d.relay_state}.` : 'This answer was not relayed.');
-    const now = Date.now();
-    this.db.prepare("UPDATE decisions SET relay_state='confirmed', relay_settled_at=?, answered_by=?, updated_at=? WHERE id=?").run(now, actor.id, now, d.id);
+    const now = Date.now(), shown = this.get(d.id), said = [shown.answer_label, shown.answer_text].filter(Boolean).join(' — ');
+    let cleared: string | null = null;
+    tx(this.db, () => {
+      this.db.prepare("UPDATE decisions SET relay_state='confirmed', relay_settled_at=?, answered_by=?, updated_at=? WHERE id=?").run(now, actor.id, now, d.id);
+      // The confirmed answer is the operator's word: it clears an unclear requirement's mark like a direct answer does.
+      cleared = this.clarified(d, said, actor);
+    });
     const adr = this.recordInBlueprint(d.id, actor);
     const v = this.get(d.id), line = [v.answer_label, v.answer_text].filter(Boolean).join(' — ');
-    const msg = `The operator confirmed the relayed answer to ${d.id} ("${d.question.slice(0, 200)}"): ${line}. It is now the operator's decision (L0).${adr ? ` Recorded as ${adr} in the blueprint.` : ''}`;
+    const msg = `The operator confirmed the relayed answer to ${d.id} ("${d.question.slice(0, 200)}"): ${line}. It is now the operator's decision (L0).${adr ? ` Recorded as ${adr} in the blueprint.` : ''}${cleared ? ` ${cleared} is no longer marked unclear.` : ''}`;
     this.keys.notify(d.agent_id, 'decision', msg);
     this.teams.notifyCoordinators(d.team_id, 'decision', msg, d.agent_id);
     this.audit.event(actor, 'decision.relay_confirm', { kind: 'decision', id: d.id }, { relayed_by: d.relayed_by });
@@ -268,9 +370,13 @@ export class Decisions {
     if (option && !options.some((o) => o.key === option)) throw err('invalid_argument', 'Unknown option.');
     if (!option && !text) throw err('invalid_argument', 'Choose an option or write an answer.');
     const now = Date.now(), answerLine = [option ? options.find((o) => o.key === option)!.label : null, text].filter(Boolean).join(' — ');
-    this.db.prepare("UPDATE decisions SET answer_option=?, answer_text=?, answered_by=?, answered_at=?, relay_state='overturned', relay_settled_at=?, updated_at=? WHERE id=?").run(option, text, actor.id, now, now, now, d.id);
+    let cleared: string | null = null;
+    tx(this.db, () => {
+      this.db.prepare("UPDATE decisions SET answer_option=?, answer_text=?, answered_by=?, answered_at=?, relay_state='overturned', relay_settled_at=?, updated_at=? WHERE id=?").run(option, text, actor.id, now, now, now, d.id);
+      cleared = this.clarified(d, answerLine, actor);
+    });
     const adr = this.recordInBlueprint(d.id, actor);
-    const msg = `The operator overturned the relayed answer to ${d.id} ("${d.question.slice(0, 200)}"). The operator's answer: ${answerLine}.${adr ? ` Recorded as ${adr} in the blueprint.` : ''} Undo work done on the relayed answer where it differs.`;
+    const msg = `The operator overturned the relayed answer to ${d.id} ("${d.question.slice(0, 200)}"). The operator's answer: ${answerLine}.${adr ? ` Recorded as ${adr} in the blueprint.` : ''}${cleared ? ` ${cleared} is no longer marked unclear.` : ''} Undo work done on the relayed answer where it differs.`;
     this.keys.notify(d.agent_id, 'decision', msg);
     this.teams.notifyCoordinators(d.team_id, 'decision', msg, d.agent_id);
     const task = d.task_id ? this.teams.task(d.task_id) : null;

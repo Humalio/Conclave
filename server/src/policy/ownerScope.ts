@@ -105,7 +105,9 @@ export class OwnerScope {
    * is off. An admin owner adds no ceiling; an unowned agent, or one whose owner cannot be used, gets an empty one.
    */
   layers(agentId: string): OwnerLayer[] | null {
-    if (!this.enforced()) return null;
+    // A delegated agent (docs/checkout.md §9 F1) is capped by its delegate's grant whether or not enforcement is on.
+    const delegated = this.delegateLayers(agentId);
+    if (!this.enforced()) return delegated.length ? delegated : null;
     const own = (this.db.prepare('SELECT owner_user_id o FROM agents WHERE id=?').get(agentId) as { o: string | null } | undefined)?.o ?? null;
     const out: OwnerLayer[] = [];
     const mine = this.layer(own, agentId, 'owner');
@@ -114,7 +116,41 @@ export class OwnerScope {
       const l = this.layer(h.owner, agentId, 'task', h.task, h.via);
       if (l) out.push(l);
     }
+    return [...out, ...delegated];
+  }
+
+  /**
+   * The delegate ceilings (docs/authorization.md#owner-enforcement, delegation to a collaborator): while an agent runs for a
+   * collaborator, from the confirm on their PC (restoring) until Take back, that person's grant caps it exactly as a member
+   * owner's would. One layer per delegation that stands (a move between two delegates has both until it restores). An
+   * admin delegate adds none, and a delegate who cannot be used (disabled, expired, removed) leaves the agent nothing.
+   */
+  delegateLayers(agentId: string): OwnerLayer[] {
+    const rows = this.db.prepare(`SELECT id, team_id t, delegate_user_id u, drafts_path d FROM checkouts WHERE scope='agent' AND agent_id=? AND delegate_user_id IS NOT NULL
+      AND released_at IS NULL AND status IN ('restoring','restored') ORDER BY created_at`).all(agentId) as { id: string; t: string; u: string; d: string | null }[];
+    const out: OwnerLayer[] = [];
+    for (const r of rows) {
+      const l = this.layer(r.u, agentId, 'delegate');
+      // The agent's own checkout tools in that team (checkout_resume on the delegate's PC, a handout for a later move) are
+      // the move itself, which the admin started: the ceiling lets them through, and the resume keeps its own key checks.
+      if (l) out.push({ ...l, checkout: r.id, rules: [...this.contributorRules(l.rules, r.d), allow(`delegate:${r.id}`, ['checkout.handout'], `team:${r.t}`)] });
+    }
     return out;
+  }
+
+  /**
+   * Contributor mode on the delegate's ceiling (docs/authorization.md, delegation): it reads what the grant reaches, writes
+   * in the vault only in its drafts folder (the admin's explicit folder grant at Delegate) and posts in no room, though it
+   * reads the rooms the grant reaches. It only removes actions from the delegate's own rules, so it never widens them.
+   */
+  private contributorRules(rules: Rule[], drafts: string | null): Rule[] {
+    const draftsRes = drafts ? `path:/${this.alias}${drafts}**` : null;
+    return rules.map((r) => {
+      let acts = r.actions;
+      if (r.resource.startsWith('room:')) acts = acts.filter((a) => a !== 'room.post' && a !== 'room.invite');
+      if (r.resource.startsWith('path:') && r.resource !== draftsRes) acts = acts.filter((a) => !FOLDER_CONTRIBUTE.includes(a));
+      return acts === r.actions ? r : { ...r, actions: acts };
+    }).filter((r) => r.actions.length > 0);
   }
 
   /** Other owners whose agents handed over work this agent is doing now, one per owner, with the first such task. */
@@ -138,13 +174,20 @@ export class OwnerScope {
    * rules or feedback, and passes; so does every notice while enforcement is off, or for an admin owner's agent.
    */
   maySeeNotice(agentId: string, ref: { kind: string; id: string } | null): boolean {
-    if (ref?.kind !== 'task' || !this.enforced()) return true;
+    if (ref?.kind !== 'task') return true;
+    // The delegate's ceiling filters notices whatever owner enforcement says, as it caps the agent then too.
+    const delegated = this.delegateLayers(agentId);
+    if (!this.enforced() && !delegated.length) return true;
     const t = this.db.prepare('SELECT team_id FROM tasks WHERE id=?').get(ref.id) as { team_id: string | null } | undefined;
     // A task with no team (none is made today) is no team's work, so its notice is delivered as with enforcement off.
     if (!t?.team_id) return true;
-    const own = (this.db.prepare('SELECT owner_user_id o FROM agents WHERE id=?').get(agentId) as { o: string | null } | undefined)?.o ?? null;
-    const l = this.layer(own, agentId, 'owner');
-    return !l || ownerAllows(withOwners([], [l]), 'team.member', `team:${t.team_id}`);
+    const layers = [...delegated];
+    if (this.enforced()) {
+      const own = (this.db.prepare('SELECT owner_user_id o FROM agents WHERE id=?').get(agentId) as { o: string | null } | undefined)?.o ?? null;
+      const l = this.layer(own, agentId, 'owner');
+      if (l) layers.push(l);
+    }
+    return layers.every((l) => ownerAllows(withOwners([], [l]), 'team.member', `team:${t.team_id}`));
   }
 
   /**
@@ -166,8 +209,11 @@ export class OwnerScope {
     return u ? u.display_name || u.username : 'an unknown person';
   }
 
+  /** The ceiling a person's grant would put on this agent (the delegation sheet's preview); null for an active admin. */
+  ceilingFor(userId: string, agentId: string): OwnerLayer | null { return this.layer(userId, agentId, 'delegate'); }
+
   /** One owner's ceiling for this agent; null for an active admin (no ceiling). */
-  private layer(userId: string | null, agentId: string, basis: 'owner' | 'task', task?: string, via?: OwnerLayer['via']): OwnerLayer | null {
+  private layer(userId: string | null, agentId: string, basis: OwnerLayer['basis'], task?: string, via?: OwnerLayer['via']): OwnerLayer | null {
     const base = { owner: userId, label: this.label(userId), basis, ...(task ? { task } : {}), ...(via ? { via } : {}) };
     if (!userId) return { ...base, rules: [] };
     const u = this.db.prepare('SELECT id, username, display_name, role, status, expires_at, external FROM admin_users WHERE id=?').get(userId) as UserRow | undefined;

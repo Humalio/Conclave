@@ -28,7 +28,7 @@ const L = ctx.lib;
 /* A team hub with members on a ring, laid out on a graph taller than the window. */
 function graph(W: number, H: number, members: number) {
   const nodes = new Map<string, { label: string }>(), base = new Map<string, P>(), edges: { kind: string; a: string; b: string; count: number }[] = [];
-  nodes.set('team:t1', { label: 'Txoko' }); base.set('team:t1', { x: W / 2, y: H - 120 });
+  nodes.set('team:t1', { label: 'Orchid' }); base.set('team:t1', { x: W / 2, y: H - 120 });
   for (let i = 0; i < members; i++) {
     const id = 'agent_' + i; nodes.set(id, { label: 'Agent ' + i }); base.set(id, { x: 40 + i * 30, y: H - 60 });
     edges.push({ kind: 'team', a: id, b: 'team:t1', count: 1 });
@@ -38,7 +38,7 @@ function graph(W: number, H: number, members: number) {
 
 describe('the focus view centres the focus on screen', () => {
   it('puts a pinned team in the middle of the visible part of a tall graph, with the ring inside it', () => {
-    // The Txoko case: a 1400 px graph whose top is 120 px down a 900 px window; the old layout centred at H/2 = 700.
+    // The Orchid case: a 1400 px graph whose top is 120 px down a 900 px window; the old layout centred at H/2 = 700.
     const G = graph(1000, 1400, 6);
     G.vis = { y0: 0, y1: 900 - 120 };
     L.EGO.focus = 'team:t1';
@@ -104,13 +104,13 @@ describe('the zoom', () => {
   });
   it('moves the resting layout through the zoom in egoLayout (Topology only), with the project middles', () => {
     const G = graph(1000, 600, 2);
-    G.tz = true; G.pbox = new Map([['Txoko', { x: 500, y: 480 }]]);
+    G.tz = true; G.pbox = new Map([['Orchid', { x: 500, y: 480 }]]);
     L.EGO.focus = null; L.TZ.z = 2; L.TZ.c = { fx: 0.5, fy: 0.8 };
     const { P } = L.egoLayout(G);
     // The asked centre (500, 480) is held at y 450 so the 2x view (300 high) ends at the graph's bottom: 300 + (480 - 450) * 2.
-    expect(P.get('pc:Txoko')).toEqual({ x: 500, y: 360 });
+    expect(P.get('pc:Orchid')).toEqual({ x: 500, y: 360 });
     G.tz = false;
-    expect(L.egoLayout(G).P.get('pc:Txoko')).toEqual({ x: 500, y: 480 });
+    expect(L.egoLayout(G).P.get('pc:Orchid')).toEqual({ x: 500, y: 480 });
     L.TZ.z = 1; L.TZ.c = null;
   });
 });

@@ -14,13 +14,14 @@
 import { NOT_ALLOWED } from '../policy/engine.js';
 import type { Db } from '../db/db.js';
 import { tx } from '../db/db.js';
+import { delegateAt } from '../checkout/via.js';
 import { KeyError } from '../keys/keys.js';
 import { randomToken } from '../util/crypto.js';
 import { KINDS, SHORT_NAME_MAX, keyHint, RULES_HINT, RIGHTS_RULE, RELS, DEFAULT_LIMITS, RETIRED_SQL, relAllows, relText, BP_RULES, ruleNote, type BpLimits, type FieldType, type BpRule } from './kinds.js';
 import { coverage, coverageCounts, type Coverage, type TasksSeen } from './coverage.js';
 import { questions, blockingCount, type Questions } from './questions.js';
 import { claimSupport, paperReadiness, contradicts, decided, type Support, type ClaimState } from './support.js';
-import { glossaryOf, findCodes, termWords, resolve, splitBody, leadingCode, acceptanceEmpty, isNoiseCode, citedSources, classifySource, warn, issueText, type Known, type TermRef, type Warning, type PlainCheck } from './plain.js';
+import { glossaryOf, findCodes, termWords, resolve, splitBody, leadingCode, acceptanceEmpty, isNoiseCode, citedSources, citedRefs, classifySource, warn, issueText, type Known, type TermRef, type Warning, type PlainCheck } from './plain.js';
 import { opRight, batchVerdict, type BpRole, type Verdict } from './rights.js';
 import { STATUS_FORMAT, openRequest, openRequests, answerRequests, type RequestScope } from './requests.js';
 import { scanRefs, RefError } from '../util/refs.js';
@@ -34,6 +35,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
+import type { DecisionOption, ItemAsk } from '../teams/decisions.js';
 
 const err = (code: string, msg: string, extra?: Record<string, unknown>) => new KeyError(code, msg, extra);
 
@@ -122,6 +124,8 @@ export interface Proposal {
   status: ProposalStatus; decided_by: string | null; decided_at: number | null; note: string | null; created_at: number; revs: Record<string, number | null>;
   /** `ops`: a batch of ops; `replan`: the submission of a re-plan, reviewed as a before/after diff. */
   type: 'ops' | 'replan'; replan_id: string | null;
+  /** The delegate the proposing agent ran for when it proposed (contributor mode, docs/checkout.md §9.1). */
+  via?: string;
 }
 /** Kinds a re-plan may reset, and the default set. Decisions, reports, papers and claims are kept by default. */
 export const REPLAN_KINDS = ['fr', 'nfr', 'ac', 'milestone', 'release', 'risk', 'issue', 'term', 'hypothesis', 'question'];
@@ -243,6 +247,8 @@ export interface ReadItem {
   key: string; kind: string; title: string; status: string | null; parent: string | null; team_id: string | null; links: string[];
   /** Who last changed it (operator, import:<source>, agent:<id>), and the trust of its text for this reader (F-23). */
   updated_by: string; trust: Trust;
+  /** The collaborator the writing agent ran for when it last changed the item (docs/checkout.md §9 F1). */
+  via?: string;
   support?: Support; supported?: string; ready?: boolean; body?: string | null; fields?: Record<string, unknown>; rev?: number;
   created_by?: string; created_at?: number; updated_at?: number; chain?: ChainLink[]; claims?: unknown[];
   /** detail full: the author an export claimed for a restored item the hub could not verify (attribution only). */
@@ -291,6 +297,8 @@ export interface WriteResult {
   version: number; added: string[]; removed: string[]; changed: string[]; moves: EventRow['moves']; keys: Record<string, string>;
   /** Ready-made ops the writer may send next, never applied by themselves: a proposed decision for each answered question (§4). */
   offers?: Offer[];
+  /** The team questions this write opened, one per requirement it marked unclear with the question's text in unclear_ask (§2.7). */
+  asks?: { key: string; decision_id: string }[];
 }
 /** An op the hub offers after a write, with the reason in words. */
 export interface Offer { why: string; op: Extract<Op, { op: 'upsert' }> }
@@ -301,6 +309,8 @@ interface WriteOpts {
   noEvent?: boolean; force?: boolean;
   /** Whose text the items carry when it is not the actor: a proposal applied by the operator keeps its proposer as the writer (F-23). */
   author?: BpActor; teamId?: string | null; note?: string | null; proposalId?: string | null;
+  /** A dry run (check mode, a proposal being filed): questions an unclear mark asks are checked, never opened. */
+  trial?: boolean;
   /** Keys the coordinator agreed under coordinator_decides_blueprint: their revision says so, and so does the event. */
   decided?: string[];
   /** Keys a rule the operator turned on applied (§4 Rules): their revision names the rule, and so does the event. */
@@ -349,9 +359,22 @@ function itemTrust(r: ItemRow, mates: Set<string>): Trust {
 }
 const auditActor = (a: BpActor) => ({ kind: a.kind === 'operator' ? 'admin' as const : a.kind === 'agent' ? 'agent' as const : 'system' as const, id: a.id });
 
+/** The id of a team question (team_ask): dec_ and its token. Any other text in unclear_ask is the question itself (§2.7). */
+const ASK_ID = /^dec_[A-Za-z0-9]{4,}$/;
+/** What rule unclear_needs_ask asks for, in words: the question itself, or the id of an open one naming the item. */
+const unclearHow = (key: string) => `Put your question to the operator in unclear_ask, as its text or as {question, options, recommended}, and the write asks it for you, naming ${key}. Or give the id of an open team_ask of your team that names ${key} in refs.`;
+
 export class Blueprint {
   limits: BpLimits;
   deps: BpDeps = {};
+  /** A proposal of a team closed (applied, rejected, withdrawn or stale): its tasks' pending refs are settled (docs/blueprint.md §2.3). */
+  onProposalClosed?: (teamId: string, proposalId: string, status: string) => void;
+  /** An applied write added these keys: tasks of the project's teams that named them while pending get them live (§2.3). */
+  onKeysAdded?: (projectId: string, keys: string[]) => void;
+  /** Opens (or, dry, checks) the team question an agent's unclear mark asks in its own write (Decisions.askForItem, §2.7). */
+  onItemAsk?: (a: ItemAsk) => void;
+  /** The questions a write's unclear marks ask, opened once all its ops are in. */
+  private readonly asksOf = new WeakMap<WriteResult, Omit<ItemAsk, 'dry' | 'capped'>[]>();
   constructor(private readonly db: Db, limits: Partial<BpLimits> = {}) {
     this.limits = { ...DEFAULT_LIMITS, ...limits };
     // bp_read's text search folds case as JavaScript does, not only ASCII as SQLite's lower() does.
@@ -904,8 +927,11 @@ export class Blueprint {
     return r && (includeDeleted || !r.deleted_at) ? toItem(r) : undefined;
   }
   links(projectId: string): LinkRow[] { return this.db.prepare('SELECT * FROM bp_links WHERE project_id=? ORDER BY from_key, rel, to_key').all(projectId) as unknown as LinkRow[]; }
-  revisions(itemId: string): { rev: number; snapshot: Record<string, unknown>; actor_kind: string; actor_id: string | null; at: number; change_note: string | null }[] {
-    return (this.db.prepare('SELECT * FROM bp_revisions WHERE item_id=? ORDER BY rev DESC').all(itemId) as any[]).map((r) => ({ ...r, snapshot: parse(r.snapshot, {}) }));
+  revisions(itemId: string): { rev: number; snapshot: Record<string, unknown>; actor_kind: string; actor_id: string | null; at: number; change_note: string | null; via?: string }[] {
+    return (this.db.prepare('SELECT * FROM bp_revisions WHERE item_id=? ORDER BY rev DESC').all(itemId) as any[]).map((r) => {
+      const via = r.actor_kind === 'agent' ? this.viaAt(r.actor_id, r.at) : null;
+      return { ...r, snapshot: parse(r.snapshot, {}), ...(via ? { via } : {}) };
+    });
   }
   events(projectId: string, limit = 50): EventRow[] {
     return (this.db.prepare('SELECT * FROM bp_events WHERE project_id=? ORDER BY created_at DESC, id DESC LIMIT ?').all(projectId, Math.max(1, Math.min(200, limit))) as any[])
@@ -955,10 +981,12 @@ export class Blueprint {
 
   // ───── writing ─────
   /** Apply a batch of ops against the project version the writer read; all or nothing. */
-  write(projectId: string, a: { version: number; ops: Op[]; note?: string | null; team_id?: string | null }, actor: BpActor): WriteResult {
+  /** item_note: the note a person wrote with the change (Edit or Drop on the Clarify sheet); it shows in the history of each item the write puts, as well as in the project's change log. */
+  write(projectId: string, a: { version: number; ops: Op[]; note?: string | null; team_id?: string | null; item_note?: string | null }, actor: BpActor): WriteResult {
     if (!Number.isInteger(a.version)) throw err('invalid_argument', 'Pass the project version you read.');
     return atomic(this.db, () => {
-      const r = this.apply(projectId, a.ops, actor, { note: a.note ?? null, teamId: a.team_id ?? null }, a.version);
+      const notes = a.item_note ? Object.fromEntries(a.ops.flatMap((o) => (o.op === 'upsert' && typeof o.key === 'string' && !o.key.endsWith('*') ? [[o.key, a.item_note!.slice(0, 500)]] : []))) : undefined;
+      const r = this.apply(projectId, a.ops, actor, { note: a.note ?? null, notes, teamId: a.team_id ?? null }, a.version);
       // Items the operator adds inside an open re-plan's scope join it, so its review shows them and a cancel removes them.
       if (r.added.length) {
         const open = this.db.prepare("SELECT id, team_id, kinds FROM bp_replans WHERE project_id=? AND status='open'").all(projectId) as { id: string; team_id: string | null; kinds: string }[];
@@ -1013,6 +1041,7 @@ export class Blueprint {
       });
       if (problems.length === 1) throw first;
       if (!problems.length) this.supersedeOnAccept(p, actor, o, now, res, touched);
+      if (!problems.length) this.openAsks(res, o);
       if (problems.length) throw err('invalid_argument', `${problems.length} ops were refused; nothing was written:\n${problems.slice(0, 12).map((x) => `- ${x}`).join('\n')}${problems.length > 12 ? `\n- and ${problems.length - 12} more` : ''}`, { problems: problems.slice(0, 200) });
       for (const key of touched) this.checkLinkCount(p.id, key);
       this.checkCounts(p.id, touched);
@@ -1030,6 +1059,8 @@ export class Blueprint {
           .run(p.id, o.teamId ?? null, res.version, actor.kind, actor.id, this.liveCount(p.id), JSON.stringify(res.added), JSON.stringify(res.removed), JSON.stringify(res.changed), JSON.stringify(res.moves), o.note ?? null, o.proposalId ?? null, now, o.decided?.length ? JSON.stringify(o.decided) : null,
             ruled.length ? JSON.stringify({ rule: o.ruled!.rule, keys: ruled }) : null);
       }
+      // A key a task named while it was only proposed goes live as soon as any write adds it, not only when the proposal closes.
+      if (res.added.length && !o.trial) this.onKeysAdded?.(p.id, res.added);
       return res;
     });
   }
@@ -1122,6 +1153,70 @@ export class Blueprint {
     return out;
   }
 
+  /** Whether a team question is still open (asked, or waiting for more information). */
+  private openAsk(id: string): boolean {
+    const d = this.db.prepare('SELECT status FROM decisions WHERE id=?').get(id) as { status: string } | undefined;
+    return !!d && ['open', 'needs_info'].includes(d.status);
+  }
+  /** Rule unclear_needs_ask: an agent's unclear mark names one open team_ask of its team whose refs include the item. */
+  private checkUnclearAsk(p: ProjectRow, key: string, ask: unknown, teamId: string | null): void {
+    const rule = { rule: 'unclear_needs_ask' };
+    const how = unclearHow(key);
+    if (typeof ask !== 'string' || !ask) throw err('invalid_argument', `${key} cannot be marked unclear without a question for the operator. ${how}`, rule);
+    const d = this.db.prepare('SELECT team_id, status, refs FROM decisions WHERE id=?').get(ask) as { team_id: string; status: string; refs: string } | undefined;
+    if (!d || !['open', 'needs_info'].includes(d.status)) throw err('invalid_argument', `unclear_ask ${ask} is not an open team question. ${how}`, rule);
+    const ours = teamId ? d.team_id === teamId : !!this.db.prepare('SELECT 1 FROM teams WHERE id=? AND project_id=?').get(d.team_id, p.id);
+    if (!ours) throw err('invalid_argument', `unclear_ask ${ask} is not a question of your team. ${how}`, rule);
+    if (!(parse<string[]>(d.refs, [])).includes(key)) throw err('invalid_argument', `Question ${ask} does not name ${key} in its refs. ${how}`, rule);
+  }
+
+  /**
+   * The question an agent's unclear mark asks in its own write (§2.7): unclear_ask holds its text, or {question, options,
+   * recommended, context}. Checked here, with the id it will have; opened by openAsks once the item exists. Null for the id of
+   * an existing question (checkUnclearAsk), for no value, and for writes that are not an agent's.
+   */
+  private itemAsk(op: Extract<Op, { op: 'upsert' }>, key: string, actor: BpActor, o: WriteOpts, hook = true): Omit<ItemAsk, 'key' | 'team_id' | 'agent_id' | 'dry' | 'capped'> | null {
+    if ((op.kind !== 'fr' && op.kind !== 'nfr') || op.restore || !op.fields || !('unclear_ask' in op.fields) || (o.author ?? actor).kind !== 'agent') return null;
+    const v = op.fields['unclear_ask'];
+    if (v === null || v === undefined || (typeof v === 'string' && (!v.trim() || ASK_ID.test(v.trim())))) return null;
+    const rule = { rule: 'unclear_needs_ask' }, how = unclearHow(key);
+    const bad = (what: string) => err('invalid_argument', `unclear_ask of ${key} ${what}. ${how}`, rule);
+    const q = typeof v === 'string' ? { question: v } : v && typeof v === 'object' && !Array.isArray(v) ? v as Record<string, unknown> : null;
+    if (!q) throw bad('is neither a question nor the id of one');
+    const extra = Object.keys(q).filter((k) => !['question', 'options', 'recommended', 'context'].includes(k));
+    if (extra.length) throw bad(`takes question, options, recommended and context, not ${extra.join(', ')}`);
+    if (typeof q['question'] !== 'string' || !q['question'].trim()) throw bad('needs the question in words');
+    const str = (x: unknown, max: number) => typeof x === 'string' && x.trim().length > 0 && x.length <= max;
+    const opts = q['options'];
+    if (opts !== undefined && !(Array.isArray(opts) && opts.every((x) => x && typeof x === 'object' && str((x as DecisionOption).key, 8) && str((x as DecisionOption).label, 160)
+      && ((x as DecisionOption).effect === undefined || (x as DecisionOption).effect === null || (typeof (x as DecisionOption).effect === 'string' && (x as DecisionOption).effect!.length <= 400))))) {
+      throw bad('has options that are not a list of {key, label, effect}: a key of at most 8 characters, a label of at most 160');
+    }
+    if (q['recommended'] !== undefined && typeof q['recommended'] !== 'string') throw bad('has a recommended that is not an option key');
+    if (q['context'] !== undefined && q['context'] !== null && !(typeof q['context'] === 'string' && q['context'].length <= 4000)) throw bad('has a context that is not text of at most 4000 characters');
+    const a = { id: `dec_${randomToken(10)}`, question: q['question'], ...(opts ? { options: (opts as DecisionOption[]).map((x) => ({ key: x.key, label: x.label, ...(x.effect ? { effect: x.effect } : {}) })) } : {}),
+      ...(q['recommended'] !== undefined ? { recommended: q['recommended'] as string } : {}), context: (q['context'] as string | undefined) ?? null };
+    // The question's own rules (length, two or more options, recommended among them), as team_ask has them.
+    if (hook) this.askHook(key, { ...a, key, team_id: o.teamId ?? '', agent_id: (o.author ?? actor).id ?? '', dry: true, capped: false });
+    return a;
+  }
+  private askHook(key: string, a: ItemAsk): void {
+    if (!this.onItemAsk) throw err('invalid_state', 'This hub cannot open a question from a Blueprint write.');
+    try { this.onItemAsk(a); }
+    catch (e) { if ((e as { code?: string }).code === 'invalid_argument') throw err('invalid_argument', `unclear_ask of ${key}: ${(e as Error).message} ${unclearHow(key)}`, { rule: 'unclear_needs_ask' }); throw e; }
+  }
+  /** Open the questions the write's unclear marks ask (§2.7), now that their items exist; a dry run only checks the limit-free rules. */
+  private openAsks(res: WriteResult, o: WriteOpts): void {
+    const asks = this.asksOf.get(res);
+    if (!asks?.length || o.trial) return;
+    for (const a of asks) {
+      if (!a.team_id) throw err('invalid_argument', `${a.key}: name your team (team_id) so the write can ask the operator for it.`, { rule: 'unclear_needs_ask' });
+      // The operator applying a proposal is never refused for the agent's open-question limit.
+      this.askHook(a.key, { ...a, dry: false, capped: !o.proposalId });
+    }
+    res.asks = asks.map((a) => ({ key: a.key, decision_id: a.id }));
+  }
+
   private upsert(p: ProjectRow, op: Extract<Op, { op: 'upsert' }>, actor: BpActor, o: WriteOpts, now: number, res: WriteResult, touched: Set<string>): void {
     const spec = KINDS[op.kind];
     if (!spec) throw unknownKind(op.kind);
@@ -1163,12 +1258,32 @@ export class Blueprint {
     const body = op.body === undefined ? (cur?.body ?? null) : op.body;
     const maxBody = op.kind === 'architecture' ? this.limits.archBody : this.limits.body;
     if (body !== null && (typeof body !== 'string' || body.length > maxBody)) throw err('invalid_argument', `A body holds at most ${maxBody} characters${` (limit ${op.kind === 'architecture' ? 'architecture_body' : 'body'}, set by the operator)`}.`);
+    // unclear_ask may hold the question itself (§2.7): the field keeps the id it will have, and the write opens it once the item exists.
+    // An item already unclear with an open question keeps it: the text sent again is taken as unchanged, never a second question.
+    const before = cur ? parse<Record<string, unknown>>(cur.fields, {}) : {};
+    const keep = before['unclear'] === true && typeof before['unclear_ask'] === 'string' && this.openAsk(before['unclear_ask']) ? before['unclear_ask'] : null;
+    const asked = keep ? null : this.itemAsk(op, key, actor, o);
+    const resent = keep && op.fields && 'unclear_ask' in op.fields && op.fields['unclear_ask'] !== keep && this.itemAsk(op, key, actor, { ...o, trial: true }, false);
+    if (resent) op = { ...op, fields: { ...op.fields, unclear_ask: keep } };
+    const opFields = asked ? { ...op.fields, unclear_ask: asked.id } : op.fields;
     // A restore replaces the fields as a whole (the plan already kept the ones its file does not carry).
-    const fields = this.checkFields(op.kind, op.restore ? { ...(op.fields ?? {}) } : { ...(cur ? parse<Record<string, unknown>>(cur.fields, {}) : {}), ...(op.fields ?? {}) },
+    const fields = this.checkFields(op.kind, op.restore ? { ...(opFields ?? {}) } : { ...(cur ? parse<Record<string, unknown>>(cur.fields, {}) : {}), ...(opFields ?? {}) },
       // Only evidence this op writes is checked: a stored value from before the grammar never blocks a later edit (F-18).
       !!op.fields && 'evidence' in op.fields && op.fields['evidence'] !== (cur ? parse<Record<string, unknown>>(cur.fields, {})['evidence'] : undefined),
       // A restore keeps the references its file holds; any other write may add only systems the project lists.
       { allowed: op.restore ? null : parseSystems(p.external_systems).map((s) => s.system), kept: refsOf(cur ? parse<Record<string, unknown>>(cur.fields, {}) : {}) });
+    // An unclear mark is one question to the operator (docs/blueprint.md §2.7): an agent marks it only with the open team_ask that names the item.
+    // Clearing the mark clears the ask's id with it.
+    if ((op.kind === 'fr' || op.kind === 'nfr') && !op.restore) {
+      if (fields['unclear'] !== true) {
+        if (asked) throw err('invalid_argument', `${key}: a question in unclear_ask goes with unclear: true.`, { rule: 'unclear_needs_ask' });
+        delete fields['unclear_ask'];
+      } else if (asked) {
+        const list = this.asksOf.get(res) ?? [];
+        list.push({ ...asked, key, team_id: o.teamId ?? '', agent_id: (o.author ?? actor).id ?? '' });
+        this.asksOf.set(res, list);
+      } else if ((o.author ?? actor).kind === 'agent' && op.fields && ('unclear' in op.fields || 'unclear_ask' in op.fields)) this.checkUnclearAsk(p, key, fields['unclear_ask'], o.teamId ?? null);
+    }
     for (const f of spec.required ?? []) if (fields[f] === undefined) throw err('invalid_argument', `A ${op.kind} needs ${f}.`);
     const fieldsJson = JSON.stringify(fields);
     if (fieldsJson.length > this.limits.fields) throw err('invalid_argument', `Fields hold at most ${this.limits.fields} characters (limit fields, set by the operator).`);
@@ -1674,7 +1789,7 @@ export class Blueprint {
     this.checkBatch(a.ops);
     this.noRestoreMarker(a.ops);
     const reason = a.reason?.trim().slice(0, 2000) || null;
-    const { rights, verdict, replan } = this.rightsOf(p, team.id, role, a.ops);
+    const { rights, verdict, replan } = this.rightsOf(p, team.id, role, a.ops, agentId);
     if (verdict === 'deny') {
       // What is wrong with the ops comes before whose they are: a bad key, kind, parent or field is named first, with
       // its rule, so the writer fixes it instead of chasing rights for an item that could never be written. Only
@@ -1857,7 +1972,7 @@ export class Blueprint {
   /** Run the ops and roll them back, answering what the write would have done (check mode, §4; a restore's check, §4.2). */
   private trial(projectId: string, ops: Op[], actor: BpActor, o: WriteOpts, version?: number): WriteResult {
     const done = Symbol('trial'), box: { r?: WriteResult } = {};
-    try { atomic(this.db, () => { box.r = this.apply(projectId, ops, actor, o, version); throw done; }); }
+    try { atomic(this.db, () => { box.r = this.apply(projectId, ops, actor, { ...o, trial: true }, version); throw done; }); }
     catch (e) { if (e !== done) throw e; }
     return box.r!;
   }
@@ -1866,7 +1981,7 @@ export class Blueprint {
    * The rights of an agent's batch (§4): each op's verdict, the batch's, and the open re-plan that widened them. An open
    * re-plan of the part widens the coordinator's rights to its marked items; the import's has no coordinator step.
    */
-  private rightsOf(p: ProjectRow, teamId: string, role: BpRole, ops: Op[]): { rights: ReturnType<typeof opRight>[]; verdict: Verdict; replan: { id: string; kinds: string[] } | null } {
+  private rightsOf(p: ProjectRow, teamId: string, role: BpRole, ops: Op[], agentId?: string): { rights: ReturnType<typeof opRight>[]; verdict: Verdict; replan: { id: string; kinds: string[] } | null } {
     const rp = this.openReplanFor(p.id, teamId);
     const replan = rp && rp.source === 'operator' ? { id: rp.id, kinds: rp.kinds } : null;
     const decides = role === 'coordinator' && !!(this.db.prepare('SELECT coordinator_decides_blueprint d FROM teams WHERE id=?').get(teamId) as { d: number } | undefined)?.d;
@@ -1878,8 +1993,10 @@ export class Blueprint {
     const sole = this.soleTeam(p.id) === teamId;
     // The rules the operator turned on for this team (§4 Rules); only its coordinator uses them.
     const rules = role === 'coordinator' ? this.activeRules(p.id, teamId) : undefined;
+    // Contributor mode while the agent is delegated to a collaborator (§4, Contributor column).
+    const contributor = agentId ? this.contributorOf(agentId) : null;
     const rights = ops.map((o) => {
-      const right = opRight(o, { role, teamId, row: look, replan, decides, sole, rules });
+      const right = opRight(o, { role, teamId, row: look, replan, decides, sole, rules, contributor });
       if (o.op === 'upsert' && typeof o.key === 'string' && !o.key.endsWith('*') && !look(o.key)) {
         const parent = o.parent_key ? look(o.parent_key) : undefined;
         made.set(o.key, {
@@ -1891,6 +2008,20 @@ export class Blueprint {
     });
     return { rights, verdict: batchVerdict(rights), replan };
   }
+  /**
+   * The delegation an agent works under now (docs/checkout.md §9 F1): delegated to a person who is not an admin, from the
+   * confirm on their PC until Take back. Items it created after `since` are its own in contributor mode.
+   */
+  contributorOf(agentId: string): { agentId: string; since: number; delegate: string } | null {
+    const r = this.db.prepare(`SELECT COALESCE(c.restoring_at, c.created_at) since, COALESCE(u.display_name, u.username) who FROM checkouts c
+      JOIN admin_users u ON u.id=c.delegate_user_id WHERE c.scope='agent' AND c.agent_id=? AND c.released_at IS NULL
+      AND c.status IN ('restoring','restored') AND u.role <> 'admin' ORDER BY c.created_at DESC LIMIT 1`).get(agentId) as { since: number; who: string } | undefined;
+    return r ? { agentId, since: r.since, delegate: r.who } : null;
+  }
+  /** The person who steered an agent when it wrote at `at`: a delegate whose delegation covered that moment. */
+  private viaAt(agentId: string | null, at: number): string | null { return delegateAt(this.db, agentId, at); }
+  /** A proposal with its "via <delegate>" label, when its agent proposed it while delegated. */
+  private withVia(p: Proposal): Proposal { const via = this.viaAt(p.agent_id, p.created_at); return via ? { ...p, via } : p; }
   /** The restore marker is the hub's own (§4.2): an agent's ops never carry one, even if a caller other than the tools passes it. */
   private noRestoreMarker(ops: Op[]): void {
     if (ops.some((o) => (o as { restore?: unknown }).restore !== undefined)) throw err('invalid_argument', 'restore is not an op field. To restore from an export, use bp_write {restore: {text}} instead of ops.');
@@ -1928,7 +2059,7 @@ export class Blueprint {
       this.checkBatch(a.ops);
       this.noRestoreMarker(a.ops);
     } catch (e) { if (e instanceof KeyError) return refused(e, []); throw e; }
-    const { rights, verdict } = this.rightsOf(p, team.id, role, a.ops);
+    const { rights, verdict } = this.rightsOf(p, team.id, role, a.ops, agentId);
     const ops = rights.map((r, i) => ({ op: i + 1, key: keyOf(a.ops[i]!), verdict: r.verdict, why: r.why }));
     const whys = (v: Verdict) => [...new Set(rights.filter((r) => r.verdict === v).map((r) => r.why))];
     let w: WriteResult;
@@ -2238,25 +2369,25 @@ export class Blueprint {
 
   proposal(id: string): Proposal | undefined {
     const r = this.db.prepare('SELECT * FROM bp_proposals WHERE id=?').get(id) as any;
-    return r ? toProposal(r) : undefined;
+    return r ? this.withVia(toProposal(r)) : undefined;
   }
   /** A project's proposals, oldest first. */
   proposals(projectId: string, f: { status?: ProposalStatus; agent?: string } = {}): Proposal[] {
     return (this.db.prepare(`SELECT * FROM bp_proposals WHERE project_id=? ${f.status ? 'AND status=?' : ''} ${f.agent ? 'AND agent_id=?' : ''} ORDER BY created_at, id`)
-      .all(...[projectId, f.status, f.agent].filter((x): x is string => !!x)) as any[]).map(toProposal);
+      .all(...[projectId, f.status, f.agent].filter((x): x is string => !!x)) as any[]).map((r) => this.withVia(toProposal(r)));
   }
   /** One page of a project's proposals, newest first, with the total. */
   proposalsPage(projectId: string, f: { status?: ProposalStatus; limit: number; offset: number }): { proposals: Proposal[]; total: number } {
     const where = `project_id=? ${f.status ? 'AND status=?' : ''}`, args = f.status ? [projectId, f.status] : [projectId];
     const total = (this.db.prepare(`SELECT COUNT(*) n FROM bp_proposals WHERE ${where}`).get(...args) as { n: number }).n;
     const rows = this.db.prepare(`SELECT * FROM bp_proposals WHERE ${where} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`).all(...args, f.limit, f.offset) as any[];
-    return { proposals: rows.map(toProposal), total };
+    return { proposals: rows.map((r) => this.withVia(toProposal(r))), total };
   }
   /** Open proposals, oldest first: of the projects named, or of every project. */
   openProposals(projectIds?: string[]): Proposal[] {
     if (projectIds && !projectIds.length) return [];
     return (this.db.prepare(`SELECT * FROM bp_proposals WHERE status='open' ${projectIds ? 'AND project_id IN (SELECT value FROM json_each(?))' : ''} ORDER BY created_at, id`)
-      .all(...(projectIds ? [JSON.stringify(projectIds)] : [])) as any[]).map(toProposal);
+      .all(...(projectIds ? [JSON.stringify(projectIds)] : [])) as any[]).map((r) => this.withVia(toProposal(r)));
   }
   /** Kind, team and parent of the live items named, in one query: what decider routing needs to place a batch of ops. */
   places(projectId: string, keys: Iterable<string>): Map<string, { kind: string; team_id: string | null; parent_key: string | null; status: string | null; replan_id: string | null }> {
@@ -2315,6 +2446,7 @@ export class Blueprint {
     const r = this.db.prepare("UPDATE bp_proposals SET status='withdrawn', decided_by=?, decided_at=? WHERE id=? AND status='open'").run(agentId, Date.now(), id);
     if (!r.changes) throw err('invalid_state', 'The proposal was decided meanwhile.');
     this.deps.audit?.settle('bp_proposal', id);
+    if (pr.team_id && pr.type === 'ops') this.onProposalClosed?.(pr.team_id, id, 'withdrawn');
     return this.proposal(id)!;
   }
 
@@ -2323,6 +2455,8 @@ export class Blueprint {
     const r = this.db.prepare("UPDATE bp_proposals SET status=?, decided_by=?, decided_at=?, note=? WHERE id=? AND status='open'").run(status, actor.id, Date.now(), note, pr.id);
     if (!r.changes) throw err('invalid_state', `The proposal is already ${this.proposal(pr.id)?.status ?? 'gone'}.`);
     this.deps.audit?.settle('bp_proposal', pr.id); // its alert in Log → Alerts has nothing left to ask
+    // Tasks that named keys this proposal writes keep them, live, only if it was applied (inside the caller's transaction).
+    if (pr.team_id && pr.type === 'ops') this.onProposalClosed?.(pr.team_id, pr.id, status);
     const p = this.project(pr.project_id)!, who = pr.agent_id ? this.label(pr.agent_id) : 'an agent';
     const mine = pr.type === 'replan' && status === 'rejected' ? `The operator sent back your re-plan submission ${pr.id} (re-plan ${pr.replan_id}) in ${p.key}${note ? `: ${note}` : '.'} The re-plan stays open: revise its items, then submit again with bp_proposals {action: "submit_replan"}.`
       : pr.type === 'replan' && status === 'stale' ? `Your re-plan submission ${pr.id} in ${p.key} could not be applied: ${note}. The re-plan stays open: check its items and submit again.`
@@ -2359,6 +2493,43 @@ export class Blueprint {
       if (governs.length) this.apply(p.id, governs, actor, { note: `answered ${d.id}`, teamId: d.team_id });
       return key;
     });
+  }
+
+  /**
+   * Answering an unclear requirement's question clears its mark in the same step (docs/blueprint.md §2.7). Returns the key it cleared,
+   * or null when no item names this ask. With itemRev (what the answerer saw): an item that moved is a conflict, and an item the
+   * team already cleared is already_clear. Runs inside the caller's transaction; the answer is the revision's note.
+   */
+  clarify(d: { id: string; team_id: string; refs: string[] }, text: string | null, actor: BpActor, itemRev: number | null): string | null {
+    const p = this.projectOfTeam(d.team_id);
+    if (!p) return null;
+    const items = d.refs.map((k) => this.liveRow(p.id, k)).filter((r): r is ItemRow => !!r && (r.kind === 'fr' || r.kind === 'nfr'));
+    const named = items.find((r) => parse<Record<string, unknown>>(r.fields, {})['unclear_ask'] === d.id);
+    if (!named) {
+      if (itemRev !== null && items.length) throw err('already_clear', `${items[0]!.key} is no longer marked unclear: the team cleared it already. Your answer is not needed to clear it.`, { key: items[0]!.key });
+      return null;
+    }
+    if (itemRev !== null && named.rev !== itemRev) throw err('conflict', `${named.key} changed since you opened it (now revision ${named.rev}). Read it again before answering.`, { key: named.key, rev: named.rev });
+    const note = `clarified: ${(text ?? 'answered').replace(/\s+/g, ' ').trim().slice(0, 500)}`;
+    this.apply(p.id, [{ op: 'upsert', kind: named.kind as 'fr' | 'nfr', key: named.key, fields: { unclear: null, unclear_ask: null } }], actor, { note, notes: { [named.key]: note }, teamId: d.team_id });
+    return named.key;
+  }
+
+  /** The operator asks a team what is unclear in a legacy item (marked before the question route): one fixed notice to its coordinators. */
+  askClarify(projectId: string, key: string): { notified: number } {
+    const p = this.project(projectId);
+    if (!p) throw err('not_found', 'No such project.');
+    const r = this.liveRow(p.id, key);
+    if (!r || (r.kind !== 'fr' && r.kind !== 'nfr')) throw err('not_found', `${key} is not a requirement of this project.`);
+    const f = parse<Record<string, unknown>>(r.fields, {});
+    if (f['unclear'] !== true) throw err('invalid_state', `${key} is not marked unclear.`);
+    const open = typeof f['unclear_ask'] === 'string' && this.db.prepare("SELECT 1 FROM decisions WHERE id=? AND status IN ('open','needs_info')").get(f['unclear_ask']);
+    if (open) throw err('invalid_state', `${key} already has an open question to the operator.`);
+    const to = r.team_id ? this.coordinators(r.team_id) : [];
+    const who = to.length ? to : this.projectCoordinators(p.id);
+    if (!who.length) throw err('invalid_state', `No team in ${p.key} has a coordinator to ask.`);
+    this.notify(who, 'unclear_ask', `The operator asks what is unclear in ${key} ("${r.title.slice(0, 120)}"). Ask them with one team_ask that names ${key} in refs, then write unclear: true with unclear_ask set to that question's id.`);
+    return { notified: who.length };
   }
 
   private opKeys(ops: Op[]): string {
@@ -2433,6 +2604,8 @@ export class Blueprint {
     const lead = leadingCode(r.title, known);
     if (lead) out.push(warn.code_first(label, r.title, lead));
     if (r.kind === 'ac' && acceptanceEmpty(r)) out.push(warn.empty_ac(label, r.title));
+    // A cited text in the form of a key is an item, never a file: one the project does not have says so (key_missing).
+    for (const k of citedRefs(r).keys) if (!known.keys.has(k)) out.push(warn.key_missing(label, r.title, k));
     return out;
   }
 
@@ -2692,6 +2865,9 @@ export class Blueprint {
     const items = page.map((r): ReadItem => {
       const it: ReadItem = { key: r.key, kind: r.kind, title: r.title, status: r.status, parent: r.parent_key, team_id: r.team_id, links: [...(out.get(r.key) ?? []), ...(inn.get(r.key) ?? [])],
         updated_by: actorText(r.updated_by_kind, r.updated_by_id), trust: itemTrust(r, mates) };
+      // Written by an agent while it ran for a collaborator: labelled with that person ("· via Lena").
+      const via = r.updated_by_kind === 'agent' && r.updated_by_id ? this.viaAt(r.updated_by_id, r.updated_at) : null;
+      if (via) it.via = via;
       if (r.replan_id) it.replan = r.replan_id;
       if (issues) it.plain_issues = issues.get(r.key)!.map(issueText);
       if (r.kind === 'claim') it.support = support.get(r.key)!;
@@ -2741,6 +2917,8 @@ export class Blueprint {
     const p = this.projectOfTeam(teamId) ?? this.ensureTeamProject(teamId);
     const { team, role } = this.seat(p.id, agentId, teamId);
     if (role !== 'coordinator') throw err('denied', 'Status reports are written by the team coordinator. As a member, tell the coordinator what moved.');
+    const k = this.contributorOf(agentId);
+    if (k) throw err('denied', `Contributor mode (for ${k.delegate}): a delegated agent files no status report. Tell another coordinator what moved.`);
     this.guard(p, team, agentId);
     const R = REPORT_SHAPE;
     if (!['on_track', 'at_risk', 'off_track'].includes(a.health)) throw err('invalid_argument', 'health is on_track, at_risk or off_track.');

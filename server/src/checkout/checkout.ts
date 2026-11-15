@@ -46,6 +46,10 @@ export interface CheckoutRow {
   choices: string | null; handout_hashes: string | null; paused_team: number; missing: string; end_reason: string | null; requested_by: string | null;
   created_at: number; updated_at: number; ready_at: number | null; rendered_at: number | null; restoring_at: number | null; restored_at: number | null;
   ended_at: number | null; expires_at: number; overdue_at: number | null;
+  /** A whole team, or one agent of it delegated to a collaborator (migration 0143, docs/checkout.md §9 F1). */
+  scope: 'team' | 'agent'; agent_id: string | null; delegate_user_id: string | null; delegate_render: string | null;
+  prompt_opened_at: number | null; pc_confirmed_at: number | null; pc_refused_at: number | null;
+  released_at: number | null; released_by: string | null; release_reason: string | null; drafts_path?: string | null;
 }
 export interface HandoutRow {
   id: string; checkout_id: string; agent_id: string; status: HandoutStatus; source: 'agent' | 'hub'; report: string | null; body: string | null; version: number;
@@ -138,7 +142,7 @@ const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 
 /** The open checkout of a team, or of a PC as its source or target: the `checkout_open` guards use it. */
 export function openCheckout(db: Db, by: { teamId?: string; machineId?: string }): CheckoutRow | null {
   const st = OPEN.map(() => '?').join(',');
-  if (by.teamId) return (db.prepare(`SELECT * FROM checkouts WHERE team_id=? AND status IN (${st})`).get(by.teamId, ...OPEN) as unknown as CheckoutRow) ?? null;
+  if (by.teamId) return (db.prepare(`SELECT * FROM checkouts WHERE team_id=? AND scope='team' AND status IN (${st})`).get(by.teamId, ...OPEN) as unknown as CheckoutRow) ?? null;
   if (by.machineId) return (db.prepare(`SELECT * FROM checkouts WHERE (source_machine_id=? OR target_machine_id=?) AND status IN (${st}) ORDER BY created_at LIMIT 1`).get(by.machineId, by.machineId, ...OPEN) as unknown as CheckoutRow) ?? null;
   return null;
 }
@@ -147,6 +151,8 @@ export class Checkouts {
   /** Hooks set by CheckoutKeys, run inside the ending transaction: revoke unconfirmed keys and reinstate old sessions (cancel, expiry), revoke old keys (restored). */
   onEnded?: (c: CheckoutRow, how: 'cancelled' | 'expired') => void;
   onRestored?: (c: CheckoutRow) => void;
+  /** A delegation of this agent ended (Take back, cancelled, expired, moved again, back with the admin): its drafts grant goes. */
+  onDelegationEnded?: (agentId: string, actor: Actor) => void;
   /**
    * Told after a change commits (the vault copy, docs/vault.md): start, a handout written or replaced, ready, render,
    * restoring, restored and the end. Always queued with setImmediate, so it runs after the caller's transaction; `expect`
@@ -174,7 +180,23 @@ export class Checkouts {
   mustCheckout(id: string): CheckoutRow { const c = this.checkout(id); if (!c) throw err('not_found', 'checkout not found'); return c; }
   handouts(checkoutId: string): HandoutRow[] { return this.db.prepare('SELECT * FROM handouts WHERE checkout_id=? ORDER BY created_at, rowid').all(checkoutId) as unknown as HandoutRow[]; }
   handout(id: string): HandoutRow | null { return (this.db.prepare('SELECT * FROM handouts WHERE id=?').get(id) as unknown as HandoutRow) ?? null; }
+  /** The team's open team checkout (a one-agent checkout of one of its members is not one: see delegations()). */
   openFor(teamId: string): CheckoutRow | null { return openCheckout(this.db, { teamId }); }
+  /** The agent's open one-agent checkout. */
+  openForAgent(agentId: string): CheckoutRow | null {
+    return (this.db.prepare(`SELECT * FROM checkouts WHERE scope='agent' AND agent_id=? AND status IN (${OPEN.map(() => '?').join(',')})`).get(agentId, ...OPEN) as unknown as CheckoutRow) ?? null;
+  }
+  /**
+   * One-agent checkouts that still stand: open, or restored and not released (the agent runs for its delegate). Of one
+   * agent, or of the live members of a team. Newest first.
+   */
+  delegations(by: { agentId?: string; teamId?: string; delegateUserId?: string } = {}): CheckoutRow[] {
+    const where = ["scope='agent'", 'released_at IS NULL', `status IN (${[...OPEN, 'restored'].map(() => '?').join(',')})`], args: unknown[] = [...OPEN, 'restored'];
+    if (by.agentId) { where.push('agent_id=?'); args.push(by.agentId); }
+    if (by.teamId) { where.push('agent_id IN (SELECT agent_id FROM team_members WHERE team_id=? AND removed_at IS NULL)'); args.push(by.teamId); }
+    if (by.delegateUserId) { where.push('delegate_user_id=?'); args.push(by.delegateUserId); }
+    return this.db.prepare(`SELECT * FROM checkouts WHERE ${where.join(' AND ')} ORDER BY created_at DESC, rowid DESC`).all(...(args as never[])) as unknown as CheckoutRow[];
+  }
   /** The agent's handout in an open checkout (an agent belongs to at most one open checkout per team; the oldest first). */
   handoutOf(agentId: string, checkoutId?: string): { c: CheckoutRow; h: HandoutRow } | null {
     const st = OPEN.map(() => '?').join(',');
@@ -188,11 +210,36 @@ export class Checkouts {
       id: c.id, team_id: c.team_id, status: c.status, source_machine_id: c.source_machine_id, target_machine_id: c.target_machine_id, request_id: c.request_id,
       choices: parse(c.choices, null), handout_hashes: parse(c.handout_hashes, null), paused_team: !!c.paused_team, missing: parse<string[]>(c.missing, []),
       end_reason: c.end_reason, created_at: c.created_at, ready_at: c.ready_at, rendered_at: c.rendered_at, restoring_at: c.restoring_at, restored_at: c.restored_at,
-      ended_at: c.ended_at, expires_at: c.expires_at, overdue_at: c.overdue_at,
+      ended_at: c.ended_at, expires_at: c.expires_at, overdue_at: c.overdue_at, waiting_for: this.waitingFor(c),
+      scope: c.scope ?? 'team', agent_id: c.agent_id ?? null, delegate_user_id: c.delegate_user_id ?? null, prompt_opened_at: c.prompt_opened_at ?? null,
+      pc_confirmed_at: c.pc_confirmed_at ?? null, pc_refused_at: c.pc_refused_at ?? null, released_at: c.released_at ?? null, release_reason: c.release_reason ?? null,
       // Bodies are visible to the administrator until the purge clears them, once their vault page is written (§3, §7, D63); they are L2 data.
       handouts: this.handouts(c.id).map((h) => ({ id: h.id, agent_id: h.agent_id, status: h.status, source: h.source, version: h.version, report: parse(h.report, null),
         report_sha256: h.report === null ? null : sha256Hex(h.report), body: parse(h.body, null), written_at: h.written_at, consumed_at: h.consumed_at, new_credential_id: h.new_credential_id })),
     };
+  }
+
+  /**
+   * What an open checkout waits for, in one plain sentence (docs/checkout.md, "What it waits for"): the agents still to
+   * write their handout or to resume, the operator's review of leftovers or the restore prompt, or the target. Null once
+   * it has ended. agents: the ids it waits on, for the console to name.
+   */
+  waitingFor(c: CheckoutRow): { on: 'agents' | 'operator' | 'target'; text: string; agents: string[] } | null {
+    const H = this.handouts(c.id), n = H.length, of = (k: number, what: string) => `${k} of ${n} ${n === 1 ? 'agent' : 'agents'} ${k === 1 ? 'has' : 'have'} not ${what} yet.`;
+    if (c.status === 'collecting') {
+      const leftovers = H.filter((h) => h.status === 'merged').reduce((s, h) => s + (parse<MergedReport | null>(h.report, null)?.leftovers ?? []).filter((l) => !l.approved && !l.refused).length, 0);
+      if (leftovers) return { on: 'operator', text: `${leftovers === 1 ? 'One leftover waits' : leftovers + ' leftovers wait'} for your review before the agents can finish their handouts.`, agents: [] };
+      const missing = H.filter((h) => h.status !== 'written' && h.status !== 'consumed');
+      if (missing.length) return { on: 'agents', text: of(missing.length, 'written their handout'), agents: missing.map((h) => h.agent_id) };
+      return { on: 'operator', text: 'Every handout is in. Create the restore prompt.', agents: [] };
+    }
+    if (c.status === 'ready') return { on: 'operator', text: 'Every handout is in. Create the restore prompt.', agents: [] };
+    if (c.status === 'rendered') return { on: 'target', text: 'Waiting for the restore prompt to be run on the target.', agents: [] };
+    if (c.status === 'restoring') {
+      const left = H.filter((h) => h.status !== 'consumed');
+      return left.length ? { on: 'agents', text: of(left.length, 'resumed on the target'), agents: left.map((h) => h.agent_id) } : { on: 'target', text: 'Every agent has resumed. Finishing.', agents: [] };
+    }
+    return null;
   }
 
   /** Open checkouts, oldest first, or the latest checkouts in any state (GET /api/checkouts). */
@@ -299,6 +346,12 @@ export class Checkouts {
     const id = tx(this.db, () => {
       const open = this.openFor(teamId);
       if (open) throw err('checkout_open', `The team already has an open checkout (${open.id}, ${open.status}).`, { checkout_id: open.id });
+      // A delegated member runs elsewhere for its delegate: take it back first (F1).
+      const away = this.delegations({ teamId });
+      if (away.length) {
+        const list = away.map((d) => ({ agent_id: d.agent_id!, label: this.keys.agent(d.agent_id!)?.label ?? d.agent_id!, delegate: this.personLabel(d.delegate_user_id), checkout_id: d.id }));
+        throw err('checkout_conflict', `${list.map((x) => `${x.label} is with ${x.delegate}`).join('; ')}. Take ${list.length === 1 ? 'it' : 'them'} back first, then move the team.`, { delegated: list });
+      }
       const pending = this.db.prepare("SELECT id FROM onboarding_requests WHERE team_id=? AND kind='add_agents' AND state IN ('submitted','needs_changes','approved')").get(teamId) as { id: string } | undefined;
       if (pending) throw err('invalid_state', `The team has a pending add-agents request (${pending.id}). Decide or cancel it first.`, { request_id: pending.id });
       const id = `cko_${randomToken(10)}`, now = this.now();
@@ -315,7 +368,60 @@ export class Checkouts {
     this.changed(id);
     return this.view(id);
   }
-  private requestText(t: TeamRow, id: string, agentId: string, integration: string | null): string {
+  /** A person as a label (display name or username). */
+  personLabel(userId: string | null): string {
+    if (!userId) return 'nobody';
+    const u = this.db.prepare('SELECT username, display_name FROM admin_users WHERE id=?').get(userId) as { username: string; display_name: string | null } | undefined;
+    return u ? u.display_name || u.username : 'an unknown person';
+  }
+  /**
+   * Start a one-agent checkout (docs/checkout.md §9 F1): the agent alone checkpoints and writes its handout, the rest of
+   * the team keeps working. It refuses a team with an open team checkout and an agent with an open checkout
+   * (`checkout_conflict`, `checkout_open`), and an agent that is the only coordinator of a team it is in. The team is the
+   * one named, else the agent's first live team; the source PC is the PC its key is bound to, else the team's.
+   * `delegate` and `render` are stored for Delegations (delegate.ts): who runs it, and the render the admin chose.
+   */
+  startAgent(agentId: string, o: { teamId?: string | null; delegateUserId: string; render: unknown }, actor: Actor): ReturnType<Checkouts['view']> {
+    const a = this.keys.agent(agentId);
+    if (!a || a.status === 'archived') throw err('not_found', 'agent not found');
+    const mine = this.teams.teamsOf(agentId).filter((t) => t.status === 'running' || t.status === 'paused');
+    const t = o.teamId ? mine.find((x) => x.id === o.teamId) : mine[0];
+    if (!t) throw err('invalid_state', o.teamId ? `${a.label} is not a member of that team, or the team is not running or paused.` : `${a.label} is in no running or paused team, so there is nothing to resume it into.`);
+    // A team's only coordinator would leave it without planning, asks and relays for the whole away window.
+    for (const x of mine) {
+      if (x.my_role !== 'coordinator') continue;
+      if (!this.teams.members(x.id).some((m) => m.role === 'coordinator' && m.agent_id !== agentId)) {
+        throw err('only_coordinator', `${a.label} is the only coordinator of team "${x.name}". Add another coordinator first, or move the whole team.`, { team_id: x.id });
+      }
+    }
+    const id = tx(this.db, () => {
+      for (const x of mine) {
+        const open = this.openFor(x.id);
+        if (open) throw err('checkout_conflict', `Team "${x.name}" has an open checkout (${open.id}, ${open.status}). Finish or cancel it first.`, { checkout_id: open.id });
+      }
+      const mineOpen = this.openForAgent(agentId);
+      if (mineOpen) throw err('checkout_open', `${a.label} already has an open checkout (${mineOpen.id}, ${mineOpen.status}).`, { checkout_id: mineOpen.id });
+      const m = this.teams.members(t.id).find((x) => x.agent_id === agentId)!;
+      const bound = this.keys.credential(m.credential_id)?.bound_machine_id ?? null;
+      const id = `cko_${randomToken(10)}`, now = this.now();
+      this.db.prepare("INSERT INTO checkouts(id,team_id,status,source_machine_id,requested_by,created_at,updated_at,expires_at,scope,agent_id,delegate_user_id,delegate_render) VALUES (?,?,'collecting',?,?,?,?,?,'agent',?,?,?)")
+        .run(id, t.id, bound ?? this.sourceMachine(t.id), actor.id, now, now, now + EXPIRY_MS, agentId, o.delegateUserId, JSON.stringify(o.render ?? null));
+      this.db.prepare("INSERT INTO handouts(id,checkout_id,agent_id,status,created_at,updated_at) VALUES (?,?,?,'requested',?,?)").run(`hnd_${randomToken(10)}`, id, agentId, now, now);
+      this.keys.notify(agentId, 'checkout_requested', this.requestText(t, id, agentId, this.integrationOf(t.id), this.personLabel(o.delegateUserId)));
+      this.audit.event(actor, 'checkout.start', { kind: 'checkout', id }, { team: t.id, agents: 1, scope: 'agent', agent: agentId, delegate: o.delegateUserId });
+      return id;
+    });
+    this.teams.wake();
+    this.changed(id);
+    return this.view(id);
+  }
+  private requestText(t: TeamRow, id: string, agentId: string, integration: string | null, delegate?: string): string {
+    if (delegate) {
+      return `The administrator is moving you alone to ${delegate}'s PC (checkout ${id}); the rest of team "${t.name}" keeps working. Stop taking new work and stop at a good checkpoint. Report checkout_progress `
+        + `"checkpointing"; commit and merge your work into ${integration ? `your team's integration branch \`${integration}\`` : INTEGRATION_FALLBACK} under the normal landing rules (no force, no history rewrite), `
+        + `or unapproved work into your own branch \`${this.memberBranch(id, agentId)}\` with its task left open (with no repository, report no_repo instead). Never push, and never commit local config. Remove your task worktrees, run the leftover check, `
+        + `copy files you want kept to the vault, report "merged", then write your handout with checkout_handout. Your tasks stay yours and your reviews go to another reviewer while you move. ${RECONNECT_HINT}`;
+    }
     return `The administrator is moving team "${t.name}" (checkout ${id}). Stop taking new work and stop at a good checkpoint. Report checkout_progress `
       + `"checkpointing"; commit and merge your work into ${integration ? `your team's integration branch \`${integration}\`` : INTEGRATION_FALLBACK} under the normal landing rules (no force, no history rewrite), `
       + `or unapproved work into your own branch \`${this.memberBranch(id, agentId)}\` with its task left open (with no repository, report no_repo instead). Never push, and never commit local config. Remove your task worktrees, run the leftover check, `
@@ -554,9 +660,11 @@ export class Checkouts {
       this.moveHandout(h.id, [h.status], 'written', { body: JSON.stringify(this.builtBody(h)), source: 'hub', written_at: now, version: h.version + 1 });
     }
     const t = this.teams.mustTeam(c.team_id);
-    const pause = t.status === 'running';
+    // A one-agent checkout pauses nothing: the agent alone is away from now until it resumes (F1).
+    const pause = c.scope !== 'agent' && t.status === 'running';
     this.move(c.id, ['collecting'], 'ready', { ready_at: now, paused_team: pause ? 1 : 0, missing: JSON.stringify(missing) });
     if (pause) this.teams.pause(t.id, `checkout:${c.id}`, sys);
+    if (c.scope === 'agent' && c.agent_id) this.teams.setAway(c.agent_id, c.expires_at);
     this.audit.event(actor, 'checkout.ready', { kind: 'checkout', id: c.id }, { team: c.team_id, missing, paused_team: pause, already_paused: t.status === 'paused' ? t.paused_reason : null });
   }
   /**
@@ -589,7 +697,8 @@ export class Checkouts {
       for (const h of this.handouts(c.id)) if (h.body !== null) hashes[h.agent_id] = sha256Hex(h.body);
       const now = this.now();
       this.move(c.id, [c.status], 'rendered', { target_machine_id: r.target_machine_id, request_id: r.request_id, choices: JSON.stringify(r.choices ?? null),
-        handout_hashes: JSON.stringify(hashes), rendered_at: now, expires_at: now + EXPIRY_MS });
+        handout_hashes: JSON.stringify(hashes), rendered_at: now, expires_at: now + EXPIRY_MS, pc_confirmed_at: null, pc_refused_at: null });
+      if (c.scope === 'agent' && c.agent_id) this.db.prepare('UPDATE team_members SET away_until=? WHERE agent_id=? AND removed_at IS NULL AND away_until IS NOT NULL').run(now + EXPIRY_MS, c.agent_id);
       if (c.status === 'rendered') this.audit.event(actor, 'checkout.render_superseded', { kind: 'checkout', id: c.id }, { previous_request: c.request_id, previous_target: c.target_machine_id });
       this.audit.event(actor, 'checkout.rendered', { kind: 'checkout', id: c.id }, { target: r.target_machine_id, request: r.request_id, handout_hashes: hashes });
       return this.checkout(c.id)!;
@@ -630,6 +739,8 @@ export class Checkouts {
       // The body waits for its vault page (D63): purge_due marks it, the purge clears it once the page is written.
       this.moveHandout(h.id, ['written'], 'consumed', { purge_due: this.now(), consumed_at: this.now(), new_credential_id: newCredentialId });
       this.audit.event(actor, 'checkout.handout_consumed', { kind: 'handout', id: h.id }, { checkout: c.id, agent: h.agent_id, credential: newCredentialId });
+      // The agent runs on the target now: it is no longer away (F1).
+      if (c.scope === 'agent') this.teams.setAway(h.agent_id, null);
       const restored = this.handouts(c.id).every((x) => x.status === 'consumed');
       if (restored) this.toRestored(this.checkout(c.id)!, actor);
       return { body: JSON.parse(h.body) as unknown, restored };
@@ -734,7 +845,29 @@ export class Checkouts {
     this.db.prepare('UPDATE handouts SET purge_due=COALESCE(purge_due, ?) WHERE checkout_id=? AND body IS NOT NULL').run(this.now(), c.id);
     this.onRestored?.(c);
     this.liftPause(c);
-    this.audit.event(actor, 'checkout.restored', { kind: 'checkout', id: c.id }, { team: c.team_id });
+    if (c.scope === 'agent' && c.agent_id) {
+      const now = this.now();
+      this.teams.setAway(c.agent_id, null);
+      // The agent left its earlier delegate: that delegation ends here. One to the admin ("Delegate back") ends at once.
+      this.db.prepare("UPDATE checkouts SET released_at=?, released_by=?, release_reason='moved_again', updated_at=? WHERE scope='agent' AND agent_id=? AND id<>? AND status='restored' AND released_at IS NULL")
+        .run(now, actor.id, now, c.agent_id, c.id);
+      const role = c.delegate_user_id ? (this.db.prepare('SELECT role FROM admin_users WHERE id=?').get(c.delegate_user_id) as { role: string } | undefined)?.role : null;
+      if (role !== 'member') this.db.prepare("UPDATE checkouts SET released_at=?, released_by=?, release_reason='back_with_admin', updated_at=? WHERE id=?").run(now, actor.id, now, c.id);
+      this.onDelegationEnded?.(c.agent_id, actor);
+    }
+    this.audit.event(actor, 'checkout.restored', { kind: 'checkout', id: c.id }, { team: c.team_id, ...(c.scope === 'agent' ? { scope: 'agent', agent: c.agent_id, delegate: c.delegate_user_id } : {}) });
+  }
+  /**
+   * Take back a restored delegation (delegate.ts): the delegation ends and the ceiling with it. The caller revokes the key.
+   * Guarded: only a restored, unreleased one-agent checkout.
+   */
+  release(id: string, reason: string, actor: Actor): void {
+    const now = this.now();
+    const r = this.db.prepare("UPDATE checkouts SET released_at=?, released_by=?, release_reason=?, updated_at=? WHERE id=? AND scope='agent' AND status='restored' AND released_at IS NULL").run(now, actor.id, reason, now, id);
+    if (!r.changes) throw err('conflict', 'This delegation has already ended. Reload it.');
+    const c = this.mustCheckout(id);
+    if (c.agent_id) this.onDelegationEnded?.(c.agent_id, actor);
+    this.changed(id);
   }
 
   // ───── cancel, expiry, team end ─────
@@ -778,7 +911,16 @@ export class Checkouts {
     this.onEnded?.(c, how);
     if (lift) this.liftPause(c);
     const t = this.teams.team(c.team_id);
-    if (t && t.status !== 'done' && t.status !== 'stopped') {
+    if (c.scope === 'agent' && c.agent_id) {
+      // One agent: it is back on its source PC with its old key (unless it already resumed on the target), and no longer away.
+      this.teams.setAway(c.agent_id, null);
+      this.db.prepare('UPDATE checkouts SET released_at=COALESCE(released_at, ?), release_reason=COALESCE(release_reason, ?) WHERE id=?').run(now, how, c.id);
+      this.onDelegationEnded?.(c.agent_id, actor);
+      const resumed = this.handouts(c.id).some((h) => h.status === 'consumed');
+      if (t && t.status !== 'done' && t.status !== 'stopped' && !resumed) {
+        this.keys.notify(c.agent_id, 'checkout_ended', `Your move (checkout ${c.id}) was ${how}. Your checkpoint merges stay; open tasks go on from your checkout branch where you used one. Carry on in this folder.`);
+      }
+    } else if (t && t.status !== 'done' && t.status !== 'stopped') {
       const text = lift
         ? `The move of team "${t.name}" (checkout ${c.id}) was ${how}. Your checkpoint merges stay; open tasks go on from your checkout branch (checkout/${c.id}, or checkout/${c.id}-<your short name>) where you used one. Carry on in this folder.`
         : `The move of team "${t.name}" (checkout ${c.id}) was ${how} while restoring. The team stays paused until the administrator resumes it. Do not start work.`;
@@ -845,6 +987,10 @@ export class Checkouts {
   private teamEnded(teamId: string): void {
     const c = this.openFor(teamId);
     if (c) { this.end(c, 'cancelled', 'team_ended', sys); this.changed(c.id, ['cancelled']); }
+    // An open one-agent checkout into this team has nothing left to resume into.
+    for (const a of this.db.prepare(`SELECT * FROM checkouts WHERE scope='agent' AND team_id=? AND status IN (${OPEN.map(() => '?').join(',')})`).all(teamId, ...OPEN) as unknown as CheckoutRow[]) {
+      this.end(a, 'cancelled', 'team_ended', sys); this.changed(a.id, ['cancelled']);
+    }
   }
 }
 

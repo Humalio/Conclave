@@ -66,7 +66,7 @@ beforeAll(async () => {
   base = `http://127.0.0.1:${(app.fastify.server.address() as { port: number }).port}`;
   admin = await login('admin');
   cnv = (await call(admin, 'POST', '/projects', { key: 'CNV', name: 'Conclave' })).body.project.id;
-  brz = (await call(admin, 'POST', '/projects', { key: 'BRZ', name: 'Biraz' })).body.project.id;
+  brz = (await call(admin, 'POST', '/projects', { key: 'BRZ', name: 'Echo' })).body.project.id;
   coord = mk('cnv-coord'); worker = mk('cnv-worker'); coord2 = mk('cnv2-coord');
   one = team(cnv, 'CNV One', [coord, worker]); two = team(cnv, 'CNV Two', [coord2]); other = team(brz, 'BRZ One', [mk('brz-coord')]);
   expect((await call(admin, 'POST', `/projects/${cnv}/ops`, { version: ver(cnv), ops: [
@@ -204,7 +204,7 @@ describe('For awareness and dismissal', () => {
     expect(stallAlerts()).toBe(1);
     for (const s of [admin, dana]) expect(await kinds(s)).toEqual(expect.arrayContaining(['missed_milestone', 'stalled']));
     expect(await kinds(eve)).toContain('missed_milestone');
-    // Biraz is outside Eve's grant: nothing from it reaches her.
+    // Echo is outside Eve's grant: nothing from it reaches her.
     expect((await needs(eve)).awareness.items.every((i: any) => i.scope.project_id === cnv)).toBe(true);
   });
 
@@ -374,6 +374,15 @@ describe('Needs you follow-ups (review of slice 4a)', () => {
     expect((await needs(dana, `?team=${one}`)).items.some((i: any) => i.id === qr.id)).toBe(false);
   });
 
+  it('a block\'s reason shows its text only: the Records part stays out of the row, its summary and the reason line', async () => {
+    const b = blockedTask(one, 'Parked for the squash');
+    app.db.prepare('UPDATE tasks SET blocked_reason=? WHERE id=?').run('**Parked until after the history squash.**\n\n## Records\n- branch dev/token-bench', b);
+    const r = (await needs(dana, `?team=${one}`)).items.find((i: any) => i.id === `task:${b}`);
+    expect(r.summary).toBe('**Parked until after the history squash.**');
+    expect(r.reason).toBe('Blocked: **Parked until after the history squash.**');
+    expect(`${r.summary} ${r.reason}`).not.toContain('Records');
+  });
+
   it('a new brief names who wrote it and carries its In short, never "accept or discard"', async () => {
     const k = app.teams.create_task(who(coord), { team_id: one, title: 'Photograph the bay', description: 'Take four photos of the bay from the door.\n\nMore detail follows.' }).id;
     app.db.prepare("UPDATE tasks SET status='backlog', short_summary=NULL, version=version+1 WHERE id=?").run(k);
@@ -506,7 +515,7 @@ describe('past the first page of 200', () => {
     // An agent may have five questions open, so forty members of one Conclave team ask five each.
     const askers = Array.from({ length: 40 }, (_, i) => mk(`cnv-pager-${i}`)), pg = team(cnv, 'CNV Paging', askers);
     for (let i = 0; i < 200; i++) app.decisions.ask(who(askers[i % 40]!), { team_id: pg, question: `Page question ${i + 1}?` });
-    const lone = app.decisions.ask(who(bc), { team_id: t3, question: 'The one Biraz question?' }).id;
+    const lone = app.decisions.ask(who(bc), { team_id: t3, question: 'The one Echo question?' }).id;
     const p1 = await needs(admin, '?limit=200');
     expect(p1.total).toBeGreaterThan(200);
     expect(p1.items).toHaveLength(200);

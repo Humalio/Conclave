@@ -5,7 +5,7 @@ ALTER TABLE machines ADD COLUMN mcp_transport TEXT CHECK (mcp_transport IN ('htt
 ALTER TABLE teams ADD COLUMN project TEXT;
 
 -- Single-use enrolment code: swapped once for the PC's app key secret. status: unused -> issued (secret handed out, can be
--- reissued with the same nonce) -> confirmed; revoked by the operator or by Re-enrol PC. No expiry (Bruno, 12 Nov).
+-- reissued with the same nonce) -> confirmed; revoked by the operator or by Re-enrol PC. No expiry (the operator, 12 Nov).
 CREATE TABLE enrolment_codes (
   id TEXT PRIMARY KEY,
   machine_id TEXT NOT NULL REFERENCES machines(id),

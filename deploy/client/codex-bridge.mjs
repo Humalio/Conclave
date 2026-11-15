@@ -173,7 +173,7 @@ async function login(fresh) {
 }
 /**
  * After a login the hub refused, reads the keys file once more: the Codex wake may have collected a rotated key into it
- * (docs/codex-wake.md, "Collecting a rotated key"). Returns true only if the session key is a different one now.
+ * (docs/connector.md, "Collecting a rotated key"). Returns true only if the session key is a different one now.
  * The hub, the app key's name and the session variable stay as they were at start; only the two key values are taken.
  */
 function rereadKeys() {

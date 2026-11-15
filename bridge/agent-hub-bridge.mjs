@@ -2,6 +2,8 @@
 // Conclave bridge. Single file, no dependencies, Node 24+.
 //   node agent-hub-bridge.mjs pair <hub-url> <pairing-code>   one-time pairing
 //   node agent-hub-bridge.mjs run                              heartbeat / job loop
+// The Conclave connector's service runs the same loop in its own process (runLoop), with the PC's app key over its pinned
+// HTTPS connection; this stand-alone mode stays for PCs without the connector (docs/transfers.md).
 // Config: ~/.agent-hub/bridge.json {"hub": "...", "bridge_key": "ah_brg_..."}  (key file is mode 600; AGENT_HUB_HOME overrides the folder)
 // The bridge never touches a path outside the folders the hub reports as approved.
 import { constants, promises as fs } from 'node:fs';
@@ -95,7 +97,8 @@ export async function inConfigDir(target) {
   return isInside(await realOrParent(target), await configReal);
 }
 
-const log = (...a) => console.log(new Date().toISOString(), ...a);
+const logLine = (...a) => console.log(new Date().toISOString(), ...a);
+const log = logLine;
 const sleep = (ms, signal) => delay(ms, undefined, { signal });
 
 function hubUrl(value) {
@@ -321,10 +324,10 @@ export async function* planBytes(plan, check = async () => {}) {
   if (!plan.raw) yield FRAME_END;
 }
 
-function makeApi(cfg, signal) {
+function makeApi(cfg, signal, fetchImpl = fetch) {
   const auth = { authorization: `Bearer ${cfg.bridge_key}` };
   return (method, p, { body, headers, timeout = 60_000 } = {}) =>
-    fetch(`${cfg.hub}${p}`, { method, headers: { ...auth, ...headers }, body, redirect: 'error',
+    fetchImpl(`${cfg.hub}${p}`, { method, headers: { ...auth, ...headers }, body, redirect: 'error',
       signal: AbortSignal.any([signal, AbortSignal.timeout(timeout)]) });
 }
 const jsonOf = async (res) => res.json().catch(() => ({}));
@@ -625,10 +628,19 @@ async function run(signal) {
     if (e.code === 'ENOENT') throw new Error(`not paired: run "pair <hub-url> <code>" first (${CONFIG_FILE})`);
     throw e;
   });
+  return runLoop({ hub: cfg.hub, key: cfg.bridge_key, signal });
+}
+
+/**
+ * The poll and transfer loop for one hub. `key` is the bridge key, or the PC's app key when the connector's service runs
+ * it; `fetch` is then the connector's pinned fetch, which reaches only that hub over its pinned CA.
+ */
+export async function runLoop({ hub, key, signal, fetch: fetchImpl = fetch, log = logLine }) {
+  const cfg = { hub, bridge_key: key };
   let allowed = [];
   let failures = 0;
   const running = new Map();
-  const api = makeApi(cfg, signal);
+  const api = makeApi(cfg, signal, fetchImpl);
   log(`bridge ${VERSION} running against ${cfg.hub}`);
   try {
     while (!signal.aborted) {
@@ -642,7 +654,7 @@ async function run(signal) {
           await res.body?.cancel();
           if (res.status === 401) {
             allowed = [];
-            log('hub rejected the bridge key (PC suspended or key revoked); retrying in 60 s');
+            log('hub rejected the key (PC suspended or key revoked); retrying in 60 s');
             await sleep(60_000, signal);
             continue;
           }

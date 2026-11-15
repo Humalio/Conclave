@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildApp, type App } from '../src/app.js';
 import type { Op } from '../src/blueprint/blueprint.js';
-import { splitBody, slugCode, findCodes, glossaryOf, resolve, acceptanceEmpty, citedSources, classifySource, warningText, leadingCode, EMPTY_AC_TITLE } from '../src/blueprint/plain.js';
+import { splitBody, slugCode, findCodes, glossaryOf, resolve, acceptanceEmpty, citedSources, citedRefs, isItemKey, trimCited, warn, issueText, classifySource, warningText, leadingCode, EMPTY_AC_TITLE } from '../src/blueprint/plain.js';
 import { Sources } from '../src/blueprint/sources.js';
 import { MemberScope } from '../src/admin/memberScope.js';
 import { testConfig } from './hub.js';
@@ -19,12 +19,12 @@ const known = (terms: { key: string; title: string; body?: string; aliases?: str
   glossaryOf(terms.map((t) => ({ key: t.key, title: t.title, body: t.body ?? null, fields: t.aliases ? { aliases: t.aliases } : {} })), keys);
 
 describe('findCodes (§2.1)', () => {
-  it('flags the codes of the real BIRAZ titles, and not versions, acronyms, dates, units, URLs, code spans or keys', () => {
-    expect(findCodes('CAD Flex v0.3 RC (P25 + P26)', NO)).toEqual(['P25', 'P26']);
+  it('flags the codes of the real ECHO titles, and not versions, acronyms, dates, units, URLs, code spans or keys', () => {
+    expect(findCodes('Project A v0.3 RC (P25 + P26)', NO)).toEqual(['P25', 'P26']);
     expect(findCodes('S2m A6 gate read', NO)).toEqual(['S2m', 'A6']);
     expect(findCodes("T′ and T' rise; H_oa holds at B1i", NO)).toEqual(['T′', "T'", 'H_oa', 'B1i']);
     expect(findCodes('Notes in 02 Projects/TWINARK/03 Evidence and src/v2/app.ts', NO)).toEqual([]);
-    expect(findCodes('On 2026-11-16, 95% of 3rd runs were 10x faster in 48h: https://x.test/A17 `A17` FR-TEAM-04 BIRAZ', { keys: new Set(['FR-TEAM-04', 'BIRAZ']) })).toEqual([]);
+    expect(findCodes('On 2026-11-16, 95% of 3rd runs were 10x faster in 48h: https://x.test/A17 `A17` FR-TEAM-04 ECHO', { keys: new Set(['FR-TEAM-04', 'ECHO']) })).toEqual([]);
     expect(findCodes('Agent agent-ab12cd34 measured CF-28 at f6f163d', NO)).toEqual(['CF-28', 'f6f163d']);
   });
 
@@ -95,6 +95,54 @@ describe('splitBody, slugCode, resolve, acceptanceEmpty', () => {
   });
 });
 
+describe('one parser for what an item cites (§2.7 Reading what is cited)', () => {
+  const ev = (evidence: string) => citedRefs({ body: null, fields: { evidence } });
+  const bd = (body: string) => citedRefs({ body, fields: {} });
+
+  it('keeps a wikilink whole, commas and brackets included, in a field and in the body', () => {
+    expect(ev('[[Notes/Smith, 2020]]; f6f163d').sources).toEqual(['Notes/Smith, 2020', 'f6f163d']);
+    expect(bd('As [[Notes/Smith, 2020]] shows.').sources).toEqual(['Notes/Smith, 2020']);
+    expect(ev('[[Meeting (2024)]]').sources).toEqual(['Meeting (2024)']);
+    expect(bd('Agreed at [[Meeting (2024)]].').sources).toEqual(['Meeting (2024)']);
+    expect(bd('It holds (see [[Note]]).').sources).toEqual(['Note']);
+    expect(ev('(see [[Note]])').sources).toEqual(['Note']);
+    expect(bd('[[A (b) c]] and [[Run notes#Results|the runs]]').sources).toEqual(['A (b) c', 'Run notes']);
+  });
+
+  it('keeps a comma inside a file name, and still splits a list of files', () => {
+    expect(ev('Notes/Smith, 2020.md').sources).toEqual(['Notes/Smith, 2020.md']);
+    expect(bd('Read first:\nNotes/Smith, 2020.md').sources).toEqual(['Notes/Smith, 2020.md']);
+    expect(ev('Notes/a.md, Notes/b.md, c.md').sources).toEqual(['Notes/a.md', 'Notes/b.md', 'c.md']);
+    expect(bd('Notes/a.md, Notes/b.md').sources).toEqual(['Notes/a.md', 'Notes/b.md']);
+    expect(ev('f6f163d, abc1234').sources).toEqual(['f6f163d', 'abc1234']);
+  });
+
+  it('reads a key as an item, never a file, in a field and in a code span', () => {
+    expect(ev('PAP-1/C8').sources).toEqual([]);
+    expect(ev('PAP-1/C8').keys).toEqual(['PAP-1/C8']);
+    expect(bd('Backs `PAP-1/C8`.')).toEqual({ sources: [], keys: ['PAP-1/C8'] });
+    expect(ev('R4/AC2, FR-TEAM-04/AC1; Notes/run.md')).toEqual({ sources: ['Notes/run.md'], keys: ['R4/AC2', 'FR-TEAM-04/AC1'] });
+    // A path whose last part looks like a criterion is still a path, and plain prose is not scanned for keys.
+    expect(ev('Notes/AC1').sources).toEqual(['Notes/AC1']);
+    expect(bd('PAP-1/C8 is the claim.')).toEqual({ sources: [], keys: [] });
+    expect(['PAP-1/C8', 'R4/AC2', 'H-L1-02', 'M3', 'G-echo', 'TEAM', 'SUM', 'Notes/AC1', 'Notes/x.md'].map(isItemKey))
+      .toEqual([true, true, true, true, true, false, false, false, false]);
+  });
+
+  it('trims a bracket or quote only when it has no partner', () => {
+    expect(['(Notes/a.md)', 'Notes/a.md).', '"Notes/a.md",', 'Meeting (2024)', '(Meeting (2024))', '<Notes/a.md>', 'x (y'].map(trimCited))
+      .toEqual(['Notes/a.md', 'Notes/a.md', 'Notes/a.md', 'Meeting (2024)', 'Meeting (2024)', 'Notes/a.md', 'x (y']);
+  });
+
+  it('warns key_missing for a key the project does not have, and no source warning for any key', () => {
+    const w = warn.key_missing('F-L1-03', 'Run 3: lag held', 'PAP-9/C1');
+    expect(w).toMatchObject({ kind: 'key_missing', source: 'PAP-9/C1' });
+    expect(w.message).toBe('F-L1-03 cites PAP-9/C1, which is no item in this Blueprint. Fix the key, or link the item it means.');
+    expect(issueText(w)).toBe('cites PAP-9/C1, which is no item in this Blueprint');
+    expect(citedSources({ body: 'See `PAP-1/C8` and `R4/AC2`.', fields: { evidence: 'PAP-9/C1' } })).toEqual([]);
+  });
+});
+
 // ───── on a hub ─────
 const sys = { kind: 'system' as const, id: null };
 let app: App, dir = '', P = '', team = '', adminId = '', coord = '', cred = '';
@@ -106,11 +154,11 @@ const kinds = (ops: Op[]) => app.blueprint.plainWarnings(P, ops).warnings.map((w
 beforeAll(async () => {
   dir = mkdtempSync(join(tmpdir(), 'bp-plain-'));
   mkdirSync(join(dir, 'vault', 'Projects', 'Lab', 'Records'), { recursive: true });
-  mkdirSync(join(dir, 'vault', 'BIRAZ Papers (copy 2026-11-10)', 'AgentsRoom'), { recursive: true });
+  mkdirSync(join(dir, 'vault', 'ECHO Papers (copy 2026-11-10)', 'AgentsRoom'), { recursive: true });
   mkdirSync(join(dir, 'vault', 'HR'), { recursive: true });
   writeFileSync(join(dir, 'vault', 'Projects', 'Lab', 'Records', 'ledger_c2.md'), '# ledger\n');
   writeFileSync(join(dir, 'vault', 'Projects', 'Lab', 'notes.md'), '# notes\n');
-  writeFileSync(join(dir, 'vault', 'BIRAZ Papers (copy 2026-11-10)', 'AgentsRoom', 'protocol.md'), '# protocol\n');
+  writeFileSync(join(dir, 'vault', 'ECHO Papers (copy 2026-11-10)', 'AgentsRoom', 'protocol.md'), '# protocol\n');
   writeFileSync(join(dir, 'vault', 'HR', 'pay.md'), '# pay\n');
   app = await buildApp(testConfig(dir));
   await app.store.ready;
@@ -118,7 +166,7 @@ beforeAll(async () => {
   adminId = (app.db.prepare('SELECT id FROM admin_users LIMIT 1').get() as { id: string } | undefined)?.id ?? '';
   const a = app.keys.createAgent('Ada', null, sys), k = app.keys.createSessionKey({ agentId: a.id, label: 'Ada' }, sys);
   coord = a.id; cred = k.credential.id;
-  app.keys.setRules(k.credential.policy_id, [{ effect: 'allow', actions: ['fs.read', 'fs.list'], resource: 'path:/vault/Projects/Lab/**' }, { effect: 'allow', actions: ['fs.read'], resource: 'path:/vault/BIRAZ Papers (copy 2026-11-10)/**' }], 'test', sys);
+  app.keys.setRules(k.credential.policy_id, [{ effect: 'allow', actions: ['fs.read', 'fs.list'], resource: 'path:/vault/Projects/Lab/**' }, { effect: 'allow', actions: ['fs.read'], resource: 'path:/vault/ECHO Papers (copy 2026-11-10)/**' }], 'test', sys);
   team = app.teams.create({ name: 'Lab', goal: 'g', members: [{ agent_id: a.id, role: 'coordinator', credential_id: cred }] }, sys).id;
   P = app.blueprint.ensureTeamProject(team).id;
   put([
@@ -212,6 +260,15 @@ describe('warnings (§4, E2)', () => {
   });
 });
 
+describe('key_missing on a write (§2.7)', () => {
+  it('a known key in a source field or code span gives no warning, an unknown one gives key_missing, and neither is a source', () => {
+    const c = app.blueprint.plainWarnings(P, [{ op: 'upsert', kind: 'finding', key: 'F-L1-*', parent_key: 'L1', title: 'Reviews caught the drift',
+      body: 'Backs `PAP-1/C5`.', fields: { evidence: 'PAP-1/C3, PAP-9/C1; [[Projects/Lab/notes]]' } }]);
+    expect(c.warnings.map((w) => `${w.kind} ${w.source ?? ''}`)).toEqual(['key_missing PAP-9/C1']);
+    expect(c.cited.flatMap((x) => x.texts)).toEqual(['Projects/Lab/notes']);
+  });
+});
+
 describe('standing (E1)', () => {
   it('a paper, a claim and a hypothesis, from the support model', () => {
     expect(app.blueprint.standing(P, 'PAP-1')).toBe('1 of 4 claims supported. C3 has only undecided evidence; C4 and C5 have none.');
@@ -228,14 +285,14 @@ describe('standing (E1)', () => {
 describe('sources (E4)', () => {
   it('resolves for the operator by exact path, under a team folder and by unique name, and says Found at', async () => {
     const s = new Sources(app.db, app.vault);
-    expect(s.folders(P, team)).toEqual(['BIRAZ Papers (copy 2026-11-10)', 'Projects/Lab']);
+    expect(s.folders(P, team)).toEqual(['ECHO Papers (copy 2026-11-10)', 'Projects/Lab']);
     expect(s.folders(P, null)).toEqual(s.folders(P, team));
     const r = await s.resolve(P, team, ['Projects/Lab/notes.md', 'notes.md', 'Develop/projects/flexout/experiments/c2/ledger_c2.md', 'protocol', 'Nowhere/x.md', 'f6f163d', 'HR/pay.md']);
     expect(r).toEqual([
       { text: 'Projects/Lab/notes.md', where: 'vault', path: '/vault/Projects/Lab/notes.md' },
       { text: 'notes.md', where: 'vault', path: '/vault/Projects/Lab/notes.md', cited: 'notes.md' },
       { text: 'Develop/projects/flexout/experiments/c2/ledger_c2.md', where: 'vault', path: '/vault/Projects/Lab/Records/ledger_c2.md', cited: 'Develop/projects/flexout/experiments/c2/ledger_c2.md' },
-      { text: 'protocol', where: 'vault', path: '/vault/BIRAZ Papers (copy 2026-11-10)/AgentsRoom/protocol.md', cited: 'protocol' },
+      { text: 'protocol', where: 'vault', path: '/vault/ECHO Papers (copy 2026-11-10)/AgentsRoom/protocol.md', cited: 'protocol' },
       { text: 'Nowhere/x.md', where: 'missing' },
       { text: 'f6f163d', where: 'outside' },
       { text: 'HR/pay.md', where: 'vault', path: '/vault/HR/pay.md' }, // the operator reads the whole vault
@@ -245,8 +302,8 @@ describe('sources (E4)', () => {
 
   it('reads every link form with the vault viewer\'s resolver: root, wiki, heading, label and %20', async () => {
     const r = await new Sources(app.db, app.vault).resolve(P, team, ['/Projects/Lab/notes.md', '/vault/Projects/Lab/notes.md', '[[Projects/Lab/notes]]',
-      '[[notes#Results|the notes]]', '[[AgentsRoom/protocol]]', 'BIRAZ%20Papers%20(copy%202026-11-10)/AgentsRoom/protocol.md', 'projects/lab/NOTES.md']);
-    const lab = '/vault/Projects/Lab/notes.md', pro = '/vault/BIRAZ Papers (copy 2026-11-10)/AgentsRoom/protocol.md';
+      '[[notes#Results|the notes]]', '[[AgentsRoom/protocol]]', 'ECHO%20Papers%20(copy%202026-11-10)/AgentsRoom/protocol.md', 'projects/lab/NOTES.md']);
+    const lab = '/vault/Projects/Lab/notes.md', pro = '/vault/ECHO Papers (copy 2026-11-10)/AgentsRoom/protocol.md';
     expect(r.map((x) => x.path)).toEqual([lab, lab, lab, lab, pro, pro, lab]);
     // Found at the cited path (from the root, with or without the alias or .md): no "Found at" note.
     expect(r.map((x) => 'cited' in x)).toEqual([false, false, false, true, true, false, true]);

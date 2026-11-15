@@ -9,7 +9,7 @@ import type { Config } from '../config.js';
 import type { Setup } from '../setup/setup.js';
 import type { Links } from '../links/links.js';
 
-export interface Phase2Deps { db: Db; keys: Keys; setup: Setup; links: Links; config: Config; audit: Audit }
+export interface Phase2Deps { db: Db; keys: Keys; setup: Setup; links: Links; config: Config; audit: Audit; connector?: import('../connector/connector.js').Connector }
 
 export function setupMessage(hub: string, setupKey: string, pcName: string): string {
   return [
@@ -45,7 +45,8 @@ export function registerPhase2(api: FastifyInstance, d: Phase2Deps, actor: (r: F
     const last = db.prepare('SELECT tool,result,error_code,created_at FROM tool_invocations WHERE agent_id=? ORDER BY created_at DESC LIMIT 1').get(agentId) as { tool: string; result: string; error_code: string | null; created_at: number } | undefined;
     const files = db.prepare("SELECT path,action,decision,created_at FROM resource_access_events WHERE agent_id=? AND action LIKE 'fs.%' ORDER BY created_at DESC LIMIT 5").all(agentId);
     return {
-      agent: { id: a.id, label: a.label, project: a.project, role: a.role, role_detail: a.role_detail, role_source: a.role_source, status_text: a.status_text, model_label: a.model_label, status: a.status, last_seen_at: a.last_seen_at },
+      agent: { id: a.id, label: a.label, project: a.project, role: a.role, role_detail: a.role_detail, role_source: a.role_source, status_text: a.status_text, model_label: a.model_label, status: a.status, last_seen_at: a.last_seen_at,
+        connected_at: a.connected_at ?? null, last_active_at: a.last_active_at ?? null },
       logins: mine.map(loginView), live: mine.length > 0,
       concurrent_use: [...perKey.values()].some((n) => n > 1),
       last_tool_call: last ? { tool: last.tool, result: last.result, error_code: last.error_code, at: last.created_at } : null,
@@ -119,17 +120,22 @@ export function registerPhase2(api: FastifyInstance, d: Phase2Deps, actor: (r: F
 
   // ───── PCs: bridge, folders, setup ─────
   // Agents that called tools through this PC's app keys in the last 7 days (newest first), for the PCs table and the PC page.
-  const pcAgents = db.prepare(`SELECT i.agent_id id, a.label label, MAX(i.created_at) last_at FROM tool_invocations i JOIN agents a ON a.id=i.agent_id
-    WHERE i.app_credential_id IN (SELECT id FROM credentials WHERE machine_id=? AND kind='app_key') AND i.created_at>? AND i.agent_id IS NOT NULL
+  // The helper's own sign-in calls do not count: an agent only set up (its login tested) is not listed as working here.
+  const pcAgents = db.prepare(`SELECT i.agent_id id, a.label label, MAX(i.created_at) last_at, a.connected_at, a.last_active_at FROM tool_invocations i JOIN agents a ON a.id=i.agent_id
+    WHERE i.app_credential_id IN (SELECT id FROM credentials WHERE machine_id=? AND kind='app_key') AND i.created_at>? AND i.agent_id IS NOT NULL AND i.tool NOT IN ('session_login','session_whoami')
     GROUP BY i.agent_id ORDER BY last_at DESC`);
+  const restoreOf = db.prepare("SELECT id, team_id FROM checkouts WHERE target_machine_id=? AND status='rendered' ORDER BY created_at DESC LIMIT 1");
   const pcView = (id: string) => {
     const m = keys.machine(id)!;
     const appKeys = keys.credentials({ kind: 'app_key', machineId: id });
-    const agents = pcAgents.all(id, Date.now() - 7 * 86400_000) as { id: string; label: string; last_at: number }[];
+    const agents = pcAgents.all(id, Date.now() - 7 * 86400_000) as { id: string; label: string; last_at: number; connected_at: number | null; last_active_at: number | null }[];
     const bridge = setup.bridgeInfo(id);
     // Last seen: the latest of a call through its app keys and a bridge heartbeat.
     const last_seen_at = Math.max(0, ...appKeys.map((c) => c.last_used_at ?? 0), bridge.last_seen_at ?? 0) || null;
-    return { ...m, bridge, folders: setup.folders(id), app_keys: appKeys.length, agents, last_seen_at };
+    // The connector's report and the latest Disconnect (docs/connector.md): null fields until a connector reports them.
+    return { ...m, bridge, folders: setup.folders(id), app_keys: appKeys.length, agents, last_seen_at, connector: d.connector?.status(id) ?? null, disconnect: d.connector?.disconnectView(id) ?? null,
+      // Restore is offered while a checkout's restore prompt is ready and targets this PC.
+      restore_checkout: (restoreOf.get(id) as { id: string; team_id: string } | undefined) ?? null };
   };
   api.get('/api/pcs', async () => ({ pcs: keys.machines().map((m) => pcView(m.id)) }));
   api.post('/api/pcs/:id/setup', async (req) => {

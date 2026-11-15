@@ -91,6 +91,17 @@ export function loadState() {
     return { version: VERSION, requests: {} };
   }
 }
+/** A session key's id (its public part, ah_ses_<id>_...), never its value; null for anything else. */
+export const keyIdOf = (v) => /^ah_ses_([a-z2-7]{12})_/.exec(String(v ?? '').trim())?.[1] ?? null;
+/**
+ * The check of one folder's key by key id only (docs/onboarding.md, "Setup checks"): what keys.env holds for the variable
+ * the folder's .agent-hub.json names, against the id setup wrote. Returns a problem sentence or null.
+ */
+export function keyIdProblem(sessionVar, have, wrote) {
+  if (!have) return null; // a missing key is reported on its own
+  if (wrote && have !== wrote) return `${sessionVar} in keys.env has key id ${have}, but setup wrote ${wrote}: another setup or a hand edit replaced it`;
+  return null;
+}
 function saveState(s) {
   mkdirSync(OB, { recursive: true });
   atomicWrite(STATE_FILE, JSON.stringify(s, null, 2) + '\n', false);
@@ -278,6 +289,7 @@ async function keyCmd(flags) {
   const k = r.json ?? {};
   if (typeof k.secret !== 'string' || !/^[A-Z][A-Z0-9_]{0,63}$/.test(k.session_var ?? '')) die('The hub did not return the key.');
   writeKeys({ [k.session_var]: k.secret });
+  { const st = loadState(); st.key_ids = { ...(st.key_ids ?? {}), [k.session_var]: keyIdOf(k.secret) }; saveState(st); } // the id only, for status checks
   if (!flags.stdin) rmSync(KEY_CODE_FILE, { force: true });
   out(`keys.env: ${k.session_var} written for "${k.label ?? '?'}" on ${k.pc ?? 'this PC'} (${KEYS_FILE}).`);
   return EXIT.ok;
@@ -291,7 +303,7 @@ const LOCAL_ID = /^[a-z0-9][a-z0-9_-]{0,19}$/;
 const NFR_CATEGORIES = ['perf', 'sec', 'rel', 'use', 'ops'];
 const RULE_CATEGORIES = ['access', 'communication', 'tokens', 'reporting', 'sources', 'process', 'tooling'];
 const TEAM_ROLES = ['coordinator', 'worker', 'reviewer', 'stakeholder'];
-const SCHEMA = {
+export const SCHEMA = {
   kind: '"new_team" (default), "add_agents", or "vault_agent" (one agent with no team that edits a person\'s shared vault notes; it takes only agent, folders, prompt and client)',
   agent: 'vault_agent only: { name: 1-60 chars, ^[A-Za-z0-9][A-Za-z0-9 ._-]*$, job: 1-500 chars one line }',
   folders: 'vault_agent only: 1-10 of { path: "/vault/...", access: "read"|"write" }. A proposal: the administrator picks the person the agent works for, and only folders that person was given can be granted',
@@ -305,7 +317,7 @@ const SCHEMA = {
   prompt: "1-4000 chars: the user's own words",
   client: '{ app, os }: at most 40 chars each',
 };
-const EXAMPLE = {
+export const EXAMPLE = {
   kind: 'new_team',
   project: { name: 'Grants', existing: false },
   team: { name: 'Grant calendar', goal: 'Keep the grant calendar current: deadlines, owners and status.' },
@@ -532,7 +544,7 @@ export function goalHasRules(goal) {
   return lines >= 2 || words >= 3;
 }
 /** The one-screen summary the agent shows the user before filing. */
-function summary(r) {
+export function summary(r) {
   const lines = [];
   if (r.kind === 'vault_agent') {
     lines.push(`Vault agent: ${r.agent?.name}, with no team`, `Job: ${r.agent?.job}`);
@@ -763,6 +775,7 @@ async function setUp(state, cur, st, tr, flags) {
       cur.agents = p.agents.map(({ secret, ...a }) => a); // instructions, labels, variables, folders: no secrets
       saveState(state);
       writeKeys(Object.fromEntries(p.agents.map((a) => [a.session_var, a.secret])));
+      cur.key_ids = Object.fromEntries(p.agents.map((a) => [a.session_var, keyIdOf(a.secret)])); // ids only, for status checks
       for (const a of p.agents) a.secret = undefined;
       cur.written = p.agents.map((a) => a.session_var);
       cur.keys_written_for = p.pickup_id;
@@ -1106,7 +1119,9 @@ export function scanFolder(dir, { tipRef = null, checkoutRef = null, own = isOwn
   return found;
 }
 
-/** The provider switch point (§6 step 5) of the restore client: it builds Claude Code folders only. The Codex writers exist in codex.mjs but are unverified (§9 F4), so this restore refuses a Codex agent. Onboarding itself may be run from any coding agent. */
+/** The provider switch point (§6 step 5) of the restore client: it builds Claude Code folders only, so it refuses a Codex agent.
+ *  Codex agents run through codex-bridge.mjs, set up as checkout.md step 5 describes. The codex.mjs writers are not wired in here
+ *  and are unverified (§9 F4), and render refuses `codex` (`codex_unverified`). Onboarding itself may be run from any coding agent. */
 const PROVIDERS_READY = new Set(['claude_code']);
 
 /** Claude Code's files in one agent folder: .mcp.json with headersHelper, settings.local.json, the CLAUDE.local.md overlay. */
@@ -1279,7 +1294,9 @@ async function restore(flags) {
   rs.done = true;
   saveState(state);
   const trusted = view.agents.filter((a) => rs.trust?.[a.folder]).length;
-  out(`Restored team "${team}" (${cko}): confirmed; the old sessions are suspended. ${trusted ? `Trust written in ${claudeJson} for ${trusted} of ${view.agents.length} folders.` : 'No folder trust written.'}`);
+  // A one-agent checkout (Delegate, docs/checkout.md §9 F1) names the agent and the person it now runs for.
+  const what = view.scope === 'agent' ? `${view.agents[0]?.label ?? 'the agent'} of team "${team}"${view.delegate ? ` for ${view.delegate}` : ''}` : `team "${team}"`;
+  out(`Restored ${what} (${cko}): confirmed; the old ${view.scope === 'agent' ? 'session is' : 'sessions are'} suspended. ${trusted ? `Trust written in ${claudeJson} for ${trusted} of ${view.agents.length} folders.` : 'No folder trust written.'}`);
   out('Start each agent (one terminal each). On-demand wakes need the new local session ids:');
   for (const a of view.agents) out(`  ${startLine(dirOf(a), resumeMsg(a, team), rs.config_dir)}`);
   return EXIT.ok;
@@ -1410,11 +1427,14 @@ async function check(flags, preState) {
       if (!existsSync(join(dir, '.git'))) probs.push('not a git repository');
       if (!trustKeys(dir).some((k) => claude.projects?.[k]?.hasTrustDialogAccepted)) probs.push('not trusted in ~/.claude.json');
       if (!keys.get(a.session_var)) probs.push(`${a.session_var} missing in keys.env`);
+      const kid = keyIdOf(keys.get(cfg?.session_var ?? a.session_var));
+      const kp = keyIdProblem(a.session_var, kid, state.key_ids?.[a.session_var] ?? cur.key_ids?.[a.session_var]);
+      if (kp) probs.push(kp);
       const want = resolve(dir);
       const last = [...lines].reverse().find((l) => l.includes(`dir=${want}`) || l.includes(`dir=${fwd(want)}`));
-      line(!probs.length, `folder ${tag}`, probs.length ? `${probs.join('; ')} · ${dir}` : `${dir} (mcp, git, trust, key)`);
+      line(!probs.length, `folder ${tag}`, probs.length ? `${probs.join('; ')} · ${dir}` : `${dir} (mcp, git, trust, key${kid ? ' id ' + kid : ''})`);
       const t = loginTest(dir);
-      line(t.ok, `login ${tag}`, t.ok ? 'ok' : t.error);
+      line(t.ok, `login ${tag}`, t.ok ? 'ok' : `${t.error}${kid ? ` (key id ${kid}: compare it with the agent's key in the console)` : ''}`);
       out(`     helper.log ${tag}: ${last ? last : 'no line yet (Claude Code has not run the helper here; see docs/mcp.md if a session there has no hub tools)'}`);
     }
   }

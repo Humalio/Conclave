@@ -337,10 +337,13 @@ function openOverflow(btn) {
   const path = $('#viewHeader').classList.contains('fold') && btn.closest('#viewHeader') && NAV_CUR ? NAV_CUR.crumbs : [];
   openMenu([...DBAR_MENU.filter((m) => m && !m.phone), ...(path.length ? [{ heading: 'Path' }, ...path.map((c) => ({ label: c.label, icon: 'back', fn: () => navGo(c.type, c.arg) }))] : [])], btn);
 }
+/* The Security bar's one New button (docs/dashboard-ux.md, Security): what to create, then every access option (Agent access). */
+const SEC_NEW = () => [{ label: 'Session key', val: 'for an agent', icon: 'key', fn: () => go('new') }, { label: 'App key', val: 'for a PC', icon: 'app', fn: () => go('app') },
+  { label: 'Permission template', icon: 'file', fn: () => go('tplnew') }, { divider: true }, { label: 'All access options', icon: 'shield', fn: () => go('grant') }];
 function openMenu(items, btn) {
-  items = items.filter(Boolean); if (!items.some((m) => !m.heading)) return;
+  items = items.filter(Boolean); if (!items.some((m) => !m.heading && !m.divider)) return;
   if (items[0].heading) items = items.slice(1); // no group heading when the screen has no actions of its own
-  const sh = openSheet({ anchor: btn, html: `<div class="sheet-list">${items.map((m, i) => m.heading ? `<div class="overline sheet-group">${esc(m.heading)}</div>` : `<button type="button" class="sheet-item${m.bad ? ' bad' : ''}" data-ovf="${i}">${ic(m.icon || 'more')}<span>${esc(m.label)}</span>${m.val ? `<span class="sheet-val">${esc(m.val)}</span>` : ''}</button>`).join('')}</div>` });
+  const sh = openSheet({ anchor: btn, html: `<div class="sheet-list">${items.map((m, i) => m.divider ? '<hr class="sheet-sep">' : m.heading ? `<div class="overline sheet-group">${esc(m.heading)}</div>` : `<button type="button" class="sheet-item${m.bad ? ' bad' : ''}" data-ovf="${i}">${ic(m.icon || 'more')}<span>${esc(m.label)}</span>${m.val ? `<span class="sheet-val">${esc(m.val)}</span>` : ''}</button>`).join('')}</div>` });
   sh.addEventListener('click', (e) => {
     const b = e.target.closest('[data-ovf]'); if (!b) return;
     const m = items[+b.dataset.ovf];
@@ -395,7 +398,7 @@ const openAlerts = () => S.alerts;
 /* Alerts name their team; match it by id (alert subject or details.team_id), and by name only when no team id is given. */
 const alertTeam = (a, d) => S.teams.find((x) => x.id === a.subject || (d.team_id && x.id === d.team_id)) || (!d.team_id && S.teams.find((x) => x.name === d.team)) || null;
 const SEV = { critical: 'crit', warning: 'warn', info: 'info' };
-const AT = { key_in_payload: ['Leak', 'shield'], auth_bruteforce: ['Brute', 'lock'], login_burst: ['Logins', 'lock'], concurrent_use: ['Shared', 'key'], bound_key_elsewhere: ['Bound', 'key'], quota_trip: ['Quota', 'ban'], task_blocked: ['Blocked', 'warn'], checkpoint: ['Approve', 'check'], stalled_member: ['Stalled', 'clock'], bp_proposal: ['Blueprint proposal', 'graph'], bp_coordinator_decided: ['Agreed by coordinator', 'check'], bp_escalation: ['Escalation', 'warn'], checkout_overdue: ['Checkout overdue', 'pc'], handout_purge_soon: ['Handout', 'clock'],
+const AT = { key_in_payload: ['Leak', 'shield'], auth_bruteforce: ['Brute', 'lock'], login_burst: ['Logins', 'lock'], concurrent_use: ['Shared', 'key'], bound_key_elsewhere: ['Bound', 'key'], unknown_session_key: ['Unknown key', 'key'], quota_trip: ['Quota', 'ban'], task_blocked: ['Blocked', 'warn'], checkpoint: ['Approve', 'check'], stalled_member: ['Stalled', 'clock'], bp_proposal: ['Blueprint proposal', 'graph'], bp_coordinator_decided: ['Agreed by coordinator', 'check'], bp_escalation: ['Escalation', 'warn'], checkout_overdue: ['Checkout overdue', 'pc'], handout_purge_soon: ['Handout', 'clock'],
   onboarding_request: ['Team request', 'pc'], onboarding_pickup_retry: ['Keys', 'key'], onboarding_pickup_after_collect: ['Keys', 'key'], enrolment_code_reused: ['Enrolment', 'lock'], enrol_fail: ['Enrolment', 'lock'], onboarding_auth_fail: ['Logins', 'lock'],
   bp_replan: ['Re-plan', 'graph'], key_like_payload: ['Key-like', 'shield'], feedback_spam: ['Feedback', 'bug'], feedback_flood: ['Feedback', 'bug'], kg_reputation: ['Graph', 'graph'] };
 const atype = (a) => AT[a.type] || [a.type.replace(/_/g, ' '), 'ban'];
@@ -479,7 +482,7 @@ function wmWhat(e) {
     const has = (...s) => p.moves.some((m) => s.includes(m.status));
     return [parts.length ? 'Blueprint: ' + parts.join(' · ') : p.changed.length ? 'Blueprint: ' + p.changed.slice(0, 3).join(', ') + (p.changed.length > 3 ? ' and ' + (p.changed.length - 3) + ' more' : '') + ' updated' : 'Blueprint updated (version ' + (p.version ?? '?') + ')', has('missed') ? 'bad' : has('unclear') ? 'warn' : has('met', 'reached') ? 'ok' : ''];
   }
-  const by = e.actor.label;
+  const by = e.actor.label + viaTxt(e.actor);
   if (e.tool === 'task_create' || !e.from) return [e.tool === 'knowledge_flag' ? 'Created for a knowledge flag' : e.to === 'backlog' ? 'Proposed, in the backlog' : e.flag === 'relayed' ? 'Opened on your relayed request' : 'Created', ''];
   if (e.tool === 'admin_accept') return ['Accepted by the operator', 'ok'];
   if (e.tool === 'admin_discard') return ['Discarded by the operator', ''];
@@ -498,8 +501,8 @@ function wmWhat(e) {
     case 'changes_requested': return ['Changes requested, round ' + (e.round || 1), 'warn'];
     case 'approved': return ['Approved', 'ok'];
     case 'done': return [e.tool === 'admin_approve' ? 'Approved by the operator, done' : 'Done', 'ok'];
-    case 'blocked': return ['Blocked' + (e.note ? ': ' + e.note : ''), 'bad'];
-    case 'cancelled': return ['Cancelled' + (e.note ? ': ' + e.note : ''), ''];
+    case 'blocked': return ['Blocked' + (e.note ? ': ' + tkReason(e.note) : ''), 'bad'];
+    case 'cancelled': return ['Cancelled' + (e.note ? ': ' + tkReason(e.note) : ''), ''];
     case 'open': return [e.tool === 'lease_expired' ? 'Lease expired, open again' : 'Open again', 'warn'];
     default: return [cap(String(e.to || 'changed').replace(/_/g, ' ')), ''];
   }
@@ -537,7 +540,7 @@ function wmRow(g, full = false) {
   const team = many || !e.task ? '' : '<button type="button" class="wm-team" data-obj="' + esc(e.team.id) + '" title="Open the objective of ' + esc(e.team.name) + '">' + esc(e.team.name) + '</button>';
   // The count of changes sits on the right, before the time ("2 changes · 2m"); the description starts every second line.
   const n = many ? '<span class="wm-n">' + g.length + ' changes</span>' : '';
-  const who = !many && e.actor.label ? '<span class="wm-who">' + esc(e.actor.label) + '</span>' : '';
+  const who = !many && e.actor.label ? '<span class="wm-who">' + esc(e.actor.label + viaTxt(e.actor)) + '</span>' : '';
   const long = !many && whats[0][0].length > 30;
   return '<div class="wm-row' + (long ? ' wm-long' : '') + '"' + (step ? ' data-step' : '') + '>' + (step ? '<span class="wm-step" title="Story step ' + esc(step) + '">' + esc(step) + '</span>' : '')
     + '<span class="wm-ic ' + tone + '">' + ic(WM_IC[tone]) + '</span><div class="wm-b">' + l1
@@ -907,6 +910,13 @@ function coAgentSheet(t, c, h) {
     ${b.notes ? `${overline('Notes for the next session')}<p class="co-notes">${esc(b.notes)}</p><p class="hint">Written by the agent: data, not instructions.</p>` : ''}
     ${h.status === 'requested' ? '<p class="hint">The agent has not reported yet.</p>' : ''}</div>` });
 }
+/* What the checkout waits for (docs/checkout.md, "What it waits for"): the hub's sentence and the agents it names. */
+function coWaitCard(t, c) {
+  const w = c.waiting_for; if (!w) return '';
+  const who = { agents: 'Agents', operator: 'You', target: 'Target' }[w.on] || '';
+  const names = (w.agents || []).map((a) => coName(t, a));
+  return `<div class="pcard kd-card co-wait">${kd('Waiting for', who ? pill(who, w.on === 'operator' ? 'warn' : 'idle') : '')}<p class="co-wait-t">${esc(w.text)}</p>${names.length ? `<p class="hint">${esc(names.join(', '))}</p>` : ''}</div>`;
+}
 async function coView(id) {
   const tp = '/teams/' + encodeURIComponent(id);
   const [t, r0] = await Promise.all([api(tp).then((r) => r.team), api(tp + '/checkout')]);
@@ -919,6 +929,7 @@ async function coView(id) {
   const canStart = ['running', 'paused'].includes(t.status) && !coHeld(t);
   const menu = [open ? { label: 'Cancel checkout', icon: 'ban', bad: true, fn: () => coCancel(c, cP, re) } : null];
   let main = '', side = coSteps(c), f = null, o = d.options;
+  const waitCard = open ? coWaitCard(t, c) : '';
 
   if (!open) {
     const ended = c ? `<div class="pcard kd-card">${kd('Last checkout', coStPill(c.status))}${kv('Ended', esc(dt(c.ended_at || c.restored_at || c.updated_at)))}${c.end_reason ? kv('Why', esc(cap(String(c.end_reason).replace(/_/g, ' ')))) : ''}
@@ -969,6 +980,7 @@ async function coView(id) {
       + coScanCard(t, c, d.scans);
   }
 
+  main = waitCard + main;
   return {
     t: `${ic('pc')}<span class="ellip">${esc(t.name)} · Checkout</span>${c ? coStPill(c.status) : ''}`,
     a: menu.some(Boolean) ? moreBtn() : '',
@@ -1359,7 +1371,7 @@ async function openD(type, arg, replace, reset = false, origin) {
    1. Security → Users (#users) and a user's page (#user/<id>) with the per-project access editor (admins).
    2. The two-factor enrolment screen for a user who must enrol first, right after their first sign-in.
    A collaborator is a user whose API role is 'member'. The hub generates each password; the admin sees it once and hands it over.
-   3. The member shell (option A in docs/mockups/multi-user.html): Home with "Needs you", one page per granted project,
+   3. The member shell: Home with "Needs you", one page per granted project,
       a routed question page and the account page. It calls only routes a member may call (server/src/admin/scopes.ts). */
 const MU_COMP = [['blueprint', 'Blueprint', 'Always on'], ['tasks', 'Tasks', 'Team boards'], ['feed', 'Activity', 'What changed'], ['messages', 'Messages', 'Team chats'],
   ['vault', 'Vault', 'Chosen folders'], ['graph', 'Graph', 'Needs Vault'], ['topology', 'Topology', 'Needs Tasks']];
@@ -2039,6 +2051,7 @@ const muCanWrite = (p) => { const r = muRel(p).toLowerCase(); return !!MU.me?.fo
    project when there is one project grant with one team and no folder grant, Vault with folder grants only, else Home. */
 async function muLanding() {
   const me = MU.me, P = me.grants.length, F = (me.folder_grants || []).length;
+  if ((await dlgMine()).length) return ''; // an agent lent to them waits on Home: it is not hidden behind a single project
   if (!P && F) return 'vault';
   if (P === 1 && !F) { await muLoadCommon(); const p = MU.projects[0]; if (p && p.teams.length === 1) return 'p/' + p.id; }
   return '';
@@ -2048,7 +2061,7 @@ const muTeamN = (id) => MU.teams[id]?.name || 'A team';
 /* Needs you (docs/dashboard-ux.md "Attention words"): one list per viewer from the hub, which every entrance reads. */
 const NY_Q = '/needs-you?limit=200', NY_EMPTY = { items: [], total: 0, awareness: { items: [], total: 0 } }, NY_PAGES = 25;
 async function muLoadCommon() {
-  const [nd0, pr, ag, tm] = await Promise.all([nyRead(NY_Q).catch(() => null), api('/projects').catch(() => ({ projects: [] })),
+  const [nd0, pr, ag, tm] = await Promise.all([nyRead(NY_Q).catch(() => null), muAllProjects().catch(() => ({ projects: [] })),
     api('/agents').catch(() => null), api('/teams').catch(() => null)]);
   // A failed read keeps the last rows, and the Needs you card says the queue could not be checked (MU.ndErr).
   MU.ndErr = !nd0; const nd = nd0 || MU.nd || NY_EMPTY;
@@ -2059,6 +2072,18 @@ async function muLoadCommon() {
   $$('[data-mu-badge]').forEach((b) => { b.hidden = !n; });
 }
 const muNdCount = (nd) => nd?.total || 0;
+/* GET /api/projects is paged (100 a page): read every page, so Home's project cards and Papers miss none. A later page that
+   fails keeps what was read; at most 20 pages. */
+async function muAllProjects() {
+  const r = await api('/projects');
+  let all = r.projects || [], c = r.next_cursor;
+  for (let i = 0; c && i < 20; i++) {
+    const n = await api('/projects?cursor=' + encodeURIComponent(c)).catch(() => null);
+    if (!n) break;
+    all = all.concat(n.projects || []); c = n.next_cursor;
+  }
+  return { projects: all };
+}
 const muProjOf = (teamId) => MU.projects.find((p) => p.teams.some((t) => t.id === teamId));
 /* What waits for the member and what is worth knowing, as rows with their actions (nyRow, awRow). pid limits them to one
    project: the hub scopes each row to its project. A question opens its page, a proposal its review; one-click actions go
@@ -2068,8 +2093,8 @@ function muNyOpen(o) {
   const p = o.project_id || (o.team_id ? muProjOf(o.team_id)?.id : null);
   if (o.kind === 'question') return `data-mu-go="dec|${esc(o.id)}"`;
   if (o.kind === 'proposal') return `data-mu-act="review|${esc(o.project_id)}|${esc(o.id)}"`;
-  // An item opens its own sheet, on whichever page the row is (it names its project): going to the project page would do
-  // nothing on that page itself. A stalled agent has no member page: Open goes to its project, so not on that project's page.
+  // An item opens its own page (the row names its project). A stalled agent has no member page: Open goes to its project,
+  // so not on that project's page.
   if (o.kind === 'item' && p) return `data-mu-item="${esc(o.id)}" data-mu-pid="${esc(p)}"`;
   return o.kind === 'agent' && p && !(MU.view === 'p' && MU.arg.split('/')[0] === p) ? `data-mu-go="p|${esc(p)}"` : '';
 }
@@ -2088,6 +2113,28 @@ function muNeedsCard(pid) {
   return `<div class="card kd-card mu-needs" id="mu-needs" data-ny-box="mu-needs"${pid ? ` data-ny-filter="${esc('project=' + encodeURIComponent(pid))}"` : ''}>${lone ? kd(A.length ? `For awareness · ${A.length}` : `Later · ${LT.length}`) : kd(`Needs you${n ? ' · ' + n : ''}`, who ? `<span class="meta">${esc(who)}</span>` : '')}`
     + (lone ? (A.length ? muCapped(A, 5) : '') + (LT.length ? (A.length ? overline('Later', LT.length) : '') + LT.join('') : '')
       : (R.join('') || none('check', 'Nothing waits for you', true)) + (A.length ? overline('For awareness', A.length) + muCapped(A, 5) : '') + (LT.length ? overline('Later', LT.length) + LT.join('') : '')) + '</div>';
+}
+/* Papers (docs/multi-user.md §7): every paper of the given projects, from the papers GET /api/projects carries (the hub
+   leaves dropped ones out). Open papers first, nearest date first and undated last; then accepted and published, latest date
+   first; then rejected; ties by project, then key. A row opens the paper's item view; the chip shows readiness only while
+   the paper is being written. On Home each row names its project; on a project page it does not. */
+const MU_PAPER_OPEN = ['planned', 'drafting', 'submitted'], MU_PAPER_WRITING = ['planned', 'drafting'];
+const muPaperGroup = (s) => (MU_PAPER_OPEN.includes(s) ? 0 : s === 'accepted' || s === 'published' ? 1 : s === 'rejected' ? 2 : -1);
+function muPapers(P) {
+  const g = (x) => muPaperGroup(x.status), d = (x) => x.target_at ?? null;
+  const byDate = (a, b) => (g(a) === 0 ? (d(a) ?? Infinity) - (d(b) ?? Infinity) : g(a) === 1 ? (d(b) ?? -Infinity) - (d(a) ?? -Infinity) : 0) || 0;
+  return P.flatMap((p) => (p.papers || []).map((x) => ({ ...x, pid: p.id, pname: p.name }))).filter((x) => g(x) >= 0)
+    .sort((a, b) => g(a) - g(b) || byDate(a, b) || a.pname.localeCompare(b.pname) || a.key.localeCompare(b.key, undefined, { numeric: true }));
+}
+function muPaperRow(x, home) {
+  const open = MU_PAPER_OPEN.includes(x.status), today = new Date().setHours(0, 0, 0, 0);
+  const due = open && x.target_at != null ? `<span${x.target_at < today ? ' class="mu-late"' : ''}>due ${esc(planDate(x.target_at))}</span>` : '';
+  const meta = [home ? esc(x.pname) : '', esc(cap(String(x.status))), due, esc(x.total ? `${x.supported} of ${x.total} claims supported` : 'No claims yet')].filter(Boolean).join(' · ');
+  return row({ lead: `<span class="tm-ico">${ic('file')}</span>`, ...bpTM(x.key, x.title, raw(meta), { 'data-mu-item': x.key, 'data-mu-pid': x.pid }), trail: MU_PAPER_WRITING.includes(x.status) ? bpReady(x) : '', chev: true });
+}
+function muPapersCard(P, home) {
+  const L = muPapers(P);
+  return L.length ? `<div class="card kd-card" id="mu-papers">${kd(`Papers · ${L.length}`)}${muCapped(L.map((x) => muPaperRow(x, home)))}</div>` : '';
 }
 /* A project's card on Home: its name, health, next milestone, the bars. */
 function muProjCard(p, sum) {
@@ -2109,7 +2156,7 @@ const MU_TK_ST = { open: ['Open', 'idle'], assigned: ['Assigned', 'idle'], in_pr
 const muTkPill = (s) => { const [l, tone] = MU_TK_ST[s] || [cap(String(s).replace(/_/g, ' ')), 'idle']; return pill(l, tone); };
 const MU_BCOLS = [['open', 'Open', ['open', 'assigned'], 'idle'], ['doing', 'Doing', ['in_progress', 'changes_requested'], 'accent'], ['review', 'Review', ['in_review', 'approved'], 'warn'], ['blocked', 'Blocked', ['blocked'], 'bad'], ['done', 'Done', ['done'], 'ok']];
 function muTkState(k) {
-  if (k.blocked_reason) return { ico: 'warn', text: k.blocked_reason, tone: 'bad', clamp: true };
+  if (k.blocked_reason) return { ico: 'warn', text: tkReason(k.blocked_reason), tone: 'bad', clamp: true };
   if (k.overdue) return { ico: 'clock', text: 'Past its check-in time', tone: 'bad' };
   if (k.awaiting_approval) return { ico: 'check', text: 'Approved · waits for sign-off', tone: 'warn' };
   if (k.status === 'in_review') return { ico: 'eye', text: 'Waiting for the reviewer', tone: '' };
@@ -2152,10 +2199,12 @@ const MU_PAGES = {
     const feed = muAny('feed') ? await api('/work/recent?limit=30').catch(() => null) : null;
     const T = Object.values(MU.teams);
     const sums = await muSums(P);
-    const left = (P.map((p, i) => muProjCard(p, sums[i])).join('') || `<div class="card">${none('proj', 'No projects yet. The admin adds the projects you see.')}</div>`);
-    const right = (feed ? `<div class="card kd-card">${kd('Work in motion')}${muFeed(feed.events, 6)}</div>` : '')
-      + (T.length && muAny('tasks') ? `<div class="card kd-card">${kd('Teams')}${T.map((t) => row({ one: false, lead: `<span class="tm-ico">${ic('team')}</span>`, title: t.name, meta: muTeamMeta(t) })).join('')}</div>` : '');
-    return muPage('Home', `<div class="kd-grid mu-grid"><div class="kd-col">${left}</div><div class="kd-col">${right}</div></div>`);
+    // Left: the project cards, then Teams under them; right: Papers, then Work in motion. On a phone the columns stack in that order.
+    const teams = T.length && muAny('tasks') ? `<div class="card kd-card">${kd('Teams')}${T.map((t) => row({ one: false, lead: `<span class="tm-ico">${ic('team')}</span>`, title: t.name, meta: muTeamMeta(t) })).join('')}</div>` : '';
+    const left = (P.map((p, i) => muProjCard(p, sums[i])).join('') || `<div class="card">${none('proj', 'No projects yet. The admin adds the projects you see.')}</div>`) + teams;
+    const right = muPapersCard(P, true) + (feed ? `<div class="card kd-card">${kd('Work in motion')}${muFeed(feed.events, 6)}</div>` : '');
+    const dm = dlgMemberHtml(await dlgMine());
+    return muPage('Home', `${dm}<div class="kd-grid mu-grid"><div class="kd-col">${left}</div><div class="kd-col">${right}</div></div>`);
   },
   async projects() {
     await muLoadCommon();
@@ -2165,7 +2214,9 @@ const MU_PAGES = {
   },
   async p(arg) {
     // #m/p/<id>/<tab> (docs/multi-user.md §7): the tab is kept in the route; an unknown tab, or one outside the grant, is Overview.
-    const [pid, want = ''] = String(arg).split('/');
+    // #m/p/<id>/item/<key> is one item's page; a key may hold a slash (PAP-1/C2), so the rest of the route is the key.
+    const parts = String(arg).split('/'), [pid, want = ''] = parts;
+    if (want === 'item') return muItemPage(pid, parts.slice(2).join('/'));
     if (!muPid(pid)) throw new Error('Project not found');
     await muLoadCommon();
     const p = MU.projects.find((x) => x.id === pid); if (!p) throw Object.assign(new Error('You have no access to this project.'), { mu: true });
@@ -2221,7 +2272,8 @@ const MU_PAGES = {
       // An ecosystem's projects, each only with this person's grant on it (the hub filters them).
       const ov = sum.project.ecosystem ? await api(pp + '/overview').catch(() => null) : null;
       const kids = ov ? `<div class="card kd-card" id="mu-eco">${kd('Projects', `<span class="meta">${plural(ov.children.length, 'project')}</span>`)}${ov.children.map((c) => bpOvRow(c, (id) => ({ 'data-mu-go': 'p|' + id }))).join('') || none('proj', 'No projects you can see')}</div>` : '';
-      const needs = muNeedsCard(pid), left = needs + kids;
+      // Papers sits right after the Needs you rows, or before a card that holds only For awareness or Later rows.
+      const needs = muNeedsCard(pid), papers = muPapersCard([p], false), left = (NY ? needs + papers : papers + needs) + kids;
       body = `${vision ? `<p class="mu-vision">${esc(vision.title)}</p>` : ''}${qa ? `<div class="mu-qa">${qa}</div>` : ''}<div class="mu-nums">${nums}</div>
         <div class="kd-grid mu-grid">${left ? `<div class="kd-col">${left}</div><div class="kd-col">${next}${prog}</div>` : `<div class="kd-col">${next}</div><div class="kd-col">${prog}</div>`}</div>`;
     } else if (tab === 'work') {
@@ -2270,7 +2322,7 @@ const MU_PAGES = {
       <div class="card kd-card mu-dec">${decHead(d, metaLine, asker)}${context}${form}</div></div><div class="kd-col"></div></div>`, () => {
       if (!open) return;
       const done = async (msg) => { toast(msg); muGo('home'); };
-      decBind(dp, done);
+      decBind(dp, done, d.options_version, async (msg) => { toast(msg); muGo('dec', id); });
       $('#muDm').onclick = (e) => fbSheet({ title: 'Ask for more information', anchor: e.currentTarget, label: 'Ask', fields: fbArea('muDn', 'What do you need to know?', 2000),
         onGo: async (sh) => { const note = fbVal(sh, 'muDn'); if (!note) return ['Say what you need to know.', 'muDn']; await post(dp + '/more-info', { note }); await done('Asked'); } });
       $('#muDx').onclick = (e) => fbSheet({ title: 'Decline to decide', anchor: e.currentTarget, label: 'Decline', tone: 'bad', fields: `<p class="hint">The question goes to the admin.</p>${fbArea('muDn', 'Note for the team (optional)', 2000)}`,
@@ -2488,10 +2540,10 @@ const muKeys = (L) => (L.length > 3 ? [`${L.slice(0, 2).join(', ')} and ${L.leng
 const muShort = (e) => (e.kind === 'plan' && e.plan ? { ...e, plan: { ...e.plan, added: muKeys(e.plan.added || []), removed: muKeys(e.plan.removed || []) } } : e);
 function muFeed(events, n) {
   const L = events.slice(0, n);
-  return L.length ? L.map((e) => { const [w, tone] = wmWhat(muShort(e)); return row({ lead: `<span class="wm-ic ${tone}">${ic(WM_IC[tone])}</span>`, title: e.task ? e.task.title : e.team.name, meta: [w, e.task ? e.team.name : '', e.actor?.label, `${ago(e.at)} ago`].filter(Boolean).join(' · ') }); }).join('')
+  return L.length ? L.map((e) => { const [w, tone] = wmWhat(muShort(e)); return row({ lead: `<span class="wm-ic ${tone}">${ic(WM_IC[tone])}</span>`, title: e.task ? e.task.title : e.team.name, meta: [w, e.task ? e.team.name : '', e.actor?.label ? e.actor.label + viaTxt(e.actor) : '', `${ago(e.at)} ago`].filter(Boolean).join(' · ') }); }).join('')
     + (events.length > n ? `<p class="meta mu-more">Showing ${n} of ${events.length}</p>` : '') : none('pulse', 'Nothing changed lately');
 }
-/* Routes: #m (Home), #m/projects, #m/p/<project id>, #m/dec/<decision id>, #m/account. */
+/* Routes: #m (Home), #m/projects, #m/p/<project id>[/<tab>], #m/p/<project id>/item/<key>, #m/dec/<decision id>, #m/account. */
 function muGo(view, arg) { history.pushState(null, '', '#m' + (view === 'home' ? '' : '/' + view + (arg ? '/' + encodeURIComponent(arg) : ''))); muRoute(); }
 async function muRoute(landing = false) {
   // Landing applies to a bare #m only; an explicit link opens where it points. It replaces #m, so Back skips it.
@@ -2533,25 +2585,31 @@ async function muPoll() {
     if (MU.view === 'room') await muRoomPoll().catch(() => {});
     const nd = await nyRead(NY_Q).catch(() => null);
     // A failed read says so on the card (drawn once), never an all-clear; the next good read clears it.
-    if (!nd) { if (!MU.ndErr) { MU.ndErr = true; if (MU.view === 'home' || MU.view === 'p') await muDraw(false); } return; }
+    const redraw = MU.view === 'home' || (MU.view === 'p' && MU.arg.split('/')[1] !== 'item');
+    if (!nd) { if (!MU.ndErr) { MU.ndErr = true; if (redraw) await muDraw(false); } return; }
     const was = MU.ndErr; MU.ndErr = false;
     if (!was && JSON.stringify(nd) === JSON.stringify(MU.nd)) return;
     MU.nd = nd;
     $$('[data-mu-badge]').forEach((b) => { b.hidden = !muNdCount(nd); });
-    if (MU.view === 'home' || MU.view === 'p') await muDraw(false);
+    if (redraw) await muDraw(false);
   } catch { /* the next tick tries again */ } finally { MU.busy = false; }
 }
-/* Item sheet: what an item is, its status, its text, what it links to. */
-async function muItem(pid, key, anchor) {
-  const r = await api(`${bpP(pid)}/items/${encodeURIComponent(key)}`), it = r.item;
-  const links = [...r.links.out.map((l) => [l.rel, l]), ...r.links.in.map((l) => [l.rel + ' (from)', l])];
-  openSheet({ title: `${it.key} · ${BP_KIND[it.kind] || cap(it.kind)}`, anchor, html: `<div class="sheet-form mu-item">
-    <div class="mu-item-h"><b>${esc(it.title)}</b>${bpSt(it.status)}</div>
-    <p class="meta">${esc([it.fields?.target_at ? 'Target ' + planDate(it.fields.target_at) : '', it.team_id && MU.teams[it.team_id] ? MU.teams[it.team_id].name : '', it.updated_at ? 'updated ' + dt(it.updated_at) : ''].filter(Boolean).join(' · '))}</p>
-    ${it.body ? prose(it.body) : ''}
-    ${r.children.length ? overline('Inside', r.children.length) + r.children.map((c) => row({ one: true, title: bpT(c.key, c.title), trail: bpSt(c.status) })).join('') : ''}
-    ${links.length ? overline('Links', links.length) + links.map(([rel, l]) => row({ ...bpTM(l.key, l.title || l.key, rel), trail: bpSt(l.status) })).join('') : ''}
-    ${r.tasks?.total ? `<p class="meta">${r.tasks.done} of ${plural(r.tasks.total, 'task')} done</p>` : ''}</div>` });
+/* An item's page (docs/multi-user.md §7): the admin's item screen, read only (bpItemScreen). Back follows the history, so
+   Back from a claim returns to its paper; opened from a link, it returns to the project. An unknown key and a project
+   without a grant read the same. */
+const muItemHash = (pid, key) => '#m/p/' + encodeURIComponent(pid) + '/item/' + encodeURIComponent(key);
+function muOpenItem(pid, key) { history.pushState({ mu: 1 }, '', muItemHash(pid, key)); muRoute(); }
+async function muItemPage(pid, key) {
+  await muLoadCommon();
+  const p = muPid(pid) ? MU.projects.find((x) => x.id === pid) : null;
+  const back = history.state?.mu ? ['back', 'Back'] : p ? ['p|' + pid, p.name] : ['home', 'Home'];
+  let r = null;
+  if (p && key) {
+    try { r = await bpItemScreen(pid, key, 'member', { team: (id) => MU.teams[id] || null }); } catch (e) { if (![403, 404].includes(e.status)) throw e; }
+  }
+  if (!r) return muPage('No such item', `<div class="card">${none('graph', 'No such item. It may have been removed, or it is not in a project you can see.')}</div>`, null, { back });
+  const kind = BP_KIND[r.it.kind] || cap(r.it.kind);
+  return muPage(mdPlain(r.it.title), `<p class="meta mu-ikm"><span class="id">${esc(r.it.key)}</span> · ${esc(kind)} · ${esc(p.name)}</p>${r.b}`, r.after, { back });
 }
 /* Proposal sheet: who proposes what, then Apply or Reject (both with an optional note). */
 async function muProposal(pid, id, anchor) {
@@ -2592,9 +2650,15 @@ function muInit() {
     const t = e.target;
     const nv = t.closest('[data-mu-nav]'); if (nv) { const v = nv.dataset.muNav; if (v === 'theme') { go('theme'); if (MU.view === 'account') muDraw(false); } else muGo(v); return; }
     // view|arg, split at the first bar only: a vault path is the argument whole.
-    const g = t.closest('[data-mu-go]'); if (g) { e.preventDefault(); const s = g.dataset.muGo, i = s.indexOf('|'); muGo(i < 0 ? s : s.slice(0, i), i < 0 ? '' : s.slice(i + 1)); return; }
+    // Back on an item page follows the history (Back from a claim returns to its paper).
+    const g = t.closest('[data-mu-go]'); if (g) { e.preventDefault(); const s = g.dataset.muGo, i = s.indexOf('|'); if (s === 'back') { history.back(); return; } muGo(i < 0 ? s : s.slice(0, i), i < 0 ? '' : s.slice(i + 1)); return; }
+    const dm = t.closest('[data-dlg-mu]'); if (dm) { run(() => dlgMemberAct(dm.dataset.dlgMu, dm.dataset.id)); return; }
     const dl = t.closest('[data-mu-dl]'); if (dl) { download(dl.dataset.muDl); return; }
-    const it = t.closest('[data-mu-item]'); if (it) { const pid = it.dataset.muPid || (MU.view === 'p' ? MU.arg.split('/')[0] : ''); if (pid) run(() => muItem(pid, it.dataset.muItem, it)); return; }
+    const it = t.closest('[data-mu-item]'); if (it) { const pid = it.dataset.muPid || (MU.view === 'p' ? MU.arg.split('/')[0] : ''); if (pid) muOpenItem(pid, it.dataset.muItem); return; }
+    // On an item page (the shared item screen): an item link or a defined code opens the next item page, a vault note the
+    // file viewer. Stopped here, so the operator's handler (document) never opens its own screens for them.
+    const bi = t.closest('[data-bp], [data-gl]'); if (bi) { e.preventDefault(); e.stopPropagation(); const v = bi.dataset.bp || bi.dataset.gl, i = v.indexOf('|'); muOpenItem(v.slice(0, i), v.slice(i + 1)); return; }
+    const vf = t.closest('[data-vf]'); if (vf) { e.preventDefault(); e.stopPropagation(); muGo('file', vf.dataset.vf); return; }
     const tk = t.closest('[data-mu-task]'); if (tk) { const pid = MU.view === 'p' ? MU.arg.split('/')[0] : ''; if (pid) run(() => muTask(pid, tk.dataset.muTask)); return; }
     const mo = t.closest('[data-mu-more]'); if (mo) { const rest = mo.previousElementSibling; if (rest?.classList.contains('mu-rest')) { rest.hidden = false; rest.querySelector('button')?.focus({ preventScroll: true }); } mo.remove(); return; }
     const ny = t.closest('[data-mu-ny]'); if (ny) { nyAct(ny, ny.dataset.muNy, () => muDraw(false)); return; }
@@ -3318,7 +3382,7 @@ const admBpOlder = (d) => (d.history.total > d.history.revisions.length ? `<div 
 function admBpOlderBind(P, key, d, arg) {
   const box = $('#admBpH'), btn = $('#admBpMore'); if (!btn) return;
   const shown = d.history.revisions, st = ADM.hist && ADM.hist.arg === arg ? ADM.hist : (ADM.hist = { arg, rows: [], cursor: undefined, done: false });
-  const rowOf = (r) => row({ title: cap(r.note || (r.rev === 1 ? 'created' : 'changed')), meta: `${bpWho(r.actor)} · ${dt(r.at)}`, trail: `<span class="meta">rev ${r.rev}</span>` });
+  const rowOf = (r) => row({ title: cap(r.note || (r.rev === 1 ? 'created' : 'changed')), meta: `${bpWhoRev(r)} · ${dt(r.at)}`, trail: `<span class="meta">rev ${r.rev}</span>` });
   const draw = () => { box.innerHTML = st.rows.map(rowOf).join(''); const left = d.history.total - shown.length - st.rows.length; btn.hidden = st.done || left <= 0; btn.textContent = `Show older revisions · ${left}`; };
   draw();
   btn.onclick = () => run(async () => {
@@ -3361,7 +3425,7 @@ const ROUTE_OK = {
   feedback: (a) => ['', 'new', 'open', 'closed'].includes(a), fbr: (a) => RID.test(a),
   directive: (a) => { const [i, k] = dirAgSplit(a); return RID.test(i) && dirAgOk(k); }, directives: (a) => !!dirArgs(a), teams: (a) => !!tmArgs(a) || !!tmTopo(a), home: tmArgs, topology: (a) => { const t = tzArg(a); return !t.f || TM_FOCUS.test(t.f); },
   dec: (a) => RID.test(a),
-  blueprint: (a) => /^prj_[A-Za-z0-9_-]+(\|(ov|res|[1-6]|needs|prop|dropped|cov|q)?(\|([a-z]+[_-][A-Za-z0-9_-]+|project)?(\|([a-z_]{0,20}|[mh]:[A-Z][A-Za-z0-9.\/-]{0,59})(\|[A-Za-z0-9%=&._*+-]{0,600})?)?)?)?$/.test(a), project: (a) => RID.test(a), objective: (a) => RID.test(a),
+  blueprint: (a) => /^prj_[A-Za-z0-9_-]+(\|(ov|res|[1-6]|needs|prop|dropped|cov|q)?(\|([a-z]+[_-][A-Za-z0-9_-]+|project)?(\|([a-z_]{0,20}|[mh]:[A-Z][A-Za-z0-9.\/-]{0,59})(\|[A-Za-z0-9%=&._*+,:-]{0,600})?)?)?)?$/.test(a), project: (a) => RID.test(a), objective: (a) => RID.test(a),
   knowledge: (a) => ['', 'health', 'entities', 'flags', 'jobs', 'settings'].includes(a),
   bp: (a) => /^prj_[A-Za-z0-9_-]+\|[A-Z][A-Za-z0-9.\/-]{0,59}$/.test(a), decisions: (a) => { const [i, f = ''] = a.split('|'); return RID.test(i) && ['', 'open', 'answered', 'all'].includes(f); },
   diff: (a) => { const [f, from = '', to] = a.split('|'); return RID.test(f) && (from === 'absent' || RID.test(from)) && (!to || RID.test(to)); },
@@ -3635,7 +3699,7 @@ for (const [t, ar, team] of ADM_NAV) { AREA[ar].push(t); if (team) TEAM_SCREENS.
 const areaOf = (t) => Object.keys(AREA).find((a) => AREA[a].includes(t)) || null;
 const AREA_TITLE = { agents: 'Work', vault: 'Vault', security: 'Security', log: 'Audit' };
 function navOn(t, arg, ctx = false) {
-  const securityTab = { keys: 'keys', key: 'keys', pcs: 'pcs', pc: 'pcs', hardware: 'hardware', req: 'req', shares: 'shares', share: 'shares', grant: 'grant', new: 'grant', app: 'grant', reset: 'reset', users: 'users', user: 'users' }[t];
+  const securityTab = { keys: 'keys', key: 'keys', pcs: 'pcs', pc: 'pcs', hardware: 'hardware', req: 'req', shares: 'shares', share: 'shares', grant: 'grant', new: 'grant', app: 'grant', tpls: 'grant', tplnew: 'grant', reset: 'reset', users: 'users', user: 'users' }[t];
   // Home is Work's first tab: the overview (no screen open) and #home both light it, and so do the team screens, which hang under Home.
   const agentTab = { home: 'home', monitoring: 'home', sessions: 'sessions', ses: 'sessions', topology: 'topology', team: 'home', tasks: 'home', members: 'home', tsettings: 'home', rules: 'home', tbuild: 'home', chats: 'chats', room: 'chats', feedback: 'feedback', fbr: 'feedback', dec: 'home', decisions: 'home', directives: 'directives', directive: 'directives', ob: 'home', backlog: 'home', work: 'home', needs: 'home' }[t || 'home'];
   const area = t ? areaOf(t) : 'agents';
@@ -3656,6 +3720,8 @@ function navOn(t, arg, ctx = false) {
   $('#pageTitle').textContent = AREA_TITLE[area] || { account: 'Account', shortcuts: 'Shortcuts' }[t] || 'Work';
   $$('.nav[data-go],.bnav [data-go]').forEach((button) => highlight(button, button.dataset.go === area));
   $$('#securityBar [data-go]').forEach(button => highlight(button, button.dataset.go === securityTab));
+  // The bar's New button stands for the pages it opens (a key, a template, Agent access): lit while one of them is open.
+  $$('#securityBar [data-sec-new]').forEach(button => highlight(button, securityTab === 'grant'));
   $$('#agentsBar [data-go]').forEach(button => highlight(button, button.dataset.go === agentTab));
   $$('#auditBar [data-arg]').forEach(button => highlight(button, t === 'log' && button.dataset.arg === String(arg || 'audit').split('|')[0]));
   $$('#vaultBar [data-vault-tab]').forEach(button => highlight(button, t === 'vault' && button.dataset.vaultTab === vaultState(arg).tab));
@@ -3896,7 +3962,7 @@ function secretView(res, title, note) {
         if (done || Math.floor((Date.now() - t0) / 1000) % 3) return;
         try {
           const d = (await api('/keys/' + k.id)).key;
-          if (d.live_logins > 0 || d.first_used_at) { done = true; if (ONCE) ONCE.copied = true; $('#wS').classList.add('ok'); $('#wS').querySelector('.dot').classList.remove('pulse'); $('#wL').textContent = 'Connected'; refresh(); }
+          if (d.live_logins > 0 || d.first_used_at) { done = true; if (ONCE) ONCE.copied = true; $('#wS').classList.add('ok'); $('#wS').querySelector('.dot').classList.remove('pulse'); $('#wL').textContent = 'Signed in'; refresh(); }
         } catch { /* ignore */ }
       }, 1000);
     },
@@ -4018,7 +4084,7 @@ const VIEWS = {
   async keys() {
     return {
       t: `${ic('key')}Keys <span class="n" id="keyN">0</span>`,
-      a: `<button class="btn sm" data-go="new">${ic('plus')}Session</button><button class="btn sm" data-go="app">${ic('plus')}App</button>`,
+      // New keys come from the Security bar's New button (on phones, the app bar's +), not from this header.
       b: vtools(`<div class="seg" id="fKind" role="group" aria-label="Kind">${[['', 'All'], ['session_key', 'Session'], ['app_key', 'App']].map(([v, l]) => `<button type="button" data-v="${v}" class="${S.f.kind === v ? 'on' : ''}">${l}</button>`).join('')}</div>
         <button type="button" class="btn" id="fMore" aria-haspopup="dialog">${ic('sl')}Filters<span class="fcount"></span></button>
         <div class="srch pc-q key-q">${ic('search')}<input class="inp" id="keyQ" type="search" placeholder="Search keys, agents, PCs" aria-label="Search keys" value="${esc(S.f.q || '')}" autocomplete="off"></div>`) +
@@ -4511,6 +4577,8 @@ const TCOL = { open: 'idle', assigned: 'info', in_progress: 'accent', in_review:
 const ring = (p, sz = 36, col = 'var(--ok)') => { const r = sz / 2 - 3, c = 2 * Math.PI * r, h = sz / 2; return `<svg class="rg" width="${sz}" height="${sz}" viewBox="0 0 ${sz} ${sz}" aria-hidden="true"><circle cx="${h}" cy="${h}" r="${r}" fill="none" stroke-width="3.5" class="rg-trk"/><circle cx="${h}" cy="${h}" r="${r}" fill="none" stroke-width="3.5" stroke-linecap="round" stroke-dasharray="${(c * p / 100).toFixed(1)} ${c.toFixed(1)}" transform="rotate(-90 ${h} ${h})" style="stroke:${col}"/><text x="50%" y="50%" dominant-baseline="central" text-anchor="middle" class="rt${sz > 44 ? ' big' : ''}">${p}</text></svg>`; };
 /* The access inspector's decision sources, in words (engine.ts DecisionSource). */
 const SIM_SRC = { session_key: "The key's rules", app_key_cap: "The app key's cap", owner_grant: "The owner's grant", default: 'No rule allows it', link: 'A link grant', paused: 'The team is paused', reserved: 'A folder written by the hub' };
+/* While an agent is delegated, what it writes and proposes shows "· via <member>" (the hub sends via, a string, on Blueprint items). */
+const viaTxt = (o) => { const n = typeof o?.via === 'string' ? o.via : o?.via_name || o?.via?.name; return n ? ` · via ${n}` : ''; };
 const agLabel = (id) => (id === 'hub' ? 'hub' : AG(id)?.label || SESA(id)?.agent.label || trunc(String(id || '—'), 12));
 /* Agents topology (Work → Topology, #topology/<focus>): agents, team hubs and group chats; a project's Connections graph button on the team list scopes it to that project.
    Edges are coloured by how recently they carried activity. The focus view is described above EGO. */
@@ -4521,7 +4589,7 @@ const recency = (t) => (!t ? 'old' : Date.now() - t < ACT_MS ? 'act' : Date.now(
 const TEAM_TOOLS = /^(team_|task_|work_)/;
 const NO_PROJECT = 'No project';
 const projectOf = (a, teams = S.teams) => a.project || teams.find((t) => (t.agent_ids || []).includes(a.id))?.name || NO_PROJECT;
-/* The name prefix every label shares up to its first separator (" · ", " - " or ": "), such as "BIRAZ · ", or '' when one label
+/* The name prefix every label shares up to its first separator (" · ", " - " or ": "), such as "ECHO · ", or '' when one label
    lacks it, keeps no name after it, or there is only one label. The topology leaves it out of node names; tooltips and details keep the full name. */
 const sharedPrefix = (labels) => {
   const L = labels.map(String), m = L.length > 1 && /^(.+?)( · | - |: )/.exec(L[0]);
@@ -4615,7 +4683,7 @@ function topoGraph(M, scope, W, avail) {
   const teams = M.teams.map((t) => ({ t, members: (t.agent_ids || []).filter((id) => nodes.has(id) && !scope.ext.has(id)) })).filter((x) => x.members.length);
   if (TG_S.layers.team) for (const { t, members } of teams) nodes.set('team:' + t.id, { id: 'team:' + t.id, kind: 'team', label: t.name, t, members });
   for (const e of scope.edges) if (e.kind === 'room' && !nodes.has(e.b)) nodes.set(e.b, { id: e.b, kind: 'room', label: M.rooms.get(e.b.slice(5)) || 'Room', room: e.b.slice(5) });
-  // When every agent shown carries the same prefix ("BIRAZ · "), the node names leave it out: the context already says it.
+  // When every agent shown carries the same prefix ("ECHO · "), the node names leave it out: the context already says it.
   const ag = [...nodes.values()].filter((n) => n.kind === 'agent'), pre = sharedPrefix(ag.map((n) => n.label));
   for (const n of ag) n.name = n.label.slice(pre.length);
   // Details pills carry the role name: the part after the label's first separator ("Conclave · Developer 4" → "Developer 4").
@@ -5258,12 +5326,14 @@ function topoAfter() {
 }
 const sesDot = (s) => `<span class="dot${s.live ? ' pulse ok' : ' idle'}"></span>`;
 /* A session row (Work → Sessions): who (live or when last seen), what they last did and touched, and where they run. */
+/* Last active, from the agent's own calls (docs/dashboard-ux.md, "Agent status"); a setup login test does not count. */
+const actWhen = (a) => (a.last_active_at ? ago(a.last_active_at) : 'not connected yet');
 function sesCard(s) {
   const a = s.agent, l = s.logins[0], lc = s.last_tool_call;
   const lead = `<span class="av lg">${esc(initials(a.label || '?'))}<i class="st${s.live ? ' on' : ''}" title="${s.live ? 'Logged in' : 'Not logged in'}"></i></span>`;
   const role = [a.role, a.project].filter(Boolean).join(' · ') || 'No role';
   const meta = raw(`${lc ? `<span class="tid">${esc(lc.tool)}</span> · ` : ''}${esc(role)}`);
-  const when = lc ? ago(lc.at) : a.last_seen_at ? ago(a.last_seen_at) : 'never';
+  const when = actWhen(a);
   const trail = `${s.concurrent_use ? pill('Shared', 'warn') : ''}${lc && lc.result !== 'ok' ? pill(cap(lc.result), 'bad') : ''}${l ? `<span class="tr-where">${esc((l.pc?.name || '—') + ' · ' + (l.app || '—'))}</span>` : ''}<span class="tr-when">${esc(when)}</span>`;
   return row({ lead, title: a.label, meta, trail, attrs: { 'data-ses': a.id } });
 }
@@ -5319,10 +5389,23 @@ function agRelayout() {
 AG_NARROW.addEventListener('change', agRelayout);
 const SES_TABS = [['overview', 'Overview', 'user'], ['keys', 'Keys', 'key'], ['teams', 'Teams', 'team'], ['chats', 'Chats', 'chat'], ['links', 'Links', 'link'], ['activity', 'Activity', 'pulse']];
 /* Agent detail. Phones: detail app bar (End logins and Archive in its overflow) + scrollable tabs; desktop: the context bar with the section switch. */
+/* Messages an agent receives, per conversation (docs/connector.md, "Messages: delivery states"): Not delivered yet, Delivered,
+   Shown to the session (reported by the PC, Unknown until it reports) and Read. */
+function agMsgH(states, chats) {
+  const L = (states || []).filter((s) => s.last_seq > 0);
+  if (!L.length) return '<p class="faint">No messages yet.</p>';
+  return `<div class="ag-ms">${L.map((s) => {
+    const c = chats.find((r) => r.id === s.room_id), wait = Math.max(0, s.last_seq - s.delivered_seq), unread = Math.max(0, s.last_seq - s.acked_seq);
+    const shown = s.shown_seq === null ? 'Shown: Unknown' : `Shown to the session up to #${s.shown_seq} (reported by the PC${s.shown_reported_at ? `, ${ago(s.shown_reported_at)} ago` : ''})`;
+    return row({ lead: ic('chat'), title: c?.name || s.room_id, meta: `${shown} · ${unread ? `read up to #${s.acked_seq}` : 'All read'}`,
+      trail: wait ? pill(`${wait} not delivered yet`, 'warn') : unread ? pill('Delivered', 'info') : pill('Read', 'ok') });
+  }).join('')}</div>`;
+}
 VIEWS.ses = async (arg) => {
   const [id, tab0] = String(arg).split('|'), tab = SES_TABS.some(([k]) => k === tab0) ? tab0 : 'overview';
   const u = encodeURIComponent(id);
-  const [d, lkr, conversations, teams, dv] = await Promise.all([api('/sessions/' + u), api('/links?agent=' + u), api('/conversations'), api('/teams'), api('/agents/' + u + '/directives').catch(() => ({ directives: [], reports: [] }))]);
+  const [d, lkr, conversations, teams, dv, dl, ms, use] = await Promise.all([api('/sessions/' + u), api('/links?agent=' + u), api('/conversations'), api('/teams'), api('/agents/' + u + '/directives').catch(() => ({ directives: [], reports: [] })), dlgGet(u).catch(() => null),
+    S.me?.role === 'admin' ? api('/agents/' + u + '/message-states').catch(() => null) : null, S.me?.role === 'admin' ? api('/agents/' + u + '/usage').catch(() => null) : null]);
   const a = d.agent, LK = lkr.links, others = S.agents.filter((x) => x.id !== id && x.status !== 'archived');
   const chats = conversations.conversations.filter(room => room.members.some(member => member.agent_id === id));
   const groups = teams.teams.filter(team => team.agent_ids.includes(id));
@@ -5332,7 +5415,7 @@ VIEWS.ses = async (arg) => {
   const re = () => openD('ses', id + '|' + tab, true);
   const endLogins = () => run(async () => { for (const k of sk) await post(`/keys/${k}/end-logins`); toast('Ended'); await refresh(); re(); });
   const archive = () => run(async () => { await post(`/sessions/${u}/archive`); toast('Archived'); closeD(); refresh(); });
-  const bar = `<h2 id="ctxTitle">${sesDot(d)}<span class="ctx-name">${esc(a.label)}</span>${a.role ? `<span class="tag txt">${esc(a.role)}</span>` : ''}</h2>
+  const bar = `<h2 id="ctxTitle">${sesDot(d)}<span class="ctx-name">${esc(a.label)}</span>${a.role ? `<span class="tag txt">${esc(a.role)}</span>` : ''}${dl?.delegation?.status === 'restored' ? `<span class="tag txt" title="Delegated: it reads, adds and edits its own items, and proposes changes to other people's work">Contributor</span>` : ''}</h2>
     <nav class="seg ws-tabs" aria-label="Agent sections">${SES_TABS.map(([k, l, icn]) => `<button data-ses-tab="${esc(id)}|${k}" class="${k === tab ? 'on' : ''}"${k === tab ? ' aria-current="page"' : ''}>${ic(icn)}${l}${counts[k] ? `<span class="tabn">${counts[k]}</span>` : ''}</button>`).join('')}</nav>`;
   const tabsH = `<nav class="tabs only-m" role="tablist" aria-label="Agent sections">${SES_TABS.map(([k, l]) => `<button type="button" role="tab" aria-selected="${k === tab}" data-ses-tab="${esc(id)}|${k}" class="${k === tab ? 'on' : ''}">${l}${counts[k] ? `<span class="cnt">${counts[k]}</span>` : ''}</button>`).join('')}</nav>`;
   const V = {
@@ -5358,10 +5441,12 @@ VIEWS.ses = async (arg) => {
       const own = a.role_note || (!adminRole && a.role ? `${a.role}${a.role_detail ? ': ' + a.role_detail : ''}` : '');
       const card = (icn, title, body, act = '') => (attrs) => `<section class="agc" ${attrs}><header>${ic(icn)}<h4>${title}</h4>${act}</header>${body}</section>`;
       const status = card('pulse', 'Status', `<div class="ag-kvs">${kv('State', `${pill(d.live ? 'Live' : 'Idle', d.live ? 'ok' : 'idle')} <span class="kv-sub">${lc || a.last_seen_at ? 'seen ' + ago(lc ? lc.at : a.last_seen_at) + ' ago' : 'never seen'}</span>`)}
+        ${kv('Connected', a.connected_at ? `${esc(ago(a.connected_at))} ago` : 'Not connected yet')}
+        ${kv('Last active', a.last_active_at ? `${esc(ago(a.last_active_at))} ago` : '—')}
         ${kv('Last call', lc ? `${esc(lc.tool)}${lc.result !== 'ok' ? ' ' + pill(lc.result, 'bad') : ''} <span class="kv-sub">${ago(lc.at)}</span>` : '—', { id: true })}
         ${kv('Logins', d.logins.length ? esc(`${d.logins.length} · ${d.logins.map((l) => (l.pc?.name || '—') + ' · ' + (l.app || '—')).join(', ')}`) + (d.concurrent_use ? ' ' + pill('Shared key', 'warn') : '') : 'None')}
         ${kv('Owner', d.owner ? esc(d.owner.label) + (d.owner.status !== 'active' ? ' ' + pill(cap(d.owner.status), 'warn') : '') : '<span class="faint">No owner</span>')}
-        ${kv('Team', groups.length ? esc(groups.map((g) => g.name).join(', ')) : 'None')}${a.project ? kv('Project', esc(a.project)) : ''}${a.model_label ? kv('Model', esc(a.model_label)) : ''}</div>`);
+        ${dlgRow(dl)}${kv('Team', groups.length ? esc(groups.map((g) => g.name).join(', ')) : 'None')}${a.project ? kv('Project', esc(a.project)) : ''}${a.model_label ? kv('Model', esc(a.model_label)) : ''}</div>`);
       const AG_CARDS = [
         { key: 'role', col: 1, narrow: 4, html: card('user', 'Role', `<div id="sRoleView">
               <div class="ag-role-h"><b class="ag-role-name">${esc(a.role || 'No role yet')}</b><span class="tag txt">${adminRole ? 'Set by you' : a.role_source === 'agent' ? 'Stated by the agent' : 'Not set'}</span></div>
@@ -5385,6 +5470,8 @@ VIEWS.ses = async (arg) => {
         { key: 'tell', col: 2, narrow: 2, html: card('chat', 'Tell the agent', tellFormH(a, { id: 'agTell' }), info('The hub sees only what it gives the agent (role, playbooks, directives), not its local prompt, CLAUDE.md or skills.')) },
         { key: 'inbox', col: 2, narrow: 3, html: card('note', 'Inbox', d.notices.length ? `<ul class="nts" id="agInbox">${d.notices.map(noteRow).join('')}</ul>${d.notices.length > IN_N ? `<button type="button" class="btn ghost sm" data-inbox-all aria-expanded="false" aria-controls="agInbox">Show all ${d.notices.length}</button>` : ''}` : '<p class="faint">No notices yet.</p>',
           `${inPending ? `<span class="meta">${inPending} pending</span>` : ''}${info('What you and the hub sent this agent. Pending until the agent confirms it; opening this page confirms nothing.')}`) },
+        ...(ms ? [{ key: 'msgs', col: 2, narrow: 3.5, html: card('chat', 'Messages', agMsgH(ms.states, chats), info("Per conversation: messages not delivered yet, delivered, shown to the agent's session (the PC reports this) and read (the agent confirmed them).")) }] : []),
+        ...(use ? [{ key: 'usage', col: 2, narrow: 3.6, html: card('pulse', 'Usage · 30 days', cnUseH(use, 'pc'), info("Tokens, turns and cost at API list prices, summed over every PC that reported this agent's worker sessions. Admins only.")) }] : []),
         { key: 'status', col: 2, narrow: 1, html: status },
       ];
       return {
@@ -5430,7 +5517,7 @@ VIEWS.ses = async (arg) => {
     ...v, bar, a: v.a || moreBtn(),
     here: { label: a.label, meta: [d.live ? 'live' : 'idle', lc || a.last_seen_at ? 'seen ' + ago(lc ? lc.at : a.last_seen_at) : 'never seen'].filter(Boolean).join(' · ') },
     dbar: { title: a.label,
-      menu: [{ label: 'Rename', icon: 'edit', fn: () => run(() => admAgentSheet(a, reopen)) }, { label: 'Change owner', icon: 'user', fn: () => run(() => admOwnerSheet(a, d.owner, reopen)) }, sk.length ? { label: 'End logins', icon: 'out', fn: endLogins } : null, { label: 'Archive', icon: 'trash', bad: true, confirm: 'Tap again to archive', fn: archive }] },
+      menu: [{ label: 'Rename', icon: 'edit', fn: () => run(() => admAgentSheet(a, reopen)) }, { label: 'Change owner', icon: 'user', fn: () => run(() => admOwnerSheet(a, d.owner, reopen)) }, ...dlgActions(a, dl, reopen), sk.length ? { label: 'End logins', icon: 'out', fn: endLogins } : null, { label: 'Archive', icon: 'trash', bad: true, confirm: 'Tap again to archive', fn: archive }] },
     b: tabsH + v.b,
     after() {
       const on = (sel, fn) => { const e = $(sel); if (e) e.onclick = fn; };
@@ -5504,7 +5591,7 @@ function pcRow(p) {
     <span class="tm-c pc-tm meta" role="cell">${tm.length || '–'}</span>
     <span class="tm-c tm-when" role="cell" title="${p.last_seen_at ? 'Last seen ' + esc(dt(p.last_seen_at)) : 'Never seen'}">${pcSeen(p)}${ic('chev', 'chev only-m')}</span>
     <span class="tm-c tm-st pc-br" role="cell">${flag ? `<span class="only-m">${flag}</span>` : ''}<span class="only-d">${off ? pill('Suspended', 'bad') : pcBridgeH(p)}</span></span>
-    <span class="tm-c pc-ob" role="cell">${obPcH(p)}${obHttp(p) ? `<span class="tag" title="Claude Code on this PC reaches the hub over plain HTTP">HTTP</span>` : ''}</span>
+    <span class="tm-c pc-ob" role="cell">${obPcH(p)}</span>
     <span class="tm-c tm-open" role="cell" aria-hidden="true">${ic('chev', 'chev')}</span></div>`;
 }
 const pcHead = () => `<div class="tm-row pc-row tm-head only-d" role="row"><span role="columnheader"><span class="sr">Type</span></span><span role="columnheader">PC</span><span role="columnheader" class="pc-apps">App keys</span><span role="columnheader" class="pc-ag">Agents</span><span role="columnheader" class="pc-tm">Teams</span><span role="columnheader" class="tm-when">Last seen</span><span role="columnheader" class="pc-br">Bridge</span><span role="columnheader" class="pc-ob">Onboarding</span><span role="columnheader"><span class="sr">Open</span></span></div>`;
@@ -5514,28 +5601,98 @@ function pcList() {
   const L = S.pcs.filter((p) => test(p) && hit(p));
   return L.length ? `<div class="tm-tbl" role="table" aria-label="PCs">${pcHead()}${L.map(pcRow).join('')}</div>` : S.pcs.length && q ? noneQ('pc', 'No PCs match', 'pcQ') : none('pc', S.pcs.length ? 'No PCs match' : 'No PCs');
 }
-VIEWS.pcs = async () => ({
+/* Connector versions (docs/connector.md, "Connector versions"): the operator approves each version once; the PCs page lists them. */
+function pcVerCard(V) {
+  if (!V.length) return '';
+  const pend = V.filter((v) => v.status === 'pending').length;
+  return `<div class="pcard kd-card" id="pcVer">${kd(pend ? `Connector versions · ${pend} to approve` : 'Connector versions', info('A connector updates only to a version you approved. Approve each version once.'))}
+    ${V.map((v) => row({ lead: ic('hub'), title: raw(`<span class="mono">${esc(v.version)}</span>`), meta: `${v.pcs ? `Runs on ${plural(v.pcs, 'PC')}` : 'On no PC yet'} · first seen ${ago(v.first_seen_at)} ago`,
+      trail: v.status === 'pending' ? `<button type="button" class="btn sm" data-ver="refuse" data-v="${esc(v.version)}">Refuse</button><button type="button" class="btn sm ok" data-ver="approve" data-v="${esc(v.version)}">${ic('check')}Approve</button>` : pill(...CN_VER[v.status]) })).join('')}</div>`;
+}
+VIEWS.pcs = async () => { const V = S.me?.role === 'admin' ? ((await api('/connector/versions').catch(() => null))?.versions || []) : []; return {
   t: `${ic('pc')}PCs <span class="n">${S.pcs.length}</span>`,
   a: `<button class="btn sm" id="obSet" title="Onboarding limits and checkout repo hosts">${ic('sl')}Settings</button><button class="btn sm" data-go="app" title="Create an app key, for a new or an existing PC">${ic('plus')}New app key</button><button class="btn sm pri" id="obAdd" title="Add a PC and get the prompt that sets it up">${ic('plus')}Add PC</button>`,
   pmenu: [{ label: 'New app key', icon: 'app', fn: () => go('app') }, { label: 'Settings', icon: 'sl', fn: () => run(() => obSettings(null)) }],
   b: vtools(`<div class="seg" id="pcF" role="group" aria-label="Show PCs">${PCF_SEG.map(([v, l, fn]) => `<button type="button" data-f="${v}" class="${PCF.f === v ? 'on' : ''}">${l}<span class="only-d"> · ${S.pcs.filter(fn).length}</span></button>`).join('')}</div>
-    <div class="srch pc-q">${ic('search')}<input class="inp" id="pcQ" type="search" placeholder="Search PCs, agents, teams" aria-label="Search PCs" value="${esc(PCF.q)}" autocomplete="off"></div>`) + `<div class="pcard pc-card" id="pcL">${pcList()}</div><div class="actionbar only-m"><button type="button" class="btn pri" id="obAddM">${ic('plus')}Add PC</button></div>`,
+    <div class="srch pc-q">${ic('search')}<input class="inp" id="pcQ" type="search" placeholder="Search PCs, agents, teams" aria-label="Search PCs" value="${esc(PCF.q)}" autocomplete="off"></div>`) + `<div class="pcard pc-card" id="pcL">${pcList()}</div>${pcVerCard(V)}<div class="actionbar only-m"><button type="button" class="btn pri" id="obAddM">${ic('plus')}Add PC</button></div>`,
   after() {
     $('#pcF').onclick = (e) => { const b = e.target.closest('button'); if (!b) return; PCF.f = b.dataset.f; $$('#pcF button').forEach((x) => x.classList.toggle('on', x === b)); $('#pcL').innerHTML = pcList(); tipIcons($('#pcL')); };
     onSearch($('#pcQ'), (v) => { PCF.q = v; $('#pcL').innerHTML = pcList(); tipIcons($('#pcL')); });
     $$('#obAdd').forEach((b) => (b.onclick = () => obAddPc()));
     $$('#obSet').forEach((b) => (b.onclick = (e) => run(() => obSettings(e.currentTarget))));
     $('#obAddM').onclick = () => obAddPc();
+    const ver = (v, how) => run(async () => { await post(`/connector/versions/${encodeURIComponent(v)}/${how}`); toast(how === 'approve' ? `${v} approved` : `${v} refused`); openD('pcs', null, true); });
+    $$('#pcVer [data-ver]').forEach((b) => { if (b.dataset.ver === 'refuse') arm(b, () => ver(b.dataset.v, 'refuse'), 'Yes, refuse'); else b.onclick = () => ver(b.dataset.v, 'approve'); });
   },
-});
+}; };
 
 /* PC page: what the PC is and its bridge, its agents; its app keys, teams and folders; then the danger zone (desktop; the overflow on phones). */
+/* ---------- The connector on the PC page (docs/connector.md, docs/dashboard-ux.md "PC page"): what the connector reported
+   (Unknown until it does), the setup timeline with one next action and who takes it, the agents' states, the PC actions the
+   hub stores for the connector to fetch, Disconnect's states, version approval and the admin's usage view. ---------- */
+const CN_UNK = '<span class="kv-sub">Unknown</span>';
+const CN_CLIENT = { claude_code: 'Claude Code', claude_desktop: 'Claude Desktop', codex: 'Codex' };
+const CN_WHO = { you: 'You', pc_user: "The PC's user", agent: 'The agent' };
+const CN_AG = { waiting_for_approval: ['Waiting for approval', 'warn'], ready_to_open: ['Ready to open', 'info'], connected: ['Connected', 'ok'] };
+/* What the PC reports about its own agent (docs/connector.md): only its own facts, never the hub's states. */
+const CN_PCREP = { repair_connection: 'the PC reports it cannot reach the hub', chat_in_use: 'the PC reports its chat is in use', open: 'open on the PC' };
+const CN_DSC = { access_revoked: ['Access revoked', 'warn'], cleanup_pending: ['Cleanup pending', 'info'], removed: ['Removed', 'ok'], needs_attention: ['Needs attention', 'bad'] };
+const CN_DSC_OPEN = ['access_revoked', 'cleanup_pending'];
+const CN_STEP = { added: 'Added to the hub', paired: 'Connector paired', request_filed: 'Team request filed', approved: 'Request approved', keys_collected: 'Keys collected on the PC', agents_connected: 'Agents connected' };
+const CN_STEP_IC = { done: 'check', waiting: 'clock', failed: 'x', not_yet: 'more' };
+const CN_ACT = { check: 'Check this PC', restore: 'Restore', update: 'Update', disconnect: 'Disconnect' };
+const CN_AST = { queued: ['Waiting for the PC', 'idle'], fetched: ['Taken by the PC', 'info'], done: ['Done', 'ok'], failed: ['Failed', 'bad'], expired: ['Expired', 'idle'] };
+const CN_VER = { pending: ['Waiting for approval', 'warn'], approved: ['Approved', 'ok'], refused: ['Refused', 'bad'] };
+/* What Disconnect removes and keeps; the hub answers the same lists once it runs. */
+const CN_REMOVES = ["This hub's worker and transfers, stopped first", "This hub's keys on the PC", "This hub's folder registrations", "The connector's files for this hub"];
+const CN_KEEPS = ['Repositories and worktrees', 'Chat history', "The PC user's own settings", 'Other hubs on the PC'];
+const cnV = (v) => (v ? `<span class="mono">${esc(v)}</span>` : CN_UNK);
+const cnSw = (v) => (v === null || v === undefined ? CN_UNK : v ? 'On' : 'Off');
+/* Online (its service checked in within 90 s), Offline since a time, or Never connected. For the PC only, never an agent. */
+const cnStatusH = (c) => (c?.status === 'disconnected' ? pill('Disconnected', 'bad') : c?.status === 'suspended' ? pill('Access suspended', 'warn')
+  : !c || c.status === 'never' ? pill('Never connected', 'idle')
+  : c.online ? pill('Online', 'ok') : `${pill('Offline', 'bad')}<span class="kv-sub"> since ${esc(dt(c.last_check_in_at))}</span>`);
+const cnStepH = (s) => `<li class="cn-step ${esc(s.state)}"><span class="cn-dot" aria-hidden="true">${ic(CN_STEP_IC[s.state] || 'more')}</span><div class="cn-step-b">
+  <span class="cn-step-t">${esc(CN_STEP[s.step] || s.step)}${s.at ? `<span class="kv-sub"> · ${ago(s.at)} ago</span>` : ''}${s.state === 'failed' ? ' ' + pill('Failed', 'bad') : ''}</span>
+  ${s.reason ? `<span class="hint">${esc(s.reason)}</span>` : ''}
+  ${s.next ? `<span class="cn-next">Next: ${esc(s.next.action)} · <b>${esc(CN_WHO[s.next.who] || s.next.who)}</b></span>` : ''}</div></li>`;
+/* Disconnect this hub from this PC: what goes and what stays, then once more before it runs. */
+function pcDisconnectSheet(p, cn, done) {
+  const li = (L) => `<ul class="cn-list">${L.map((x) => `<li>${esc(x)}</li>`).join('')}</ul>`;
+  const sh = openSheet({ title: `Disconnect this hub from ${p.name}`, html: `<div class="sheet-form cn-dsc">
+    ${vnote(`<b>${esc(p.name)}</b> loses its access to this hub at once: its keys and its agents' sessions stop working. The connector then removes what this hub put on the PC the next time it calls in.`)}
+    ${cn?.remote_cleanup === false ? `<p class="hint">The PC's user turned remote cleanup off, so this only revokes access. Nothing is removed from the PC.</p>` : ''}
+    <div class="cn-lists"><div>${overline('Removed')}${li(CN_REMOVES)}</div><div>${overline('Kept')}${li(CN_KEEPS)}</div></div>
+    <div class="sheet-acts"><button type="button" class="btn lg" data-sheet-close>Cancel</button><button type="button" class="btn bad lg" id="cnDscGo">Disconnect</button></div></div>` });
+  arm($('#cnDscGo', sh), () => run(async () => { await post(`/pcs/${p.id}/disconnect`, {}); closeSheet(); toast('Access revoked'); done(); }), 'Yes, disconnect');
+}
+const cnNum = (n) => Number(n || 0).toLocaleString('en-US');
+const cnCost = (c) => (c === null ? CN_UNK : `$${c.toFixed(2)}<span class="kv-sub"> at API list prices</span>`);
+/* Usage of an agent (one line per PC) or of a team (one line per current member), admin only (docs/connector.md, "Usage
+   and cost"): tokens, turns and cost at API list prices; Unknown, never 0, until a PC reports, and a turn count or a cost
+   reads Unknown when a row has none (an older connector, a model with no list price). */
+function cnUseH(u, per) {
+  if (!u.reported) return `<p class="hint">Unknown: no PC reported usage for ${per === 'pc' ? 'this agent' : "this team's members"} in the last 30 days. Each PC's user turns usage reports on, on that PC.</p>`;
+  const name = (x) => (per === 'pc' ? x.pc_name : S.agents.find((a) => a.id === x.agent_id)?.label || x.agent_id);
+  return `${kv('Input tokens', cnNum(u.total.input_tokens))}${kv('Output tokens', cnNum(u.total.output_tokens))}${kv('Turns', u.total.turns === null ? CN_UNK : cnNum(u.total.turns))}${kv('Cost', cnCost(u.total.cost_usd))}
+    ${overline(per === 'pc' ? 'By PC' : 'By agent', u.by.length)}${u.by.map((x) => row({ one: true, lead: ic(per === 'pc' ? 'pc' : 'user'), title: name(x),
+      meta: `${cnNum(x.input_tokens)} in · ${cnNum(x.output_tokens)} out${x.turns === null ? '' : ` · ${plural(x.turns, 'turn')}`}`, trail: `<span>${x.cost_usd === null ? 'Unknown' : `$${x.cost_usd.toFixed(2)}`}</span>` })).join('')}`;
+}
+
 VIEWS.pc = async (id) => {
   const p = PC(id); if (!p) throw new Error('PC not found');
-  const obAll = ((await api('/onboarding').catch(() => null))?.requests || []).filter((q) => q.pc?.id === id), obE = S.obPc?.get(id)?.enrolment;
+  const adm = S.me?.role === 'admin';
+  const [obR, tl, acR, use] = await Promise.all([api('/onboarding').catch(() => null), api(`/pcs/${encodeURIComponent(id)}/setup-timeline`).catch(() => null),
+    api(`/pcs/${encodeURIComponent(id)}/actions`).catch(() => null), adm ? api(`/pcs/${encodeURIComponent(id)}/usage`).catch(() => null) : null]);
+  const obAll = (obR?.requests || []).filter((q) => q.pc?.id === id), obE = S.obPc?.get(id)?.enrolment;
+  const cn = p.connector || { status: 'never', clients: [] }, dsc = p.disconnect, A = acR?.actions || [];
+  const openK = new Set(A.filter((a) => a.state === 'queued' || a.state === 'fetched').map((a) => a.kind));
+  const dscOpen = !!dsc && CN_DSC_OPEN.includes(dsc.state) && !dsc.finished_at && !dsc.ended_at, dscGone = !!dsc && !dsc.ended_at;
   const on = p.status === 'active', apps = pcApps(p), ag = p.agents || [], tm = pcTeams(p), br = p.bridge || {}, su = SETUP[p.id], folders = p.folders || [];
   const re = async () => { await refresh(); openD('pc', id, true); };
-  const doSus = () => run(async () => { await post(`/pcs/${p.id}/${on ? 'suspend' : 'reactivate'}`); toast(on ? 'Suspended' : 'Resumed'); re(); });
+  const doSus = () => run(async () => { await post(`/pcs/${p.id}/${on ? 'suspend' : 'reactivate'}`); toast(on ? 'Access suspended' : 'Access resumed'); re(); });
+  const doAct = (kind, extra = {}) => run(async () => { await post(`/pcs/${p.id}/actions`, { kind, ...extra }); toast(kind === 'check' ? 'Check sent to the PC' : kind === 'restore' ? 'Restore sent to the PC' : 'Update sent to the PC'); re(); });
+  const doVer = (v, how) => run(async () => { await post(`/connector/versions/${encodeURIComponent(v)}/${how}`); toast(how === 'approve' ? `${v} approved` : `${v} refused`); re(); });
   const doSetup = () => run(async () => { const r = await post(`/pcs/${p.id}/setup`); SETUP[p.id] = { message: r.setup_message, exp: r.expires_at }; re(); });
   const doRename = (anchor) => pcRenameSheet(p, anchor, re);
   const seen = p.last_seen_at ? `last seen ${ago(p.last_seen_at)} ago` : 'never seen';
@@ -5546,16 +5703,58 @@ VIEWS.pc = async (id) => {
   const agTeams = (a) => S.teams.filter((t) => (t.agent_ids || []).includes(a.id)).map((t) => t.name);
   const idCard = `<div class="pcard kvc kd-card">${kd('This PC')}
     ${kv('Name', `<span class="mono" title="${esc(p.name)}">${esc(p.name)}</span>${tmgBtn('pcRename', 'Rename', 'Rename this PC', 'ghost')}`)}
-    ${kv('Status', `${pill(on ? 'Active' : 'Suspended', on ? 'ok' : 'bad')}<span class="kv-sub"> · ${seen}</span>`)}
+    ${kv('Status', `${pill(on ? 'Active' : dscGone ? 'Disconnected' : 'Access suspended', on ? 'ok' : 'bad')}<span class="kv-sub"> · ${seen}</span>`)}
     ${kv('Description', p.description ? `<span title="${esc(p.description)}">${esc(p.description)}</span>` : '<span class="kv-sub">None</span>')}
-    ${obE || obAll.length ? kv('Onboarding', `${obPcH(p)}${obHttp(p) ? ' ' + pill('Plain HTTP', 'warn') : ''}${obE?.status === 'unused' ? `<button type="button" class="btn ghost sm" id="pcCodeX" title="The prompt's code stops working; Re-enrol PC makes a new one">Revoke code</button>` : ''}`) : ''}
+    ${obE || obAll.length ? kv('Onboarding', `${obPcH(p)}${obE?.status === 'unused' ? `<button type="button" class="btn ghost sm" id="pcCodeX" title="The prompt's code stops working; Re-enrol PC makes a new one">Revoke code</button>` : ''}`) : ''}
     ${kv('Bridge', `${pcBridgeH(p)}${br.paired ? '' : `<button type="button" class="btn ghost sm" id="pcSetup" title="Create a one-hour setup message to paste into an app on this PC">Set up bridge</button>`}`)}
     ${br.os || br.version ? kv('System', esc([br.os, br.version && 'bridge ' + br.version].filter(Boolean).join(' · '))) : ''}
     ${kv('Added', dt(p.created_at))}
     ${su ? `<div class="pc-setup">${overline('Setup message')}${codeBox(su.message)}<span class="tag self-start">${ic('clock')} ${Math.max(0, Math.round((su.exp - Date.now()) / 60000))}m left</span></div>` : ''}</div>`;
-  const agCard = `<div class="pcard kd-card">${kd(`Agents · ${ag.length}`, on ? `${info('Agents that called from this PC in the last 7 days.')}<button type="button" class="btn sm" id="pcKey" title="A session key bound to ${esc(p.name)}">${ic('plus')}New session key</button>` : '<span class="meta">Called from this PC, last 7 days</span>')}
-    <div class="more-box" id="pcAg">${ag.map((a, i) => row({ lead: ic('bot'), title: a.label, meta: agTeams(a).join(' · ') || 'No team', trail: `<span>${ago(a.last_at)}</span>`, chev: true, cls: i >= AGN ? 'more-extra' : '', attrs: { 'data-ses': a.id, 'aria-label': `Open agent ${a.label}` } })).join('') || none('bot', 'No agents have called from this PC')}
-    ${ag.length > AGN ? row({ one: true, title: `Show all ${ag.length} agents`, group: true, expanded: false, attrs: { 'data-more': 'pcAg' } }) : ''}</div></div>`;
+  const tA = tl?.agents || [], inTl = new Set(tA.map((a) => a.agent_id).filter(Boolean));
+  const agAll = [...tA, ...ag.filter((a) => !inTl.has(a.id)).map((a) => ({ agent_id: a.id, label: a.label, team_id: null, state: 'connected', connected_at: a.connected_at, last_active_at: a.last_active_at ?? a.last_at, pc_reported: null }))];
+  const teamOf = (a) => (a.team_id ? S.teams.find((t) => t.id === a.team_id)?.name : null) || (a.agent_id ? agTeams({ id: a.agent_id }).join(' · ') : '') || 'No team';
+  const agRow = (a, i) => row({ lead: ic('bot'), title: a.label, meta: `${teamOf(a)}${CN_PCREP[a.pc_reported] ? ` · ${CN_PCREP[a.pc_reported]}` : ''}${a.next ? ` · Next: ${esc(a.next.action)} (${esc(CN_WHO[a.next.who] || a.next.who)})` : ''}`,
+    trail: `${pill(...(CN_AG[a.state] || [cap(a.state), 'idle']))}${a.state === 'connected' && a.last_active_at ? `<span>Last active ${ago(a.last_active_at)} ago</span>` : ''}`,
+    chev: !!a.agent_id, cls: i >= AGN ? 'more-extra' : '', attrs: a.agent_id ? { 'data-ses': a.agent_id, 'aria-label': `Open agent ${a.label}` } : {} });
+  const agCard = `<div class="pcard kd-card">${kd(`Agents · ${agAll.length}`, on ? `${info('Each agent of this PC: Waiting for approval, Waiting for its keys, Ready to open, or Connected after its first call from its own client.')}<button type="button" class="btn sm" id="pcKey" title="A session key bound to ${esc(p.name)}">${ic('plus')}New session key</button>` : '<span class="meta">Called from this PC, last 7 days</span>')}
+    <div class="more-box" id="pcAg">${agAll.map(agRow).join('') || none('bot', 'No agents on this PC yet')}
+    ${agAll.length > AGN ? row({ one: true, title: `Show all ${agAll.length} agents`, group: true, expanded: false, attrs: { 'data-more': 'pcAg' } }) : ''}</div></div>`;
+  // What the connector reported; every value reads Unknown until it does.
+  const verRow = cn.version && cn.version_status === 'pending' && adm ? `<div class="cn-ver">${ic('warn')}<span>Connector <b class="mono">${esc(cn.version)}</b> waits for your approval. Approve each version once.</span><span class="cn-ver-a"><button type="button" class="btn sm" data-ver="refuse" data-v="${esc(cn.version)}">Refuse</button><button type="button" class="btn sm ok" data-ver="approve" data-v="${esc(cn.version)}">${ic('check')}Approve</button></span></div>` : '';
+  const cnCard = `<div class="pcard kvc kd-card" id="pcConn">${kd('Connector', info("What this PC's connector last reported. Each value reads Unknown until it reports it."))}
+    ${kv('Status', cnStatusH(cn))}
+    ${kv('Connector', cn.version ? `${cnV(cn.version)}${cn.version_status ? ' ' + pill(...CN_VER[cn.version_status]) : ''}${cn.update_available ? `<span class="kv-sub"> · ${esc(cn.update_available)} approved</span>` : ''}` : CN_UNK)}
+    ${kv('Node', cnV(cn.node))}${kv('git', cnV(cn.git))}
+    ${kv('Clients', cn.clients?.length ? cn.clients.map((c) => `${esc(CN_CLIENT[c.client] || c.client)} ${cnV(c.version)}`).join(' · ') : CN_UNK)}
+    ${kv('Auto-update', cnSw(cn.auto_update))}${kv('Remote cleanup', cnSw(cn.remote_cleanup))}${verRow}</div>`;
+  const tlCard = tl ? `<div class="pcard kd-card">${kd('Setup', info('Each step of setting up this PC. A step that waits says what happens next and who does it.'))}<ol class="cn-tl">${tl.steps.map(cnStepH).join('')}</ol></div>` : '';
+  // PC actions: stored on the hub, fetched by the connector on its next call.
+  const lastChk = A.find((a) => a.kind === 'check'), doneChk = A.find((a) => a.kind === 'check' && a.state === 'done'), rc = p.restore_checkout, rcTeam = rc ? S.teams.find((t) => t.id === rc.team_id)?.name || 'a team' : '';
+  // Restore goes only to a destination the PC's user approved there; the connector reports them by id and label.
+  const dests = cn.destinations || [];
+  const chkRows = doneChk?.result?.checks?.length ? `<ul class="cn-checks">${doneChk.result.checks.map((c) => `<li class="${c.ok ? 'ok' : 'bad'}">${ic(c.ok ? 'check' : 'x')}<span><b>${esc(c.name)}</b>${c.detail ? ` · ${esc(c.detail)}` : ''}</span></li>`).join('')}</ul>` : '';
+  const stH = (a) => pill(...(CN_AST[a.state] || [cap(a.state), 'idle']));
+  const acCard = `<div class="pcard kd-card">${kd('Actions', info("The hub stores each action; the PC's connector fetches it on its next call and reports back."))}
+    ${row({ lead: ic('check'), title: 'Check this PC', meta: doneChk ? `Last result ${ago(doneChk.finished_at || doneChk.created_at)} ago` : lastChk ? `Asked ${ago(lastChk.created_at)} ago` : 'The connector checks its setup and reports back', trail: `${lastChk ? `<span class="hide-m">${stH(lastChk)}</span>` : ''}<button type="button" class="btn sm" id="pcCheck"${on && !openK.has('check') ? '' : ' disabled'}>Check this PC</button>` })}
+    ${chkRows}
+    ${rc ? row({ lead: ic('rot'), title: 'Restore', meta: `The restore of ${esc(rcTeam)} targets this PC${dests.length === 1 ? ` · to ${esc(dests[0].label)}` : ''}`,
+      trail: `${dests.length > 1 ? `<select id="pcDest" class="sel" aria-label="Destination on the PC">${dests.map((d) => `<option value="${esc(d.id)}">${esc(d.label)}</option>`).join('')}</select>` : ''}<button type="button" class="btn sm" id="pcRestore"${on && dests.length && !openK.has('restore') ? '' : ' disabled'}>Restore</button>` }) : ''}
+    ${rc && !dests.length ? `<p class="hint" id="pcDestNone">${cn.destinations ? "The PC's user has not approved a restore destination on this PC yet. Restore goes only to one they approved." : 'Unknown: the connector has not reported the destinations its user approved. Restore goes only to one of them.'}</p>` : ''}
+    ${cn.update_available && on ? row({ lead: ic('up'), title: `Update to ${cn.update_available}`, meta: 'An approved connector version', trail: `<button type="button" class="btn sm" id="pcUpdate"${openK.has('update') ? ' disabled' : ''}>Update</button>` }) : ''}
+    ${on ? row({ lead: ic('pause'), title: 'Suspend access', meta: 'Every login from this PC is refused until you resume it.', trail: '<button type="button" class="btn sm" id="pcSus">Suspend access</button>' })
+      : dscGone ? '' : row({ lead: ic('play'), title: 'Resume access', meta: 'Logins from this PC work again.', trail: '<button type="button" class="btn sm" id="pcSus">Resume access</button>' })}
+    ${A.filter((a) => a.kind !== 'disconnect').length ? `${overline('Recent')}${A.filter((a) => a.kind !== 'disconnect').slice(0, 4).map((a) => row({ one: true, title: CN_ACT[a.kind] || a.kind, trail: `${stH(a)}<span>${ago(a.created_at)} ago</span>` })).join('')}` : ''}</div>`;
+  const dscCard = dsc ? `<div class="pcard kvc kd-card" id="pcDsc">${kd('Disconnect')}
+    ${kv('State', pill(...(CN_DSC[dsc.state] || [cap(dsc.state), 'idle'])))}
+    ${kv('Started', esc(dt(dsc.created_at)))}
+    ${dsc.state === 'access_revoked' ? `<p class="hint">${dsc.cleanup_off ? 'Cleanup turned off on the PC: its access is revoked and nothing was removed from it.' : dsc.remote_cleanup === false ? "The PC's user turned remote cleanup off, so this only revokes access." : 'Waiting for the connector to fetch the cleanup.'}</p>` : ''}
+    ${dsc.ended_at ? `<p class="hint">Ended by Re-enrol PC ${ago(dsc.ended_at)} ago.</p>` : ''}
+    ${dsc.state === 'cleanup_pending' ? '<p class="hint">The connector took the cleanup and is removing this hub from the PC.</p>' : ''}
+    ${dsc.left?.length ? `${overline('Left on the PC')}<ul class="cn-list">${dsc.left.map((x) => `<li>${esc(x)}</li>`).join('')}</ul>` : ''}</div>` : '';
+  // Usage, admin only, priced at API list prices; Unknown until the PC's user turns reports on.
+  const useCard = use ? `<div class="pcard kvc kd-card" id="pcUse">${kd('Usage · 30 days', '<span class="meta">at API list prices</span>')}
+    ${use.opted_in !== true ? `<p class="hint">${use.opted_in === false ? "Unknown: the PC's user has not turned usage reports on." : 'Unknown: the connector has not reported usage.'}</p>`
+      : `${kv('Input tokens', cnNum(use.total.input_tokens))}${kv('Output tokens', cnNum(use.total.output_tokens))}${kv('Turns', use.total.turns === null ? CN_UNK : cnNum(use.total.turns))}${kv('Cost', cnCost(use.total.cost_usd))}`}</div>` : '';
   const appCard = `<div class="pcard kd-card">${kd(`App keys · ${apps.length}`, `<button type="button" class="btn sm" id="pcApp" title="Create an app key for ${esc(p.name)}">${ic('plus')}Add app key</button>`)}
     ${apps.map((a) => row({ lead: ic('app'), title: a.app_name || a.label, meta: raw(`<span class="tid">${esc(midTrunc(a.masked_key, 22))}</span> · ${esc(stOf(a)[1].toLowerCase())}${a.live_logins ? ` · ${a.live_logins} live` : ''} · ${a.last_used_at ? 'used ' + ago(a.last_used_at) + ' ago' : 'never used'}`), trail: '<span class="kd-go only-d">Open key</span>', chev: true, attrs: { 'data-key': a.id, 'aria-label': `Open app key ${a.app_name || a.label}` } })).join('') || none('app', 'No app keys')}</div>`;
   const tmCard = `<div class="pcard kd-card">${kd(`Teams · ${tm.length}`)}
@@ -5566,9 +5765,8 @@ VIEWS.pc = async (id) => {
         trail: f.status === 'proposed' ? `<button type="button" class="btn sm" data-fd="approve" data-path="${esc(f.path)}">Approve</button><button type="button" class="btn sm" data-fd="reject" data-path="${esc(f.path)}">Reject</button>` : `<span>${m[2]}</span>` }); }).join('')}</div>` : '';
   const dangerCard = `<div class="pcard kd-card kd-danger only-d">${kd('Danger zone')}
     ${dz('rot', 'Re-enrol PC', 'New prompt; this PC\'s keys are revoked now.', '<button type="button" class="btn sm" id="pcReEnrol">Re-enrol PC</button>')}
-    ${on ? dz('pause', 'Suspend PC', 'Every login from this PC is refused until you resume it.', '<button type="button" class="btn sm" id="pcSus">Suspend PC</button>')
-      : dz('play', 'Resume PC', 'Logins from this PC work again.', '<button type="button" class="btn sm" id="pcSus">Resume PC</button>')}</div>
-    <p class="hint only-m kd-hint">Re-enrol and ${on ? 'Suspend' : 'Resume'} PC are in ⋯.</p>`;
+    ${dscOpen ? '' : dz('out', 'Disconnect this hub from this PC', 'Revokes its access now; its connector then removes this hub from the PC. Repositories and chats stay.', '<button type="button" class="btn sm" id="pcDisc">Disconnect</button>')}</div>
+    <p class="hint only-m kd-hint">Re-enrol PC and Disconnect are in ⋯.</p>`;
   return {
     t: `${ic('pc')}<span class="mono">${esc(p.name)}</span>`,
     bar: `<h2 id="ctxTitle"><span class="dot lg ${on ? 'ok' : 'bad'}" title="${on ? 'Active' : 'Suspended'}"></span><span class="ctx-name mono">${esc(p.name)}</span></h2><span class="meta ctx-meta">${esc(p.description || '')}</span>`,
@@ -5576,18 +5774,24 @@ VIEWS.pc = async (id) => {
     dbar: { title: p.name, dot: on ? 'ok' : 'bad',
       menu: [{ label: 'Rename PC', icon: 'edit', fn: () => doRename() }, { label: 'Add app key', icon: 'plus', fn: () => openD('app', p.id) }, on ? { label: 'New session key', icon: 'key', fn: () => openD('new', p.id) } : null, br.paired ? null : { label: 'Set up bridge', icon: 'hub', fn: doSetup },
         { label: 'Re-enrol PC', icon: 'rot', bad: true, confirm: 'Tap again: revokes this PC\'s keys', fn: () => run(() => obReEnrol(p)) },
-        on ? { label: 'Suspend PC', icon: 'pause', bad: true, confirm: 'Tap again: logins from it refused', fn: doSus } : { label: 'Resume PC', icon: 'play', fn: doSus }] },
-    b: `<div class="kd-grid"><div class="kd-col">${idCard}${obCard}${agCard}</div><div class="kd-col">${appCard}${tmCard}${fdCard}${dangerCard}</div></div>`,
+        on ? { label: 'Suspend access', icon: 'pause', bad: true, confirm: 'Tap again: logins from it refused', fn: doSus } : dscGone ? null : { label: 'Resume access', icon: 'play', fn: doSus },
+        dscOpen ? null : { label: 'Disconnect this hub', icon: 'out', bad: true, fn: () => pcDisconnectSheet(p, cn, re) }] },
+    b: `<div class="kd-grid"><div class="kd-col">${dscCard}${cnCard}${tlCard}${agCard}${idCard}${obCard}</div><div class="kd-col">${acCard}${useCard}${appCard}${tmCard}${fdCard}${dangerCard}</div></div>`,
     after() {
       if ($('#pcSetup')) $('#pcSetup').onclick = doSetup;
       $('#pcRename').onclick = (e) => doRename(e.currentTarget);
       $('#pcApp').onclick = () => openD('app', p.id);
       if ($('#pcKey')) $('#pcKey').onclick = () => openD('new', p.id);
       if ($('#pcSus')) { if (on) arm($('#pcSus'), doSus, 'Yes, suspend'); else $('#pcSus').onclick = doSus; }
+      if ($('#pcCheck')) $('#pcCheck').onclick = () => doAct('check');
+      if ($('#pcRestore')) arm($('#pcRestore'), () => doAct('restore', { checkout_id: rc.id, destination_id: $('#pcDest')?.value || dests[0]?.id }), 'Yes, restore');
+      if ($('#pcUpdate')) arm($('#pcUpdate'), () => doAct('update', { version: cn.update_available }), `Yes, update to ${cn.update_available}`);
+      if ($('#pcDisc')) $('#pcDisc').onclick = () => pcDisconnectSheet(p, cn, re);
+      $$('[data-ver]').forEach((b) => { if (b.dataset.ver === 'refuse') arm(b, () => doVer(b.dataset.v, 'refuse'), 'Yes, refuse'); else b.onclick = () => doVer(b.dataset.v, 'approve'); });
       arm($('#pcReEnrol'), () => run(() => obReEnrol(p)), 'Yes, re-enrol');
       if ($('#pcCodeX')) arm($('#pcCodeX'), () => run(async () => { await api(`/pcs/${p.id}/enrolment`, 'DELETE'); toast('Code revoked'); re(); }), 'Yes, revoke');
       $$('[data-fd]').forEach((b) => (b.onclick = () => run(async () => { await post(`/pcs/${p.id}/folders/${encodeURIComponent(b.dataset.path)}/${b.dataset.fd}`); re(); })));
-      $$('[data-more]').forEach((b) => (b.onclick = () => { const box = $('#' + b.dataset.more), all = box.classList.toggle('all'); b.setAttribute('aria-expanded', String(all)); b.querySelector('.lrow-title').textContent = all ? 'Show fewer' : `Show all ${ag.length} agents`; }));
+      $$('[data-more]').forEach((b) => (b.onclick = () => { const box = $('#' + b.dataset.more), all = box.classList.toggle('all'); b.setAttribute('aria-expanded', String(all)); b.querySelector('.lrow-title').textContent = all ? 'Show fewer' : `Show all ${agAll.length} agents`; }));
     },
   };
 };
@@ -5610,7 +5814,6 @@ function obPcLabel(p) {
   return e.status === 'unused' ? [`Code not used · ${ago(e.created_at)}`, 'idle'] : e.status === 'issued' ? ['Enrolling', 'info'] : ['Enrolled', ''];
 }
 const obPcH = (p) => { const s = obPcLabel(p); return !s ? '<span class="faint">–</span>' : s[1] ? pill(s[0], s[1]) : `<span class="meta">${esc(s[0])}</span>`; };
-const obHttp = (p) => S.obPc?.get(p.id)?.mcp_transport === 'http';
 
 /* The hub address and CA fingerprint shown beside a PC's prompt. */
 const obHubFacts = (prompt) => { const fp = prompt?.hashes?.ca; return `<div class="ob-kv">${kv('Hub', `<span class="mono">${esc(S.me?.public_url || '')}</span>`)}${kv('CA SHA-256', fp ? `<span class="mono ob-fp" title="${esc(fp)}">${esc(midTrunc(fp, 28))}</span>` : '<span class="kv-sub">No CA certificate on the hub</span>')}</div>`; };
@@ -5697,7 +5900,10 @@ function joinSheet(anchor, start = 'choose') {
     err.textContent = '';
     made = await post('/pcs/add', { name });
     $('#jnN', sh).disabled = true; $$('#jnC button', sh).forEach((b) => { b.disabled = true; }); $('#jnGoRow', sh).hidden = true; out.hidden = false; back.hidden = true;
-    out.innerHTML = `${vnote(`Paste this into <b>${esc(jnAgent(client))}</b> on <b>${esc(made.pc.name)}</b>. The prompt works once and is not shown again; it does not expire, so revoke it from the PC's page if it goes astray.`)}
+    const exp = made.pairing?.code_expires_at;
+    out.innerHTML = `${made.download_url ? `<div class="jn-dl">${ic('dl')}<span>First install the connector on <b>${esc(made.pc.name)}</b>: <a href="${esc(made.download_url)}" target="_blank" rel="noopener noreferrer">Download it from GitHub Releases</a>.</span></div>` : ''}
+      ${made.pairing ? `<div class="jn-dl">${ic('pc')}<span>With the connector, enter on its pairing screen the code <code>${esc(made.pairing.code)}</code> and the hub check <b>${esc(made.pairing.ca_check)}</b>. The connector checks the hub's certificate against it before it sends the code.</span></div>` : ''}
+      ${vnote(`Paste this into <b>${esc(jnAgent(client))}</b> on <b>${esc(made.pc.name)}</b>. The pairing code in it works once and is not shown again; ${exp ? `it is valid for 30 minutes, until ${esc(new Date(exp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }))}. <b>Re-enrol PC</b> on the PC's page makes a new one if it runs out.` : "revoke it from the PC's page if it goes astray."}`)}
       <div class="sheet-acts jn-acts"><button type="button" class="btn lg" data-sheet-close>Done</button><button type="button" class="btn pri lg" id="jnCopy">${ic('copy')}Copy prompt</button></div>
       <div class="wait jn-st" id="jnSt" role="status" aria-live="polite"></div>
       <div class="code mono ob-prompt jn-prompt" id="jnP" tabindex="0" aria-label="Prompt"></div>
@@ -5767,6 +5973,186 @@ function owSetWire(sh) {
   enf.onclick = () => { const on = !enf.classList.contains('on'); enf.disabled = true;
     api('/agent-owners/enforcement', 'PUT', { on }).then((r) => { toast(r.enforcement ? 'Owner enforcement is on' : 'Owner enforcement is off'); redraw(r); }, (e) => { enf.disabled = false; fail(e); }); };
 }
+// ==== Delegate one agent to a collaborator ====
+/* Delegate (docs/dashboard-ux.md "Delegate an agent"): lend one agent to a member. It is a checkout of one agent
+   (docs/checkout.md), so the steps are the checkout's: the agent saves its work, the hub renders one prompt, the member
+   runs it, a new PC waits for the member to say it is theirs and then for the operator's approval, and the agent's first
+   call on the new key ends it. The agent works there in contributor mode. The operator's sheet shows status only: the
+   prompt is shown in the member's own console (Home), held in the page only (DLG.prompt), never stored. Text from the
+   member and the PC is escaped. */
+const DLG = { prompt: {}, timer: 0 };
+const DLG_R = {
+  list: (id) => `/delegations?agent_id=${encodeURIComponent(id)}`, preview: (id, u) => `/agents/${id}/delegate/preview?user_id=${encodeURIComponent(u)}`,
+  start: (id) => `/agents/${id}/delegate`, take: (c) => `/delegations/${c}/take-back`,
+  mine: () => '/me/delegations', mprompt: (c) => `/me/delegations/${c}/prompt`, mpc: (c) => `/me/delegations/${c}/pc`,
+  approve: (c) => `/checkouts/${c}/approve-pc`, cancel: (c) => `/checkouts/${c}/cancel`,
+};
+/* The hub's delegation object, in the shape this block draws. A released one is 'ended'. */
+const dlgNorm = (d) => (d ? { id: d.id, status: d.released_at ? 'ended' : d.status, step: d.step || '', member: { name: d.delegate?.label || d.delegate?.name || 'the member' },
+  pc: d.pc ? { name: d.pc.name, new: !!d.new_pc, enrolled: !!d.pc.id || !!d.enrolment, confirmed: !!d.pc_confirmed_at, approval: d.approval || null, enrolled_from: d.enrolment?.enrolled_from || d.enrolment?.ip || d.enrolment?.address || d.enrolment?.from || '', retire_default: !!d.new_pc } : null,
+  drafts: d.drafts_folder || null } : null);
+/* The agent's delegation (the standing one) and whether "Run on my PC" applies after a take-back. Null for someone who may not delegate. */
+const dlgGet = async (id) => {
+  const rows = (await api(DLG_R.list(id))).delegations || [], cur = rows.find((x) => !x.released_at), last = rows.find((x) => x.released_at);
+  return { delegation: dlgNorm(cur), can_delegate: true, run_here: !cur && ['taken_back', 'back_with_admin'].includes(last?.release_reason) };
+};
+const DLG_OPEN = ['collecting', 'ready', 'rendered', 'restoring'];
+const DLG_RANK = ['plan', 'default', 'acceptEdits', 'bypassPermissions'];
+/* The step in one sentence, from the delegation's own state: what is happening, and who acts next. */
+function dlgStep(c) {
+  const m = c.member?.name || 'the member', pc = c.pc?.name || 'their PC';
+  if (c.status === 'restored') return { tone: 'ok', head: `Running on ${pc} · delegated to ${m}`, text: '' };
+  if (c.status === 'collecting' || c.status === 'ready') return { tone: 'info', head: 'Saving work…', text: 'The agent is stopping at a safe point and writing its handout.' };
+  if (c.pc?.new && c.pc?.enrolled && !c.pc?.confirmed) return { tone: 'info', head: `Waiting for ${m} to confirm ${pc}`, text: `${esc(m)} is asked whether it is their PC. You can approve it once they say yes.` };
+  const waiting = c.pc?.new && c.pc?.approval === 'waiting' && c.pc?.enrolled && c.pc?.confirmed;
+  if (waiting) return { tone: 'warn', head: `Waiting for you to approve ${pc}`, text: `${esc(m)} confirmed it from ${esc(c.pc.enrolled_from || 'an unknown address')}. Approve only a PC they just set up.` };
+  if (c.status === 'restoring') return { tone: 'info', head: `Restored on ${pc}`, text: `${esc(m)} ran the prompt. The agent takes over when it starts on ${esc(pc)}.` };
+  return { tone: 'acc', head: `Waiting for ${m} to run the prompt`, text: `${esc(m)} sees it in their own console. ` + (c.pc?.new ? `They enrol ${esc(pc)}, confirm it, then it waits here for your approval.` : `It runs on ${esc(pc)} and starts the agent.`) };
+}
+/* The Status card's row, and the page's two actions. */
+const dlgRow = (dl) => {
+  const c = dl?.delegation; if (!c || !DLG_OPEN.concat('restored').includes(c.status)) return '';
+  const s = dlgStep(c);
+  return kv('Delegation', pill(s.head, s.tone)) + (s.text ? `<p class="hint dlg-note">${s.text}</p>` : '');
+};
+const dlgActions = (a, dl, reopen) => {
+  const c = dl?.delegation, open = !!c && DLG_OPEN.includes(c.status), away = !!c && c.status === 'restored';
+  if (!dl || dl.can_delegate === false) return [];
+  if (away) return [{ label: 'Take back', icon: 'rot', bad: true, fn: () => dlgTakeBack(a, c, dl, reopen) }];
+  const out = [{ label: open ? 'Open delegation' : 'Delegate', icon: 'hub', fn: () => run(() => dlgSheet(a, dl, reopen)) }];
+  if (dl.run_here) out.push({ label: 'Run on my PC', icon: 'pc', fn: () => openD('ses', a.id + '|keys') });
+  return out;
+};
+function dlgTakeBack(a, c, dl, reopen) {
+  const m = c.member?.name || 'the collaborator';
+  fbSheet({ title: 'Take back', tone: 'bad', label: 'Take back', dismiss: 'Keep delegated',
+    fields: `<p class="dlg-p">${esc(a.label)} runs on ${esc(c.pc?.name || 'a PC')} for ${esc(m)}.</p>`
+      + vnote(`The copy on ${esc(m)}'s PC stops working at once, and ${esc(m)} is told. Work there that is not merged or pushed is not recovered. To keep it, ask for the agent back first.`)
+      + (c.pc?.name ? `<label class="dlg-chk"><input type="checkbox" id="dlgRetire"${c.pc.retire_default !== false && c.pc.new ? ' checked' : ''}> <span>Also retire ${esc(c.pc.name)}</span></label><p class="hint">Its key stops working. Off when another agent still uses that PC.</p>` : '')
+      + `<p class="dlg-p">Afterwards you can run it on your own PC.</p>`,
+    onGo: async () => { await post(DLG_R.take(c.id), { retire_pc: !!$('#dlgRetire')?.checked }); toast('Taken back'); await refresh(); reopen(); } });
+}
+const dlgPerms = (cur) => { const top = Math.max(0, DLG_RANK.indexOf(cur)); return DLG_RANK.slice(0, top + 1); };
+/* The sheet's choices: the active members and the administrator's own active PCs. */
+const dlgLoad = async () => ({ members: ((await api('/users')).users || []).filter((x) => x.status === 'active' && x.id !== S.me?.id).map((x) => ({ id: x.id, name: (x.display_name || x.username) + (x.external ? ` · ${x.org || 'external'}` : '') })),
+  pcs: (S.pcs || []).filter((p) => p.status === 'active') });
+const dlgPrevHtml = (p) => {
+  if (!p) return '';
+  const none = !p.keeps_team_work && !p.reads_project;
+  return `<div class="dlg-loses">${p.sentence ? `<p class="hint">${esc(p.sentence)}</p>` : ''}${(p.loses || []).length ? `<span class="vlabel">What the agent loses while delegated</span><ul>${p.loses.map((x) => `<li>${esc(x)}</li>`).join('')}</ul>` : ''}
+    ${(p.repos || []).length ? `<p class="hint">The member's git login must be able to read: ${esc(p.repos.join(', '))}. Repository access is theirs to set up.</p>` : ''}
+    ${none ? vnote("The member's grant would leave the agent with no project. Give them a project first.") : ''}</div>`;
+};
+function dlgFormHtml(a, o) {
+  const ms = o.members || [], perms = dlgPerms('default'), pcs = o.pcs || [], hasPc = pcs.length > 0;
+  return `<div class="sheet-form dlg" id="dlgForm">
+    <p class="dlg-p">Lend <b>${esc(a.label)}</b> to a member. It keeps its name, team, tasks and history and works for them in contributor mode, on a PC of yours, until you take it back.</p>
+    ${ms.length ? selField('dlgMember', 'Member', ms.map((m) => [m.id, m.name]), ms[0].id) : vnote('No other member can run an agent yet. Add a member first.')}
+    <fieldset class="dlg-pc"><legend class="vlabel">PC</legend>
+      <div class="seg eq" role="group" aria-label="PC">
+        <button type="button" data-dlg-pc="have" class="${hasPc ? 'on' : ''}" aria-pressed="${hasPc}"${hasPc ? '' : ' disabled'}>Already set up</button>
+        <button type="button" data-dlg-pc="new" class="${hasPc ? '' : 'on'}" aria-pressed="${!hasPc}">New PC</button></div>
+      <div id="dlgPcHave"${hasPc ? '' : ' hidden'}>${dlgPcSel(pcs)}<p class="hint">One of your PCs. The member never owns or sees it.</p></div>
+      <div id="dlgPcNew"${hasPc ? ' hidden' : ''}><label class="fld"><span class="vlabel">Name of the new PC</span><input class="inp" id="dlgPcName" maxlength="60" autocomplete="off" placeholder="lena-laptop"></label>
+        <p class="hint">The member sets it up with the prompt and confirms it is theirs; you approve it before anything is released.</p></div>
+    </fieldset>
+    <div class="dlg-run"><span class="vlabel">Run with</span>
+      <div class="dlg-row">${selField('dlgProv', 'Provider', Object.entries(CO_PROV), 'claude_code')}
+        <label class="fld"><span class="vlabel">Model</span><input class="inp" id="dlgModel" maxlength="80" autocomplete="off" placeholder="Agent's own"></label></div>
+      ${selField('dlgPerm', 'Permissions', perms.map((p) => [p, CO_PERM[p]]), perms.at(-1))}
+      <p class="hint">Permissions can be lowered for the collaborator, never raised above the agent's own.</p></div>
+    <label class="fld"><span class="vlabel">Drafts folder (optional)</span><input class="inp" id="dlgDraft" maxlength="200" autocomplete="off" placeholder="/05 Papers/…/contrib/${esc(a.label)}/"></label>
+    <p class="hint">Leave it empty for none. A folder is an explicit, audited folder grant for the member that ends at Take back. In an implementation project there is no paper folder: give a folder or leave it none. The hub checks the path.</p>
+    <div id="dlgPrev"></div>
+    <span class="err" id="dlgErr" role="alert"></span>
+    <div class="sheet-acts"><button type="button" class="btn lg" data-sheet-close>Cancel</button><button type="button" class="btn pri lg" id="dlgGo"${ms.length ? '' : ' disabled'}>${ic('play')}Delegate</button></div></div>`;
+}
+const dlgPcSel = (pcs) => (pcs.length ? selField('dlgPc', 'Their PC', pcs.map((p) => [p.id, p.name]), pcs[0].id) : '<p class="hint">No enrolled PC.</p>');
+/* The sheet after Make the prompt: one body that follows the delegation's step. */
+function dlgProgressHtml(a, c) {
+  const s = dlgStep(c), newPc = !!c.pc?.new, ready = newPc && c.pc.approval === 'waiting' && !!c.pc?.enrolled && !!c.pc?.confirmed;
+  const approve = ready ? `<button type="button" class="btn pri lg" id="dlgOk">${ic('check')}Approve ${esc(c.pc.name)}</button>` : '';
+  return `<div class="sheet-form dlg" id="dlgProg">
+    <div class="dlg-step ${esc(s.tone)}"><b>${esc(s.head)}</b>${s.text ? `<p>${s.text}</p>` : ''}</div>
+    ${c.status === 'collecting' || c.status === 'ready' ? `<div class="sbar dlg-bar" aria-hidden="true"><i class="rest"></i></div>` : ''}
+    ${c.status === 'rendered' ? vnote('The prompt is in ' + esc(c.member?.name || 'the member') + "'s own console, behind their sign-in. Its code is good for 30 minutes from when they first open it.") : ''}
+    ${kv('Member', esc(c.member?.name || '—'))}${kv('PC', esc(`${c.pc?.name || '—'}${newPc ? ' · new' : ''}`))}
+    ${approve}
+    <span class="err" id="dlgErr" role="alert"></span>
+    <div class="sheet-acts"><button type="button" class="btn lg bad-t" id="dlgCancel">Cancel delegation</button><button type="button" class="btn pri lg" data-sheet-close>Done</button></div></div>`;
+}
+/* Open the sheet: the form, or the open delegation where it is. The poll runs while the sheet is up. */
+async function dlgSheet(a, dl, reopen) {
+  const sh = openSheet({ title: `Delegate ${a.label}`, cls: 'form dlg-sheet', html: '<div id="dlgBody"></div>' });
+  const body = $('#dlgBody', sh);
+  const err = (m) => { const e = $('#dlgErr', sh); if (e) e.textContent = m || ''; };
+  const fail = (e) => err(e?.message || 'Something went wrong. Try again.');
+  const draw = (c) => {
+    body.innerHTML = dlgProgressHtml(a, c);
+    $('#dlgOk', sh)?.addEventListener('click', () => run(async () => { try { await post(DLG_R.approve(c.id)); await tick(); } catch (e) { fail(e); } }));
+    $('#dlgCancel', sh)?.addEventListener('click', () => run(async () => { try { await post(DLG_R.cancel(c.id), {}); toast('Delegation cancelled'); closeSheet(); await refresh(); reopen(); } catch (e) { fail(e); } }));
+  };
+  const tick = async () => {
+    const r = await dlgGet(a.id).catch(() => null); if (!r || !sh.isConnected) return stop();
+    const c = r.delegation; if (!c || !DLG_OPEN.includes(c.status)) { stop(); if (c?.status === 'restored') { closeSheet(); await refresh(); reopen(); } return; }
+    draw(c);
+  };
+  const stop = () => { clearInterval(DLG.timer); DLG.timer = 0; };
+  const start = () => { stop(); DLG.timer = setInterval(() => { if (!sh.isConnected) stop(); else tick(); }, 3000); };
+  const c0 = dl.delegation;
+  if (c0 && DLG_OPEN.includes(c0.status)) { draw(c0); start(); return; }
+  const o = await dlgLoad().catch((e) => { body.innerHTML = vnote(esc(e?.message || 'Could not load the members.')); return null; }); if (!o) return;
+  body.innerHTML = dlgFormHtml(a, o);
+  const have = () => !$('#dlgPcHave', sh).hidden;
+  const setPc = (k) => { $('#dlgPcHave', sh).hidden = k !== 'have'; $('#dlgPcNew', sh).hidden = k !== 'new';
+    $$('[data-dlg-pc]', sh).forEach((b) => { b.classList.toggle('on', b.dataset.dlgPc === k); b.setAttribute('aria-pressed', String(b.dataset.dlgPc === k)); }); };
+  $$('[data-dlg-pc]', sh).forEach((b) => b.addEventListener('click', () => { if (!b.disabled) setPc(b.dataset.dlgPc); }));
+  let seq = 0;
+  const preview = async () => { const u = $('#dlgMember', sh)?.value; if (!u) return; const n = ++seq; $('#dlgPrev', sh).innerHTML = '';
+    const r = await api(DLG_R.preview(a.id, u)).catch((e) => { if (n === seq) fail(e); return null; }); if (!r || n !== seq || !sh.isConnected) return;
+    err(''); $('#dlgPrev', sh).innerHTML = dlgPrevHtml(r.preview); if (!r.preview.keeps_team_work && !r.preview.reads_project) $('#dlgGo', sh).disabled = true; else $('#dlgGo', sh).disabled = false; };
+  $('#dlgMember', sh)?.addEventListener('change', preview); preview();
+  $('#dlgGo', sh)?.addEventListener('click', () => run(async () => {
+    err('');
+    const b = { user_id: $('#dlgMember', sh).value, drafts_folder: $('#dlgDraft', sh).value.trim() || null,
+      agents: { [a.id]: { provider: $('#dlgProv', sh).value, model: $('#dlgModel', sh).value.trim() || null, permissions: $('#dlgPerm', sh).value } } };
+    if (have()) { b.machine_id = $('#dlgPc', sh)?.value; b.new_pc_name = null; } else { b.new_pc_name = $('#dlgPcName', sh).value.trim(); b.machine_id = null; if (!b.new_pc_name) { err('Name the new PC.'); $('#dlgPcName', sh).setAttribute('aria-invalid', 'true'); $('#dlgPcName', sh).focus(); return; } }
+    try { await post(DLG_R.start(a.id), b); } catch (e) { fail(e); return; }
+    await refresh(); const r = await dlgGet(a.id); if (r.delegation) draw(r.delegation); start();
+  }));
+}
+
+/* The member's side (Home): "Run <agent> for <operator>". The prompt is made when they first open it, shown only here (behind
+   their sign-in), with Copy; its code is good for 30 minutes from that first open. A new PC asks them "Is this your PC?"
+   before the administrator can approve it. After a take-back the row says so. */
+const dlgSeen = () => { try { return JSON.parse(localStorage.getItem('dlgSeen') || '[]'); } catch { return []; } };
+const dlgDismiss = (id) => { try { localStorage.setItem('dlgSeen', JSON.stringify([...dlgSeen(), id].slice(-50))); } catch { /* the row comes back on reload, which is harmless */ } };
+const DLG_END = ['taken_back', 'ended'];
+const dlgMine = async () => { const seen = dlgSeen(); return ((await api(DLG_R.mine()).catch(() => null))?.delegations || []).filter((d) => !(DLG_END.includes(d.state) && seen.includes(d.id))); };
+function dlgMemberHtml(list) {
+  return (list || []).map((d) => {
+    const who = esc(d.for || 'The administrator'), ag = esc(d.agent || 'an agent'), pc = esc(d.pc || 'a PC'), P = DLG.prompt[d.id], text = d.text ? `<p class="hint">${esc(d.text)}</p>` : '';
+    let tone = 'acc', body = '';
+    if (DLG_END.includes(d.state)) { tone = 'idle'; body = `<b>${d.state === 'taken_back' ? `${who} took ${ag} back` : esc(d.text || `${ag} is no longer lent to you`)}</b><div class="dlg-mu-acts"><button type="button" class="btn" data-dlg-mu="dismiss" data-id="${esc(d.id)}">Dismiss</button></div>`; }
+    else if (d.state === 'running') { tone = 'ok'; body = `<b>You run ${ag} for ${who}${d.pc ? ` on ${pc}` : ''}</b><p class="hint">It works in contributor mode: it reads, adds and edits its own items, and proposes changes to other people's work.</p>`; }
+    else if (d.confirm_pc) { tone = 'warn'; body = `<b>Is this your PC: ${esc(d.confirm_pc.name)}, ${esc(d.confirm_pc.enrolled_from || 'unknown address')}?</b><p class="hint">Say yes only if you just set it up. ${who} approves it after you.</p>
+      <div class="dlg-mu-acts"><button type="button" class="btn pri" data-dlg-mu="yes" data-id="${esc(d.id)}">${ic('check')}Yes, it is mine</button><button type="button" class="btn" data-dlg-mu="no" data-id="${esc(d.id)}">No</button></div>`; }
+    else if (P) body = `<b>Run ${ag} for ${who}</b><p class="co-warn">${ic('warn')}<span>${P.code ? '<b>It holds a one-time code</b>, good for 30 minutes. ' : '<b>It holds no key</b>, but it names your hub and folders. '}Paste it into Claude Code on ${pc}. Do not share it.</span></p>
+      <div class="co-prompt">${codeBox(P.text, true)}</div><p class="hint">${P.code ? 'Code' : 'Prompt'}: <span data-co-cd="${esc(P.expires_at || '')}">${coLeft(P.expires_at)}</span></p>`;
+    else if (d.prompt_available) body = `<b>Run ${ag} for ${who}</b>${text}<div class="dlg-mu-acts"><button type="button" class="btn pri" data-dlg-mu="show" data-id="${esc(d.id)}">${ic('play')}Show the prompt</button></div><p class="hint">Its code is good for 30 minutes from when you open it.</p>`;
+    else { tone = 'info'; body = `<b>Run ${ag} for ${who}</b>${text}`; }
+    return `<div class="card dlg-mu ${esc(tone)}">${body}</div>`;
+  }).join('');
+}
+async function dlgMemberAct(kind, id) {
+  try {
+    if (kind === 'show') { const r = await post(DLG_R.mprompt(id), {}), at = r.code_expires_at ?? r.expires_at; DLG.prompt[id] = { text: r.prompt?.text ?? r.prompt ?? '', code: !!r.code_expires_at, expires_at: typeof at === 'string' ? Date.parse(at) : at ?? null }; }
+    else if (kind === 'dismiss') dlgDismiss(id);
+    else await post(DLG_R.mpc(id), { mine: kind === 'yes' });
+  } catch (e) { toast(e.message, true); }
+  await muDraw(false);
+}
+
 // ==== Settings: Checkout ====
 /* Settings → Checkout (docs/checkout.md §8): the repo host allowlist. A handout's repo URL must name one of these hosts, exactly;
    it is checked when the agent writes the handout and again when the prompt is made. Saved with the rest of the sheet. */
@@ -5831,8 +6217,9 @@ const obSetupRows = (s, project) => {
     ${(s.filed || []).filter((x) => x.owner).map((x) => kv(x.key, `${esc(x.title)}<span class="kv-sub"> · ${esc(x.owner)}</span>`)).join('')}`;
 };
 const obSetBtn = (s) => `<button type="button" class="btn sm" data-ob-src="${esc(s.request_id)}">${ic('edit')}Set the source</button>`;
-/* A Done setup asks nothing: the team page shows it as one row on the Blueprint card (obSetupLine), not as this card. */
-const obSetupFolds = (s, bps) => s?.state === 'done' && !!bps;
+/* The team page has no Setup card while the Blueprint card shows: the setup is one row there (obSetupLine), in every state.
+   A setup with no request id, or a team with no Blueprint to show, keeps the card. */
+const obSetupFolds = (s, bps) => !!s?.request_id && !!bps;
 const obSetupCard = (s, project) => {
   if (!s) return '';
   const [lbl, tone] = OB_SETUP[s.state] || [cap(String(s.state)), 'idle'];
@@ -5842,16 +6229,34 @@ const obSetupCard = (s, project) => {
     ${obSetupRows(s, project)}
     ${OB_NOACCESS}</div>`;
 };
-/* The Blueprint card's Setup row, for a Done setup: the source in short; it opens the details (obSetupSheet). */
+/* The Blueprint card's Setup row: "<state> · <the source, in short>" (Source not asked alone), the value in the state's
+   tone (warn-t, bad-t; info and Done plain), the full source in its tooltip. Source not asked and Coordinator derives
+   stand alone: the state already names the source. It opens the details (obSetupSheet). */
 const OB_SETUP_OF = new Map(); // request id -> [setup, project id], for the row's sheet
-const obSrcShort = (s) => (!s ? 'not asked' : s.from === 'existing' && s.ref ? s.ref : (OB_SRC[s.from] || s.from).toLowerCase());
-const obSetupLine = (s, project) => { OB_SETUP_OF.set(s.request_id, [s, project]); return bpLine('Setup', s.request_id, `Done · source: ${obSrcShort(s.source)}`, null, 'data-ob-setup'); };
-function obSetupSheet(b) {
-  const [s, project] = OB_SETUP_OF.get(b.dataset.obSetup) || [];
+// A long path is cut in code to its last part ("…/Project Tracking.md"); a CSS ellipsis from the left reorders slashes.
+const obPathShort = (p) => { const s = String(p), m = s.length > 24 && /[/\\]([^/\\]+[/\\]?)$/.exec(s); return m && m.index > 0 ? `…/${m[1]}` : s; };
+const obSrcShort = (s) => (!s ? '' : s.from === 'existing' && s.ref ? obPathShort(s.ref) : (OB_SRC[s.from] || s.from).toLowerCase());
+const OB_TONE_T = { warn: 'warn-t', bad: 'bad-t' };
+const obSetupLine = (s, project) => {
+  OB_SETUP_OF.set(s.request_id, [s, project]);
+  const [lbl, tone] = OB_SETUP[s.state] || [cap(String(s.state)), 'idle'], src = s.state === 'not_asked' || s.state === 'coordinator_derives' ? '' : obSrcShort(s.source); // the state already says it
+  return bpLine('Setup', s.request_id, src ? `${lbl} · ${src}` : lbl, null, 'data-ob-setup', { title: `Setup · ${obSrcText(s.source)}`, cls: OB_TONE_T[tone] || '' });
+};
+/* The setup details, from the Blueprint card's row or from a Needs you "Setup:" row (data-ob-team: read from the team). */
+async function obSetupSheet(b) {
+  let [s, project] = OB_SETUP_OF.get(b.dataset.obSetup) || [];
+  if (!s && b.dataset.obTeam) {
+    const r = await api('/teams/' + encodeURIComponent(b.dataset.obTeam)).catch((e) => { if (e.status !== 401) toast(e.message, true); return null; });
+    if (!r?.setup) return;
+    [s, project] = [r.setup, r.team?.project_id ?? null]; OB_SETUP_OF.set(s.request_id, [s, project]);
+  }
   if (!s) return;
+  const [lbl, tone] = OB_SETUP[s.state] || [cap(String(s.state)), 'idle'];
+  // Set the source in every state but a proposal in review, and only with a project: the card's rule.
+  const setB = project != null && s.state !== 'in_review' ? `<div class="sheet-acts">${obSetBtn(s)}</div>` : '';
   // Read, not picked from: the centred dialog, wide enough for the source and the next step in full.
   openSheet({ title: 'Setup', cls: 'kvc',
-    html: `<div class="ob-setup-d"><div class="ob-setup-st">${pill('Done', 'ok')}</div>${obSetupRows(s, project)}${OB_NOACCESS}${project ? `<div class="sheet-acts">${obSetBtn(s)}</div>` : ''}</div>` });
+    html: `<div class="ob-setup-d"><div class="ob-setup-st">${pill(lbl, tone)}</div>${obSetupRows(s, project)}${OB_NOACCESS}${setB}</div>` });
 }
 /* Set the source (docs/onboarding.md#setup-progress): the request's three choices and checks; the operator's answer, kept beside the approved request. */
 function obSourceSheet(b) {
@@ -6038,7 +6443,7 @@ VIEWS.ob = async (id) => {
       <details class="ob-prm"><summary>${ic('chev')}The user's words</summary><p>${esc(body.prompt)}</p></details>
       <p class="hint">A proposal from a model on that PC. Nothing in it reaches a team until you approve.</p></div>`;
   const facts = `<div class="pcard kvc kd-card">${kd('Request')}
-      ${kv('From', `<a href="#" data-pc="${esc(R.pc?.id || '')}" class="mono">${esc(pcName)}</a>${R.pc?.mcp_transport === 'http' ? ' ' + pill('Plain HTTP', 'warn') : ''}`)}
+      ${kv('From', `<a href="#" data-pc="${esc(R.pc?.id || '')}" class="mono">${esc(pcName)}</a>`)}
       ${kv('State', `${obPill(R.state)}<span class="kv-sub"> · ${ago(R.waiting_since)}</span>`)}
       ${kv('Filed', dt(R.filed_at))}${kv('Kind', vaultAg ? 'Vault agent, no team' : newTeam ? 'New team' : `${rec ? 'Recruit' : 'More agents'} for ${esc(R.team_name || '')}`)}
       ${R.operator_note ? kv('Your note', esc(R.operator_note)) : ''}
@@ -6142,7 +6547,7 @@ VIEWS.ob = async (id) => {
       ${twRow('Coordinator may review', 'For small teams without a separate reviewer.', switchBtn('Coordinator may review', !!E.team.coordinator_reviews, 'data-ts="coordinator_reviews"'))}
       ${twRow('Lease', 'Minutes a task stays with its assignee without a heartbeat.', numIn('lease_minutes', E.team.lease_minutes ?? 30, 1, 1440, 'Lease minutes'))}
       ${twRow('Stall after', 'Optional: minutes without progress before a member is flagged.', numIn('stall_minutes', E.team.stall_minutes, 1, 1440, 'Stall minutes'))}
-      ${twRow('Review rounds', 'Most review rounds per task.', numIn('max_review_rounds', E.team.max_review_rounds ?? 3, 1, 20, 'Review rounds'))}
+      ${twRow('Review rounds', 'Most review rounds per task. The request for changes that reaches it blocks the task and tells you.', numIn('max_review_rounds', E.team.max_review_rounds ?? 3, 1, 20, 'Review rounds'))}
       ${twRow('Start when set up', 'Starts the team once the PC has collected its keys.', switchBtn('Start when set up', true, 'id="obStart"'))}</div>`)
     : sec('Team', `${kv('Team', `<a href="#" data-team="${esc(R.team_id || body.team?.id || '')}">${esc(R.team_name || 'Team')}</a>`)}${kv('Project', esc(E.project?.name))}<p class="hint">The team keeps its own settings; new agents join it at pickup.</p>`);
   return {
@@ -6624,12 +7029,16 @@ const bpArg = (pid, tab = '', team = '', status = '', filt = '') => [pid, tab, t
 const bpItemArg = (pid, key) => `${pid}|${key}`;
 /* Research names sections 2 and 4 by what they hold (docs/blueprint.md §9). */
 const bpTabName = (tab, kind) => (kind === 'research' && tab === '2' ? 'Lines & Hypotheses' : kind === 'research' && tab === '4' ? 'Papers & Planning' : BP_TABS[+tab][1]);
-/* A section's filters are the route's fifth part (docs/blueprint.md §9): q, kind, sel and at (the page's opaque cursor). */
-const bpFilt = (s) => { const p = new URLSearchParams(s || ''), g = (k) => (p.get(k) || '').slice(0, 200); return { q: g('q'), kind: g('kind'), sel: ['open', 'live', 'dropped', 'month', 'all', 'decide', 'risk'].includes(g('sel')) ? g('sel') : '', at: g('at') }; };
+/* A section's filters are the route's fifth part (docs/blueprint.md §9): q, kind, sel and at (the page's opaque cursor), and the
+   list analysis's f (dimension:value pairs), gap, x (the count table's rows*columns, or - when it is hidden), g (group) and s (sort).
+   Only closed words are kept; anything else is dropped here, and the hub lists what no longer applies (ignored). */
+const BP_FK = /^[a-z]{2,12}:[A-Za-z0-9._\/-]{1,80}$/;
+const bpFilt = (s) => { const p = new URLSearchParams(s || ''), g = (k) => (p.get(k) || '').slice(0, 200); return { q: g('q'), kind: g('kind'), sel: ['open', 'live', 'dropped', 'month', 'all', 'decide', 'risk'].includes(g('sel')) ? g('sel') : '', at: g('at'), f: [...new Set((p.get('f') || '').split(',').filter((v) => BP_FK.test(v)))].slice(0, 40), gap: /^[a-z_]{2,30}$/.test(g('gap')) ? g('gap') : '', x: g('x') === '-' || /^[a-z]{2,12}\*[a-z]{2,12}$/.test(g('x')) ? g('x') : '', g: /^[a-z]{2,12}$/.test(g('g')) ? g('g') : '', s: ['risk', 'old', 'name'].includes(g('s')) ? g('s') : '' }; };
 // The sections whose items have an open state and no summary view (planning, risks; not the ones a team shares from the project, which only the grouped cards merge: 1, 3, 6): they open on Open.
 // Section 2 opens on its summary view (bpSummary); with any filter, including an explicit Open, it is the hub's paged list.
 const BP_OPEN_TABS = ['4', '5'];
-const bpFiltStr = (f) => { const p = new URLSearchParams(); for (const k of ['q', 'kind', 'sel', 'at']) if (f[k]) p.set(k, f[k]); return p.toString(); };
+/* Readable: commas and colons stay as they are (f=area:AAA,milestone:M1). */
+const bpFiltStr = (f) => { const e = (v) => encodeURIComponent(v).replace(/%2C/g, ',').replace(/%3A/g, ':'), L = []; for (const k of ['q', 'kind', 'sel', 'f', 'gap', 'x', 'g', 's', 'at']) { const v = k === 'f' ? (f.f || []).join(',') : f[k]; if (v) L.push(`${k}=${e(v)}`); } return L.join('&'); };
 /* The kinds a section's Filters sheet offers, in the section's own words: Requirements open FRs and NFRs, Acceptance ACs. */
 const BP_KIND_PL = { summary: 'Summary', stakeholder: 'Stakeholders', module: 'Modules', fr: 'FRs', nfr: 'NFRs', ac: 'ACs', line: 'Lines', hypothesis: 'Hypotheses', question: 'Questions', finding: 'Findings',
   architecture: 'Architecture', decision: 'Decisions', milestone: 'Milestones', release: 'Releases', paper: 'Papers', claim: 'Claims', report: 'Status reports', risk: 'Risks', issue: 'Issues', term: 'Terms', reference: 'References' };
@@ -6650,11 +7059,243 @@ const bpBrowseRow = (pid, it, showTeam) => row({ ...bpTM(it.key, it.title, [BP_K
   trail: bpSt(it.status), chev: true, cls: ['dropped', 'cut', 'waived', 'superseded', 'rejected', 'cancelled'].includes(it.status) ? 'dropped' : '' });
 /* Pager (docs/design-guidelines.md §5): the range, then Previous and Next, each disabled at its end; hidden when one page holds it all. */
 const bpPager = (r, goAt) => (r.prev_cursor === null && r.next_cursor === null ? ''
-  : `<nav class="pager" aria-label="Pages"><span class="pager-r" aria-live="polite">${r.range.from}–${r.range.to} of ${r.total}</span><span class="pager-b">`
+  : `<nav class="pager" aria-label="Pages"><span class="pager-r" aria-live="polite">${r.range.from}–${r.range.to} of ${r.rows ?? r.total}</span><span class="pager-b">`
     + `<button type="button" class="btn" data-bp-page="${esc(r.prev_cursor === null ? '' : goAt(r.prev_cursor))}"${r.prev_cursor === null ? ' disabled' : ''}>Previous</button>`
     + `<button type="button" class="btn" data-bp-page="${esc(r.next_cursor === null ? '' : goAt(r.next_cursor))}"${r.next_cursor === null ? ' disabled' : ''}>Next</button></span></nav>`);
+/* List analysis (docs/dashboard-ux.md, List analysis): the paged lists of sections 2, 4 and 5 add Gaps, the Where you are line,
+   the count table and the grouped list. Every count is the hub's (GET …/browse facets, gaps, cross, groups); none is added up here. */
+const BP_LA_TABS = ['2', '4', '5'];
+/* Save view: the saved-views code sets BP_VIEW.save; the button shows only then. It gets {pid, section, team, state, anchor}, state
+   being {q, kind, sel, status, f, gap, x, g, s}; bpViewArg(pid, section, team, state) is the route that opens a saved view. */
+const BP_VIEW = { save: null };
+const bpViewArg = (pid, section, team, st) => bpArg(pid, section, team, st.status || '', bpFiltStr({ ...st, at: '' }));
+/* Saved views (docs/dashboard-ux.md, List analysis): kept in the hub per user (GET and PUT /api/blueprint/views), never in the
+   browser, so they follow the user to another device. A view is filters only: the search, kind, selection, gap, table axes, group
+   and sort. It never holds a count or an item, and its name never enters a link. Every change reads the hub's list first and
+   writes the whole list back, so a view saved on another device is not lost. */
+const BP_V_MAX = 20;
+const bpVAll = async () => (await api('/blueprint/views')).views || [];
+const bpVPut = async (fn) => (await api('/blueprint/views', 'PUT', { views: fn(await bpVAll()) })).views || [];
+/* The list's state as the hub stores it: empty values are left out. */
+function bpVState(team, st) {
+  const o = {};
+  if (st.q) o.q = st.q;
+  if (st.kind) o.kind = st.kind;
+  if (st.sel) o.sel = st.sel;
+  if (st.status) o.status = st.status;
+  if (team) o.team = team;
+  if (st.f?.length) o.f = [...st.f];
+  if (st.gap) o.gap = st.gap;
+  if (st.x) o.x = st.x;
+  if (st.g) o.g = st.g;
+  if (st.s) o.s = st.s;
+  return o;
+}
+/* A stored view as the route's state, and the route that opens it. The link starts with v=1, its version. */
+const bpVSt = (v) => ({ q: v.q || '', kind: v.kind || '', sel: v.sel || '', status: v.status || '', f: v.f || [], gap: v.gap || '', x: v.x || '', g: v.g || '', s: v.s || '' });
+const bpVArg = (v) => bpViewArg(v.project_id, String(v.section), v.team || '', bpVSt(v));
+const bpVLink = (v) => `${location.origin}${location.pathname}${routeOf('blueprint', bpArg(v.project_id, String(v.section), v.team || '', v.status || '', ['v=1', bpFiltStr({ ...bpVSt(v), at: '' })].filter(Boolean).join('&')))}`;
+const bpVCount = (v) => (v.q ? 1 : 0) + (v.kind ? 1 : 0) + (v.sel ? 1 : 0) + (v.team ? 1 : 0) + (v.gap ? 1 : 0) + (v.f || []).length;
+const bpVHere = (vs, pid, section) => vs.filter((v) => v.project_id === pid && String(v.section) === String(section));
+function bpVRows(vs) {
+  if (!vs.length) return '<p class="meta bpv-none">No saved views here yet. Set the filters you want, then choose Save view.</p>';
+  return `<div class="sheet-list">${vs.map((v) => `<div class="bpv" data-bpv-id="${esc(v.id)}">`
+    + row({ one: false, as: 'button', title: v.name, meta: [v.pinned ? 'Pinned' : '', plural(bpVCount(v), 'filter')].filter(Boolean).join(' · '), attrs: { 'data-bpv-open': v.id } })
+    + `<span class="bpv-acts"><button type="button" class="ibtn${v.pinned ? ' on' : ''}" data-bpv-pin="${esc(v.id)}" aria-pressed="${!!v.pinned}" aria-label="${v.pinned ? 'Unpin' : 'Pin'} ${esc(v.name)}">${ic('pin')}</button>`
+    + `<button type="button" class="ibtn" data-bpv-link="${esc(v.id)}" aria-label="Copy the link to ${esc(v.name)}">${ic('link')}</button>`
+    + `<button type="button" class="ibtn" data-bpv-del="${esc(v.id)}" aria-label="Delete ${esc(v.name)}">${ic('trash')}</button></span></div>`).join('')}</div>`;
+}
+/* Views: this screen's saved views, to open, pin, copy as a link or delete. */
+function bpViewsSheet({ pid, section, anchor }) {
+  const sh = openSheet({ title: 'Saved views', anchor, cls: 'form', html: '<div id="bpvBody"><p class="meta">Loading</p></div>' });
+  let all = [];
+  const paint = () => { const b = $('#bpvBody', sh); if (b) b.innerHTML = bpVRows(bpVHere(all, pid, section)); };
+  const mine = (id) => all.find((v) => v.id === id);
+  run(async () => { all = await bpVAll(); paint(); });
+  sh.addEventListener('click', (e) => {
+    const t = e.target.closest('[data-bpv-open],[data-bpv-pin],[data-bpv-link],[data-bpv-del]');
+    if (!t) return;
+    const id = t.dataset.bpvOpen || t.dataset.bpvPin || t.dataset.bpvLink || t.dataset.bpvDel, v = mine(id);
+    if (!v) return;
+    if (t.dataset.bpvOpen) { openD('blueprint', bpVArg(v)); return; }
+    if (t.dataset.bpvLink) { copy(bpVLink(v)); return; }
+    if (t.dataset.bpvPin) run(async () => { all = await bpVPut((cur) => cur.map((x) => (x.id === id ? { ...x, pinned: !x.pinned } : x))); paint(); });
+    else run(async () => { all = await bpVPut((cur) => cur.filter((x) => x.id !== id)); paint(); toast(`Deleted ${v.name}`); });
+  });
+  return sh;
+}
+/* Save view: a name, and whether to pin it. Saving under a name this screen already uses replaces that view. */
+function bpViewSave({ pid, section, team, state, anchor }) {
+  fbSheet({ title: 'Save view', anchor, label: 'Save',
+    fields: '<label class="fld"><span class="vlabel">Name</span><input class="inp" id="bpVn" maxlength="60" data-req autocomplete="off"></label>'
+      + '<label class="co-chk"><input type="checkbox" id="bpVp"><span>Pin it, to list it first</span></label>'
+      + '<p class="meta">A view keeps this list\'s filters, gap, table, group and sort. It never keeps counts or items, so whoever opens it sees their own.</p>',
+    onGo: async (sh) => {
+      const name = fbVal(sh, 'bpVn');
+      if (!name) return ['Name the view.', 'bpVn'];
+      const pinned = $('#bpVp', sh).checked, body = bpVState(team, state);
+      const cur = await bpVAll(), same = bpVHere(cur, pid, section).find((v) => v.name.toLowerCase() === name.toLowerCase());
+      if (!same && bpVHere(cur, pid, section).length >= BP_V_MAX) return `You keep ${BP_V_MAX} views on this screen. Delete one to save another.`;
+      const view = { project_id: pid, section: +section, name, pinned, ...body, ...(same ? { id: same.id } : {}) };
+      await bpVPut((c) => (same ? c.map((v) => (v.id === same.id ? view : v)) : [...c, view]));
+      toast(same ? `Replaced ${name}` : `Saved ${name}`);
+      return '';
+    } });
+}
+BP_VIEW.save = bpViewSave;
+const BP_SORTS = [['', 'Blueprint order'], ['risk', 'Most at risk first'], ['old', 'Oldest change first'], ['name', 'Name']];
+/* The count table a screen opens on: its natural pair of dimensions (dashboard-ux.md, Where it shows). */
+function bpLaX(tab, kind) {
+  const k = String(kind || '');
+  if (tab === '2') return ['fr', 'nfr', 'fr,nfr', 'nfr,fr'].includes(k) ? 'area*milestone' : k === 'ac' ? 'area*status' : k === 'hypothesis' ? 'line*status' : k === 'finding' ? 'line*confidence' : k ? 'status*team' : 'kind*status';
+  if (tab === '4') return k === 'milestone' ? 'phase*status' : k ? 'status*team' : 'kind*status';
+  if (tab === '5') return k === 'issue' ? 'impact*status' : 'likelihood*impact';
+  return '';
+}
+/* One dimension's filter set to one value, or cleared (v null); status and kind keep their own places in the route. */
+function bpLaSet(f, st, d, v) {
+  const nf = { ...f, f: f.f.filter((x) => !x.startsWith(d + ':')), at: '' };
+  if (d === 'status') return [nf, v ?? ''];
+  if (d === 'kind') return [{ ...nf, kind: v ?? '' }, st];
+  if (v != null) nf.f = [...nf.f, `${d}:${v}`];
+  return [nf, st];
+}
+const bpLaIs = (f, st, d, v) => (d === 'status' ? st === v : d === 'kind' ? f.kind === v : f.f.filter((x) => x.startsWith(d + ':')).length === 1 && f.f.includes(`${d}:${v}`));
+const bpLaFacet = (lst, d) => (lst.facets || []).find((x) => x.id === d);
+const bpLaDim = (lst, d) => bpLaFacet(lst, d)?.label || cap(d);
+const bpLaLabel = (lst, d, v) => bpLaFacet(lst, d)?.values.find((x) => x.value === v)?.label || (d === 'status' ? bpLabel(v) : d === 'kind' ? v.split(',').map((k) => BP_KIND_PL[k] || k).join(' and ') : v);
+const bpLaAny = (f) => !!(f.f.length || f.gap);
+/* "Showing 18 of 112": the count table's header while the table is drawn, else the start of Where you are (one live region either way). */
+const bpLaShow = (lst) => `<span class="bp-show" tabindex="-1" aria-live="polite">Showing <b>${lst.total}</b> of ${lst.of ?? lst.counts.all}</span>`;
+/* The count table is offered with two dimensions in view, and drawn unless the link folds it (x=-) or the hub sent no cross. */
+const bpLaDims = (lst) => (lst.facets || []).filter((x) => x.values.length);
+const bpLaXOn = (lst, f) => bpLaDims(lst).length >= 2 && f.x !== '-' && !!lst.cross;
+/* Where you are: "Showing 18 of 112" (in the table's header while it is drawn), each active filter as a removable chip, Clear,
+   Save view and, while the table is folded, Show count table; then what no longer applies. */
+function bpLaWhere(lst, f, st, goF) {
+  const chip = (label, to, name, gap) => `<button type="button" class="bp-chip on${gap ? ' gap' : ''}" data-bpv="${esc(to)}" data-bp-fk="where" aria-label="Remove ${esc(name)}">${esc(label)}${ic('x')}</button>`;
+  const L = [];
+  if (st) L.push(chip(bpLaLabel(lst, 'status', st), goF(...bpLaSet(f, st, 'status', null)), `the filter Status: ${bpLabel(st)}`));
+  if (f.kind) L.push(chip(bpLaLabel(lst, 'kind', f.kind), goF({ ...f, kind: '', at: '' }, st), 'the kind filter'));
+  for (const x of f.f) {
+    const d = x.slice(0, x.indexOf(':')), v = x.slice(x.indexOf(':') + 1), l = `${bpLaDim(lst, d)}: ${bpLaLabel(lst, d, v)}`;
+    if (!(lst.ignored || []).includes(x)) L.push(chip(l, goF({ ...f, f: f.f.filter((y) => y !== x), at: '' }, st), `the filter ${l}`));
+  }
+  const gp = f.gap && (lst.gaps || []).find((g) => g.id === f.gap);
+  if (gp) L.push(chip(`Gap: ${gp.label}`, goF({ ...f, gap: '', at: '' }, st), `the gap ${gp.label}`, true));
+  // A default count table the screen has no dimensions for is not the viewer's filter: only what they set counts as no longer applying.
+  const ig = (lst.ignored || []).filter((x) => !x.startsWith('x:') || f.x), hid = lst.hidden?.[0]?.reason;
+  const save = BP_VIEW.save ? '<button type="button" class="btn ghost sm" data-bp-save>Save view</button>' : '';
+  const dims = bpLaDims(lst), xOn = bpLaXOn(lst, f);
+  const show = dims.length >= 2 && !xOn ? `<button type="button" class="btn sm" data-bpv="${esc(goF({ ...f, x: f.x === '-' ? '' : `${dims[0].id}*${dims[1].id}`, at: '' }, st))}" data-bp-fk="xshow" aria-expanded="false">Show count table</button>` : '';
+  const row = `${xOn ? '' : bpLaShow(lst)}${L.join('')}`
+    + `${L.length ? `<button type="button" class="btn ghost sm" data-bpv="${esc(goF({ ...f, f: [], gap: '', kind: '', at: '' }, ''))}" data-bp-fk="where">Clear</button>` : ''}${save}${show}`;
+  return (row ? `<div class="bp-where">${row}</div>` : '')
+    + (ig.length ? `<p class="meta bp-la-note">${ig.length === 1 ? '1 filter no longer applies' : `${ig.length} filters no longer apply`}</p>` : '')
+    + (hid ? `<p class="meta bp-la-note">${esc(hid)}</p>` : '');
+}
+/* The count table (tablet and desktop): rows × columns, each cell the hub's count; a click sets both filters, a second click
+   clears them. On a phone the same counts are a list: one row per row value, opening to its column values. Its header is
+   "Showing N of M" (the one bp-show, moved here from Where you are while the table is open, at every width) with Hide count
+   table; the Rows and Columns selects and their swap are the second line. From 1180 px it sits right of the list (.bp-la)
+   when it fits there. Folded or not offered, it is not drawn: Show count table is then on the Where you are line.
+   v is how bpXFit fitted it: turned (rows and columns swapped) and/or keep (columns kept, the rest folded into Other). */
+function bpLaTable(lst, f, st, goF, v = {}) {
+  if (!bpLaXOn(lst, f)) return '';
+  const dims = bpLaDims(lst).map((x) => [x.id, x.label]), c = v.turn ? bpXTurn(lst.cross) : lst.cross;
+  const fo = v.keep && v.keep < c.col_values.length ? bpXFold(c, v.keep) : null, J = fo ? fo.K : c.col_values.map((_, j) => j);
+  const opt = (sel) => dims.map(([d, l]) => `<option value="${esc(d)}"${d === sel ? ' selected' : ''}>${esc(l)}</option>`).join('');
+  const rl = bpLaDim(lst, c.rows), cl = bpLaDim(lst, c.cols), gapOn = !!lst.filters?.gap;
+  const to = (i, j) => {
+    const a = c.row_values[i].value, b = c.col_values[j].value, on = bpLaIs(f, st, c.rows, a) && bpLaIs(f, st, c.cols, b);
+    const [f1, s1] = bpLaSet(f, st, c.rows, on ? null : a), [f2, s2] = bpLaSet(f1, s1, c.cols, on ? null : b);
+    return [goF(f2, s2), on];
+  };
+  const name = (i, j) => `${rl} ${c.row_values[i].label}, ${cl} ${c.col_values[j].label}: ${plural(c.cells[i][j], 'item')}`;
+  const cell = (i, j) => { const [r, on] = to(i, j), n = c.cells[i][j];
+    return `<td><button type="button" class="bp-xc${on ? ' on' : ''}${n && gapOn ? ' gap' : ''}${n ? '' : ' zero'}" data-bpv="${esc(r)}" data-bp-fk="x:${esc(c.row_values[i].value)}|${esc(c.col_values[j].value)}" aria-pressed="${on}" aria-label="${esc(name(i, j))}">${n}</button></td>`; };
+  // Other: the row's folded columns summed; a click opens them in a popover, each filtering as its own cell would.
+  const oName = fo && fo.O.map((j) => c.col_values[j].label).join(', ');
+  const other = (i) => { const n = fo.sums[i], rv = c.row_values[i];
+    if (!n) return '<td><span class="bp-xc zero">0</span></td>';
+    const rows = fo.O.filter((j) => c.cells[i][j]).map((j) => { const [r, on] = to(i, j);
+      return `<button type="button" class="lrow bp-xmc${on ? ' on' : ''}" data-sheet-close data-bpv="${esc(r)}" data-bp-fk="xo:${esc(rv.value)}" aria-pressed="${on}" aria-label="${esc(name(i, j))}"><span class="lrow-main"><span class="lrow-title">${esc(c.col_values[j].label)}</span></span><span class="lrow-trail"><span class="meta">${c.cells[i][j]}</span></span></button>`; }).join('');
+    return `<td><button type="button" class="bp-xc bp-xoc${fo.O.some((j) => to(i, j)[1]) ? ' on' : ''}" data-bp-other="${i}" data-bp-fk="xo:${esc(rv.value)}" aria-haspopup="dialog" aria-label="${esc(`${rl} ${rv.label}, other ${cl}: ${n} in ${oName}`)}">${n}</button>`
+      + `<template data-bp-xo="${i}" data-title="${esc(`${rv.label} · Other ${cl}`)}">${rows}</template></td>`; };
+  const desk = `<div class="bp-xw only-d"><table class="bp-xt"><thead><tr><th scope="col"><span class="sr">${esc(rl)} by ${esc(cl)}</span></th>${J.map((j) => `<th scope="col" title="${esc(c.col_values[j].label)}"><span>${esc(c.col_values[j].label)}</span></th>`).join('')}`
+    + `${fo ? `<th scope="col" class="bp-xo" title="${esc(oName)}"><span>Other · ${fo.O.length}</span></th>` : ''}<th scope="col" class="bp-xtot">Total</th></tr></thead>`
+    + `<tbody>${c.row_values.map((rv, i) => `<tr><th scope="row" title="${esc(rv.label)}"><span>${esc(rv.label)}</span></th>${J.map((j) => cell(i, j)).join('')}${fo ? other(i) : ''}<td class="bp-xtot">${c.totals?.[i] ?? ''}</td></tr>`).join('')}</tbody></table></div>`;
+  const phone = `<div class="bp-xm only-m">${c.row_values.map((rv, i) => `<details class="bp-xmr"${bpLaIs(f, st, c.rows, rv.value) ? ' open' : ''}><summary class="lrow"><span class="lrow-main"><span class="lrow-title">${esc(rv.label)}</span></span><span class="lrow-trail"><span class="meta">${c.totals?.[i] ?? ''}</span>${ic('chev', 'chev')}</span></summary>`
+    + `${c.col_values.map((w, j) => (c.cells[i][j] ? (() => { const [r, on] = to(i, j); return `<button type="button" class="lrow bp-xmc${on ? ' on' : ''}" data-bpv="${esc(r)}" data-bp-fk="x:${esc(rv.value)}|${esc(w.value)}" aria-pressed="${on}" aria-label="${esc(name(i, j))}"><span class="lrow-main"><span class="lrow-title">${esc(cl)}: ${esc(w.label)}</span></span><span class="lrow-trail"><span class="meta">${c.cells[i][j]}</span></span></button>`; })() : '')).join('')}</details>`).join('')}</div>`;
+  return `<div class="bp-c bp-xcard" data-bp-x="${esc(`${c.rows}*${c.cols}`)}"><div class="bp-xh">${bpLaShow(lst)}<button type="button" class="ibtn bp-xhide" data-bpv="${esc(goF({ ...f, x: '-', at: '' }, st))}" data-bp-fk="xshow" aria-expanded="true" aria-label="Hide count table" title="Hide count table">${ic('x')}</button></div>`
+    + `<div class="bp-xsel"><label class="bp-fl"><span class="vlabel">Rows</span><select class="sel sm" data-bp-xa="r" aria-label="Rows">${opt(c.rows)}</select></label>`
+    + `<button type="button" class="ibtn bp-xswap" data-bpv="${esc(goF({ ...f, x: `${c.cols}*${c.rows}`, at: '' }, st))}" data-bp-fk="xswap" aria-label="Swap rows and columns" title="Swap rows and columns">${ic('swap')}</button>`
+    + `<label class="bp-fl"><span class="vlabel">Columns</span><select class="sel sm" data-bp-xa="c" aria-label="Columns">${opt(c.cols)}</select></label>`
+    + `${v.turn ? '<span class="meta bp-xturn">Turned to fit</span>' : ''}</div>`
+    + `${c.multi ? '<p class="meta bp-la-note">An item can sit in more than one column</p>' : ''}${desk}${phone}</div>`;
+}
+/* Turned: the same counts with rows and columns swapped; the hub's column totals become the row totals. */
+const bpXTurn = (c) => ({ ...c, rows: c.cols, cols: c.rows, row_values: c.col_values, col_values: c.row_values,
+  cells: c.col_values.map((_, j) => c.row_values.map((__, i) => c.cells[i][j])), totals: c.col_totals, col_totals: c.totals });
+/* Folded: the k columns with the largest totals stay, in their order (K); the rest (O) become one Other column whose cells are
+   the row's sums over them. */
+function bpXFold(c, k) {
+  const idx = c.col_values.map((_, j) => j), tot = idx.map((j) => c.col_totals?.[j] ?? c.cells.reduce((s, r) => s + r[j], 0));
+  const keep = new Set([...idx].sort((a, b) => tot[b] - tot[a] || a - b).slice(0, k));
+  const O = idx.filter((j) => !keep.has(j));
+  return { K: idx.filter((j) => keep.has(j)), O, sums: c.cells.map((r) => O.reduce((s, j) => s + r[j], 0)) };
+}
+/* No scroll inside the count table, ever (Bruno). After each draw, and when the window's width changes: the table sits right
+   of the list only when it fits there, else full width above it (.full); too wide even then, it is turned when turning
+   makes it fit (unless the viewer chose these axes at this width), else the orientation with fewer columns folds its
+   smallest columns into Other until it fits. It is sticky (.pin) only beside the list and only when the whole card fits in
+   the window; otherwise it scrolls with the page. draw(v) is bpLaTable for this view; bind rewires the Rows and Columns. */
+let BP_XU = null; // { x, w }: the axes the viewer picked (swap, Rows, Columns), kept until the window's width changes
+let BP_XFIT = null;
+const bpXFits = (la) => { const w = $('.bp-xw', la); return !w || !w.offsetParent || w.firstElementChild.offsetWidth <= w.clientWidth; };
+function bpXFit(la, c, draw, bind) {
+  if (!la?.isConnected || !c) return null;
+  const a = document.activeElement, fk = a && la.contains(a) && $('.bp-xcard', la)?.contains(a) ? a.dataset.bpFk : '';
+  const put = (v) => { $('.bp-xcard', la).outerHTML = draw(v); return v; };
+  if (BP_XU && BP_XU.w !== innerWidth) BP_XU = null;
+  // Each try is beside the list first, then full width.
+  const at = (v) => { put(v); la.classList.remove('full'); if (bpXFits(la)) return true; la.classList.add('full'); return bpXFits(la); };
+  let v = {};
+  if (!at(v)) {
+    const mine = BP_XU?.x === `${c.rows}*${c.cols}`;
+    // Turned when that fits; else whichever way has fewer columns (more values down the rows) is the one folded.
+    if (!mine && at({ turn: true })) v = { turn: true };
+    else {
+      if (!mine && c.col_values.length > c.row_values.length) v = { turn: true };
+      let ok = false;
+      for (let k = (v.turn ? c.row_values.length : c.col_values.length) - 1; k >= 1 && !ok; k--) ok = at(v = { ...v, keep: k });
+    }
+  }
+  const card = $('.bp-xcard', la), bar = parseFloat(getComputedStyle(la).getPropertyValue('--h-bar')) || 56;
+  card.classList.toggle('pin', !la.classList.contains('full') && card.offsetHeight <= innerHeight - bar - 32);
+  bind?.();
+  if (fk) $$('[data-bp-fk]', la).find((el) => el.dataset.bpFk === fk && el.offsetParent)?.focus({ preventScroll: true });
+  return v;
+}
+let BP_XFIT_W = innerWidth, BP_XFIT_T = 0;
+addEventListener('resize', () => { if (innerWidth === BP_XFIT_W) return; BP_XFIT_W = innerWidth; clearTimeout(BP_XFIT_T); BP_XFIT_T = setTimeout(() => BP_XFIT?.(), 120); });
+/* The list, grouped or not: Group by and Sort, then the rows with a group row ("M2 · 14") where a group starts. */
+function bpLaList(pid, lst, f, team) {
+  const dims = (lst.facets || []).filter((x) => x.values.length);
+  const head = `<div class="bp-lh">${overline(lst.groups ? 'Grouped' : 'Matching', lst.total)}<span class="bp-xsel"><label class="bp-fl"><span class="vlabel">Group by</span><select class="sel sm" data-bp-g aria-label="Group by"><option value="">No grouping</option>${dims.map((x) => `<option value="${esc(x.id)}"${x.id === lst.filters?.g ? ' selected' : ''}>${esc(x.label)}</option>`).join('')}</select></label>`
+    + `<label class="bp-fl"><span class="vlabel">Sort</span><select class="sel sm" data-bp-s aria-label="Sort">${BP_SORTS.map(([v, l]) => `<option value="${v}"${v === (lst.filters?.s || '') ? ' selected' : ''}>${esc(l)}</option>`).join('')}</select></label></span></div>`;
+  let prev = null, rows = '';
+  for (const it of lst.items) {
+    if (lst.groups && it.group !== prev) { const g = lst.groups.find((x) => x.value === it.group); rows += `<div class="bp-grp">${overline(g?.label || it.group, g?.count)}</div>`; prev = it.group; }
+    rows += bpBrowseRow(pid, it, !team);
+  }
+  return `<div class="bp-c bp-flist">${head}${rows}</div>`;
+}
 /* Who wrote an item: "agent:<id>" reads as the agent's name, "operator:…" as you, "import:<path>" as the source file. */
-const bpWho = (s) => { const [k, ...r] = String(s || '').split(':'), id = r.join(':'); return k === 'agent' ? agLabel(id) : k === 'operator' ? 'You' : k === 'import' ? `Import${id ? ' · ' + id : ''}` : k === 'system' ? 'Hub' : id || k || '—'; };
+const bpWho = (s, o) => bpWho0(s) + viaTxt(o);
+const bpWho0 = (s) => { const [k, ...r] = String(s || '').split(':'), id = r.join(':'); return k === 'agent' ? agLabel(id) : k === 'operator' ? 'You' : k === 'import' ? `Import${id ? ' · ' + id : ''}` : k === 'system' ? 'Hub' : id || k || '—'; };
+/* A revision names the signed-in user who made an operator change (a decider or another admin); your own reads as You. The member an agent works for follows as "via". */
+const bpWhoRev = (r) => (r.actor_name && r.actor_name !== S.me?.username ? r.actor_name : bpWho0(r.actor)) + viaTxt(r);
 const bpPct = (v, of) => (of ? Math.round((100 * v) / of) : 0);
 const bpTrack = (v, of, label, tone = '') => `<span class="pb bp-track${tone ? ' ' + tone : ''}" role="progressbar" aria-label="${esc(label)}" aria-valuenow="${bpPct(v, of)}" aria-valuemin="0" aria-valuemax="100"><i style="width:${bpPct(v, of)}%"></i></span>`;
 /* A progress line: label, bar, "31 of 48 verified". */
@@ -6699,17 +7340,18 @@ const bpWaitLine = (w, failN = 0, openProps = 0) => {
 /* The team page's Blueprint card (docs/blueprint.md §9, docs/dashboard-ux.md): exactly one, for the team's part of its project, and the
    Blueprint's index. The header ("BLUEPRINT · RESEARCH" over the project name) opens the first section; one line says what waits for the
    operator; then one list, a 44 px row per part, each opening its section: a bar where something is measured, otherwise a count. */
-const bpLine = (label, go, val, bar = null, attr = 'data-bpv') => `<button type="button" class="lrow one bp-li" ${attr}="${esc(go)}" title="Open ${esc(label)}">`
+const bpLine = (label, go, val, bar = null, attr = 'data-bpv', o = {}) => `<button type="button" class="lrow one bp-li" ${attr}="${esc(go)}" title="${esc(o.title || `Open ${label}`)}">`
   + `<span class="lrow-main"><span class="lrow-title">${esc(label)}</span></span>`
   + (bar ? bpTrack(bar.done, bar.total, label, bar.tone || '').replace('class="pb bp-track', 'class="pb bp-track bp-li-bar') : '<span class="bp-li-bar" aria-hidden="true"></span>')
-  + `<span class="lrow-trail"><span class="bp-li-v">${esc(val)}</span>${ic('chev', 'chev')}</span></button>`;
+  + `<span class="lrow-trail"><span class="bp-li-v${o.cls ? ' ' + o.cls : ''}">${esc(val)}</span>${ic('chev', 'chev')}</span></button>`;
 /* "Medium / High"; an unset likelihood or impact is left out, not shown as a dash. */
 const bpRiskMeta = (r) => (r.likelihood && r.impact ? `${cap(r.likelihood)} / ${cap(r.impact)}` : r.impact ? `${cap(r.impact)} impact` : r.likelihood ? `${cap(r.likelihood)} likelihood` : 'Not rated');
 function bpCard(t, id, s, ny = null) {
   if (!s) return sec('Blueprint', none('graph', t.project_id ? 'The Blueprint could not be read' : 'This team has no project yet'));
-  const pid = s.project.id, to = (tab) => bpArg(pid, tab, id), n = s.needs_me || {}, b = s.measures?.bars || {};
+  // The card's scope is the route's: the whole project has no team part (the screen and its trail are the project's own, and Back
+  const pid = s.project.id, tm = s.scope === 'part' ? id : '', to = (tab) => bpArg(pid, tab, tm), n = s.needs_me || {}, b = s.measures?.bars || {};
   // A count opens the list it counts (docs/blueprint.md §6.1): the same selection, so the list's total is the number on the card.
-  const list_ = (tab, kind, sel) => bpArg(pid, tab, id, '', bpFiltStr({ kind, sel }));
+  const list_ = (tab, kind, sel) => bpArg(pid, tab, tm, '', bpFiltStr({ kind, sel }));
   const x = (k) => b[k] || { done: 0, total: 0 }, sn = (k) => bpSecN(s.by_kind, k, s.shared_by_kind) || '';
   // A bar with nothing to measure (0 of 0) is left out; the row stays, so the section and its first action are one click away.
   const frac = (k) => (x(k).total ? `${x(k).done} / ${x(k).total}` : ''), bar = (k, tone = '') => (x(k).total ? { ...x(k), tone } : null);
@@ -6724,15 +7366,15 @@ function bpCard(t, id, s, ny = null) {
   const risks = s.risks?.open ? `${s.risks.open} open` : 'None';
   const list = (rows) => `<div class="bp-list">${rows.join('')}</div>`;
   const plan = [bpLine('Decisions', to('3'), sn(3)), bpLine('Milestones', x('milestones').total ? list_('4', 'milestone', 'live') : to('4'), frac('milestones'), bar('milestones')),
-    bpLine('Risks', s.risks?.open ? list_('5', 'risk', 'open') : to('5'), risks), bpLine('Appendix', to('6'), sn(6)), bpLine('Meetings', bpArg(pid, 'mtg', id), '')];
+    bpLine('Risks', s.risks?.open ? list_('5', 'risk', 'open') : to('5'), risks), bpLine('Appendix', to('6'), sn(6)), bpLine('Meetings', bpArg(pid, 'mtg', tm), '')];
   // Foundation has no count: it opens the project's information. Dropped shows only when something is dropped.
-  const dropped = s.dropped ? [bpLine('Dropped', bpArg(pid, 'dropped', id), String(s.dropped))] : [];
+  const dropped = s.dropped ? [bpLine('Dropped', bpArg(pid, 'dropped', tm), String(s.dropped))] : [];
   // Coverage is a view of the gaps (§6), after Appendix: a count, never a Needs you line.
   const cg = bpGapN(s.plain?.coverage), cov = s.plain?.coverage ? [bpLine('Coverage', to('cov'), cg ? plural(cg, 'gap') : 'No gaps')] : [];
   // Questions (§9): the row says what blocks work when something does, else how many questions are open.
   const qn = s.questions, qs = qn ? [bpLine('Questions', to('q'), qn.blocking ? `${qn.blocking} ${qn.blocking === 1 ? 'item blocks' : 'items block'} work` : qn.open ? `${qn.open} open` : 'None open')] : [];
-  // A Done setup is one row here (docs/onboarding.md#setup-progress); any other state keeps its card on the team page.
-  if (obSetupFolds(t.setup, s) && t.setup.request_id) cov.push(obSetupLine(t.setup, t.project_id));
+  // The setup is one row here in every state (docs/onboarding.md#setup-progress); the team page then shows no Setup card.
+  if (obSetupFolds(t.setup, s)) cov.push(obSetupLine(t.setup, t.project_id));
   const body = s.measures?.kind === 'research'
     ? list([bpLine('Foundation', to('1'), ''), bpLine('Lines', x('lines').total ? list_('2', 'line', 'open') : to('2'), x('lines').total ? `${x('lines').done} active` : ''),
       bpLine('Hypotheses', x('hypotheses').total ? list_('2', 'hypothesis', 'live') : to('2'), frac('hypotheses'), bar('hypotheses', 'ok')),
@@ -6786,6 +7428,13 @@ const bpRecordsAt = (s) => {
     at += line.length + 1;
   }
   return -1;
+};
+/* The reason a task was blocked is Markdown with an optional Records part. Cards and tooltips show its plain first part on one line;
+   the task sheet renders it (tkBlock) with the Records folded. */
+const tkReason = (s) => mdPlain(bpSummaryOf(s)).replace(/\s+/g, ' ').trim();
+const tkBlock = (s) => {
+  const all = String(s ?? '').replace(/\r\n/g, '\n'), at = bpRecordsAt(all), main = (at < 0 ? all : all.slice(0, at)).trim(), rec = at < 0 ? '' : all.slice(at).replace(/^[^\n]*\n?/, '').trim();
+  return `<div class="tk-block">${ic('warn')}<div class="tk-bwhy">${mdRender(main, mdCtx())}${rec ? `<details class="tk-brec"><summary>Records</summary>${mdRender(rec, mdCtx())}</details>` : ''}</div></div>`;
 };
 const bpSummaryOf = (body) => { const s = String(body ?? ''), i = bpRecordsAt(s); return i < 0 ? s : s.slice(0, i); };
 /* A one-line plain form of agent text for a row's meta (Plain context): marks dropped, whitespace folded; row() escapes it. */
@@ -7078,7 +7727,7 @@ const BP_DIFF_MAX = 50;
 function bpProposal(pr, cur) {
   // A proposal from no agent is the docs import's acceptance criteria.
   const who = pr.agent_id ? agLabel(pr.agent_id) : 'Docs import', team = pr.team_id ? S.teams.find((x) => x.id === pr.team_id)?.name : '';
-  return `<div class="bp-c bp-prop"><div class="bp-prop-h"><span class="bp-prop-t"><b>${esc(who)}</b><span class="meta">${[team, plural(pr.ops.length, 'change'), `${ago(pr.created_at)} ago`, `based on version ${pr.base_version}`].filter(Boolean).map(esc).join(' · ')}</span></span>${bpSt(pr.status === 'open' ? 'proposed' : pr.status)}</div>`
+  return `<div class="bp-c bp-prop"><div class="bp-prop-h"><span class="bp-prop-t"><b>${esc(who + viaTxt(pr))}</b><span class="meta">${[team, plural(pr.ops.length, 'change'), `${ago(pr.created_at)} ago`, `based on version ${pr.base_version}`].filter(Boolean).map(esc).join(' · ')}</span></span>${bpSt(pr.status === 'open' ? 'proposed' : pr.status)}</div>`
     + (pr.reason ? `<p class="bp-reason"><span class="faint">Reason given · </span>${esc(pr.reason)}</p>` : '')
     + `<ul class="bp-diff">${pr.ops.slice(0, BP_DIFF_MAX).map((o) => bpOpLine(o, cur.get(o.key), pr.status === 'open' && pr.ops.length <= 12)).join('')}${pr.ops.length > BP_DIFF_MAX ? `<li class="faint">and ${pr.ops.length - BP_DIFF_MAX} more</li>` : ''}</ul>`
     + (pr.status === 'open' ? `<div class="bp-acts"><button type="button" class="btn sm" data-bp-rej="${esc(pr.id)}">${ic('x')}Reject</button><button type="button" class="btn pri sm" data-bp-apply="${esc(pr.id)}">${ic('check')}Apply</button></div>` : pr.note ? `<p class="meta">Note · ${esc(pr.note)}</p>` : '')
@@ -7392,15 +8041,17 @@ VIEWS.blueprint = async (arg) => {
     // A section with nothing in its address opens on Open; All is the explicit sel=all (a link with only a kind or a search still means all of it).
     // Foundation (1) and Appendix (6) hold kinds with no open state, and Decisions (3) merges the project-level items a team shares: all three keep opening on their grouped cards.
     const f = status || f0.q || f0.kind || f0.sel || f0.at || !BP_OPEN_TABS.includes(tab) ? f0 : { ...f0, sel: 'open' };
-    const filtered = !!(status || f.q || f.kind || (f.sel && f.sel !== 'all'));
-    const fq = { section: tab, team, kind: f.kind, status, sel: f.sel === 'all' ? '' : f.sel, q: f.q };
+    // List analysis (sections 2, 4 and 5): a dimension filter, a gap, a group, a sort or a table choice is a filter too.
+    const la = BP_LA_TABS.includes(tab), laSet = la && bpLaAny(f);
+    const filtered = !!(status || f.q || f.kind || (f.sel && f.sel !== 'all') || (la && (laSet || f.g || f.s || f.x)));
+    const fq = { section: tab, team, kind: f.kind, status, sel: f.sel === 'all' ? '' : f.sel, q: f.q, ...(la ? { f: f.f.join(','), gap: f.gap, g: f.g, s: f.s } : {}) };
     const goF = (nf, st = status) => go(tab, team, st, bpFiltStr(nf));
     const q = { section: tab }; if (team) q.team = team;
     // A team's foundation and appendix add the project-level items every team shares.
     const shared = !filtered && team && team !== 'project' && BP_SHARED.includes(+tab);
     // Filtered, the hub's page carries its counts; unfiltered, the section's own read brings them, so one request either way.
     const sumMode = tab === '2' && !filtered;
-    const [pg, r, rs, dl, rl] = await Promise.all([filtered ? bpBrowse(pid, { ...fq, limit: 25, cursor: f.at }) : null, filtered ? null : bpLoad(pid, q), shared ? bpLoad(pid, { section: tab, team: 'project' }) : null,
+    const [pg, r, rs, dl, rl] = await Promise.all([filtered ? bpBrowse(pid, { ...fq, x: la && f.x !== '-' ? f.x || bpLaX(tab, f.kind) : '', limit: 25, cursor: f.at }) : null, filtered ? null : bpLoad(pid, q), shared ? bpLoad(pid, { section: tab, team: 'project' }) : null,
       sumMode ? bpBrowse(pid, { section: '2', team, sel: 'decide', limit: 100 }).catch(() => null) : null, sumMode ? bpBrowse(pid, { section: '2', team, sel: 'risk', limit: 100 }).catch(() => null) : null]);
     // The summary needs both lists; without them (an older hub, a viewer who cannot browse) the grouped cards stay.
     const sumOk = !!(dl && rl && r.items.length);
@@ -7410,16 +8061,20 @@ VIEWS.blueprint = async (arg) => {
     const segs = [['open', 'Open', lst.counts.open], ['dropped', 'Dropped', lst.counts.dropped], ['all', 'All', lst.counts.all]];
     // A selection the card opened (live, this month) shows as the pressed choice right after Open, named and counted like the others.
     if (f.sel && !segs.some(([s]) => s === f.sel)) segs.splice(1, 0, [f.sel, lst.selection?.label || cap(f.sel), lst.total]);
-    const nSet = (f.kind ? 1 : 0) + (status ? 1 : 0);
+    const nSet = (f.kind ? 1 : 0) + (status ? 1 : 0) + (la ? f.f.length : 0);
+    const gapL = la && pg?.gaps?.length ? pg.gaps : null, gapOn = gapL?.find((g) => g.id === f.gap);
     const tools = lst.counts.all || filtered ? `<div class="bp-tb"><form class="srch bp-q" role="search" data-bp-q>${ic('search')}<input class="inp" type="search" name="q" placeholder="Search this section" aria-label="Search this section" value="${esc(f.q)}" maxlength="200" autocomplete="off"></form>`
       + `<div class="seg bp-seg" role="group" aria-label="Show">${segs.map(([s, l, n]) => `<button type="button" class="${!sumOk && s === (f.sel || 'all') ? 'on' : ''}" aria-pressed="${!sumOk && s === (f.sel || 'all')}" data-bpv="${esc(goF({ ...f, sel: s, at: '' }))}">${esc(l)} <span class="faint">${n}</span></button>`).join('')}</div>`
-      + `<button type="button" class="btn sm bp-fbtn" id="bpFilt" aria-haspopup="dialog"${nSet ? ' aria-label="Filters, ' + nSet + ' set"' : ''}>Filters${nSet ? ` · ${nSet}` : ''}</button></div>` : '';
+      + (gapL ? `<button type="button" class="btn sm bp-fbtn${gapOn ? ' warn' : ''}" id="bpGaps" aria-haspopup="menu"${gapOn ? ` aria-label="Gaps, ${esc(gapOn.label)} set"` : ''}>Gaps${gapOn ? ` · ${esc(gapOn.label)}` : ''}</button>` : '')
+      + `<button type="button" class="btn sm bp-fbtn" id="bpFilt" aria-haspopup="dialog"${nSet ? ' aria-label="Filters, ' + nSet + ' set"' : ''}>Filters${nSet ? ` · ${nSet}` : ''}</button>${BP_VIEW.save && BP_LA_TABS.includes(tab) ? '<button type="button" class="btn sm bp-fbtn" id="bpViews" aria-haspopup="dialog">Views</button>' : ''}</div>` : '';
     if (filtered) {
-      body = tools + (lst.items.length
-        ? `<div class="bp-c bp-flist">${overline('Matching', lst.total)}${lst.items.map((it) => bpBrowseRow(pid, it, !team)).join('')}</div>${bpPager(lst, (c) => goF({ ...f, at: c }))}`
-        : f.sel === 'open' && !status && !f.q && !f.kind && lst.counts.all
+      // From 1180 px the count table sits right of the list (.bp-la, 7 + 5) and the pager stays under the list; without it the list is full width.
+      const xt = la ? bpLaTable(lst, f, status, goF) : '', laBody = (h) => (xt ? `<div class="bp-la">${xt}<div class="bp-la-main">${h}</div></div>` : h);
+      body = tools + (la ? bpLaWhere(lst, f, status, goF) : '') + laBody(lst.items.length
+        ? `${la ? bpLaList(pid, lst, f, team) : `<div class="bp-c bp-flist">${overline('Matching', lst.total)}${lst.items.map((it) => bpBrowseRow(pid, it, !team)).join('')}</div>`}${bpPager(lst, (c) => goF({ ...f, at: c }))}`
+        : f.sel === 'open' && !status && !f.q && !f.kind && !laSet && lst.counts.all
           ? `<div class="bp-c">${none('check', 'Nothing open in this section', true, emptyAct(`Show all (${lst.counts.all})`, `data-bpv="${esc(goF({ ...f, sel: 'all', at: '' }))}"`))}</div>`
-          : f.sel === 'open' && !status && !f.q && !f.kind
+          : f.sel === 'open' && !status && !f.q && !f.kind && !laSet
             ? `<div class="bp-c">${none('note', team ? 'Nothing in this section for this part' : 'Nothing in this section yet', false, team && team !== 'project' && ['2', '4'].includes(tab) ? emptyAct('Ask for a plan', 'data-bp-plan') : '')}</div>`
             : `<div class="bp-c">${none('search', 'Nothing matches these filters', false, emptyAct('Clear filters', `data-bpv="${esc(go(tab, team))}"`))}</div>`);
     } else {
@@ -7428,7 +8083,7 @@ VIEWS.blueprint = async (arg) => {
       body = tools + (r.items.length || (+tab === 6 && mine.plain?.undefined_codes?.length) ? (sumOk ? bpSummary(pid, r.items, kind, dl, rl, team, go) : bpSection(pid, +tab, r.items, kind, mine.plain)) : `<div class="bp-c">${none('note', team ? 'Nothing in this section for this part' : 'Nothing in this section yet', false, first)}</div>`)
         + (r.more ? '<p class="meta bp-none">Showing the first 2 500 items; search or filter to see the rest.</p>' : '');
     }
-    bpFilters = { f, fq, goF, statuses: lst.statuses };
+    bpFilters = { f, fq, goF, statuses: lst.statuses, la: la && pg ? pg : null };
     // Foundation opens the project's information (docs/dashboard-ux.md): vision first, then teams, milestones and its projects.
     // Wide screens: the section on the left, the project and its next milestone in a narrow column on the right that stays in view; the bar stays above both.
     // Narrow screens: one column, the side cards first.
@@ -7462,21 +8117,52 @@ VIEWS.blueprint = async (arg) => {
       // The workspace's filters keep one milestone or hypothesis in the filter slot (m:<key> or h:<key>); choosing one replaces the other.
       $$('[data-bp-rf]').forEach((s) => (s.onchange = (e) => openD('blueprint', go('res', one ? team0 : team, e.target.value), true)));
       if (bpFilters) {
-        const { f, fq, goF, statuses } = bpFilters;
+        const { f, fq, goF, statuses, la } = bpFilters;
         const qf = $('[data-bp-q]', $('#dB'));
         if (qf) qf.onsubmit = (e) => { e.preventDefault(); openD('blueprint', goF({ ...f, q: qf.q.value.trim(), at: '' }), true); };
         // Paging keeps the route (Back returns to this page) and moves focus to the first row of the new page.
         $$('[data-bp-page]', $('#dB')).forEach((b) => (b.onclick = async () => { await openD('blueprint', b.dataset.bpPage, true); $('#dB .bp-flist .lrow')?.focus(); }));
+        const nav = (to, focus) => openD('blueprint', to, true).then(() => focus && $(focus, $('#dB'))?.focus());
+        if (la) {
+          const gb = $('#bpGaps');
+          // One gap at a time: picking the active one again, or No gap, clears it.
+          if (gb) gb.onclick = () => openMenu([f.gap ? { label: 'No gap', icon: 'x', fn: () => nav(goF({ ...f, gap: '', at: '' }), '#bpGaps') } : null,
+            ...la.gaps.map((g) => ({ label: g.label, val: String(g.count), icon: g.id === f.gap ? 'check' : 'warn', fn: () => nav(goF({ ...f, gap: g.id === f.gap ? '' : g.id, at: '' }), '#bpGaps') }))], gb);
+          const gs = $('[data-bp-g]', $('#dB')), ss = $('[data-bp-s]', $('#dB'));
+          if (gs) gs.onchange = () => nav(goF({ ...f, g: gs.value, at: '' }), '[data-bp-g]');
+          if (ss) ss.onchange = () => nav(goF({ ...f, s: ss.value, at: '' }), '[data-bp-s]');
+          // Rows and Columns: picking the other axis's dimension swaps the two.
+          // The axes picked here are the viewer's: bpXFit does not turn them again until the window's width changes.
+          const bindX = () => $$('[data-bp-xa]', $('#dB')).forEach((s) => (s.onchange = () => {
+            const [cr, cc] = ($('#dB .bp-xcard')?.dataset.bpX || '*').split('*');
+            let r = $('[data-bp-xa="r"]', $('#dB')).value, c = $('[data-bp-xa="c"]', $('#dB')).value;
+            if (r === c) { if (s.dataset.bpXa === 'r') c = cr; else r = cc; }
+            BP_XU = { x: `${r}*${c}`, w: innerWidth };
+            nav(goF({ ...f, x: `${r}*${c}`, at: '' }), `[data-bp-xa="${s.dataset.bpXa}"]`);
+          }));
+          bindX();
+          const laEl = $('#dB .bp-la');
+          BP_XFIT = laEl ? () => bpXFit(laEl, la.cross, (v) => bpLaTable(la, f, status, goF, v), bindX) : null;
+          BP_XFIT?.();
+          const sv = $('[data-bp-save]', $('#dB'));
+          if (sv) sv.onclick = () => BP_VIEW.save?.({ pid, section: tab, team, state: { q: f.q, kind: f.kind, sel: f.sel, status, f: f.f, gap: f.gap, x: f.x, g: f.g, s: f.s }, anchor: sv });
+        }
+        const vw = $('#bpViews');
+        if (vw) vw.onclick = () => bpViewsSheet({ pid, section: tab, anchor: vw });
         const fb = $('#bpFilt');
         if (fb) fb.onclick = () => fbSheet({ title: 'Filters', anchor: fb, label: 'Show',
           fields: `<label class="fld"><span class="vlabel">Kind</span><select class="sel" id="bpFk"><option value="">Every kind</option>${bpKindOpts(tab, kind).map(([v, l]) => `<option value="${esc(v)}"${v === f.kind ? ' selected' : ''}>${esc(l)}</option>`).join('')}</select></label>`
-            + `<label class="fld"><span class="vlabel">Status</span><select class="sel" id="bpFs"><option value="">Every status</option>${statuses.map((s) => `<option value="${esc(s)}"${s === status ? ' selected' : ''}>${esc(bpLabel(s))}</option>`).join('')}</select></label>`,
+            + `<label class="fld"><span class="vlabel">Status</span><select class="sel" id="bpFs"><option value="">Every status</option>${statuses.map((s) => { const n = la && bpLaFacet(la, 'status')?.values.find((v) => v.value === s)?.count; return `<option value="${esc(s)}"${s === status ? ' selected' : ''}>${esc(bpLabel(s))}${typeof n === 'number' ? ` · ${n}` : ''}</option>`; }).join('')}</select></label>`
+            // One group per dimension of the section, each value with the hub's count under the other filters.
+            + (la ? la.facets.filter((x) => !['status', 'kind', 'team'].includes(x.id)).map((x) => `<fieldset class="bp-ff"><legend class="vlabel">${esc(x.label)}</legend>${x.values.map((v) => `<label class="chk-row"><input type="checkbox" data-bpff="${esc(`${x.id}:${v.value}`)}"${f.f.includes(`${x.id}:${v.value}`) ? ' checked' : ''}>${esc(v.label)} <span class="faint">${v.count}</span></label>`).join('')}</fieldset>`).join('') : ''),
           onGo: async (sh) => {
             const k = $('#bpFk', sh).value;
             let st = $('#bpFs', sh).value;
             // A status the new kind does not have is dropped, not sent: the hub refuses filters that cannot match.
             if (st && k !== f.kind && !(await bpBrowse(pid, { ...fq, kind: k, status: '', limit: 1 })).statuses.includes(st)) st = '';
-            openD('blueprint', goF({ ...f, kind: k, at: '' }, st), true);
+            const offered = new Set($$('[data-bpff]', sh).map((c) => c.dataset.bpff.split(':')[0]));
+            const ff = la ? [...f.f.filter((x) => !offered.has(x.split(':')[0])), ...$$('[data-bpff]', sh).filter((c) => c.checked).map((c) => c.dataset.bpff)] : f.f;
+            openD('blueprint', goF({ ...f, kind: k, f: ff, at: '' }, st), true);
           } });
       }
       const plan = $('[data-bp-plan]', $('#dB'));
@@ -7535,6 +8221,86 @@ async function bpWrite(pid, ops, note) {
   const ch = (r.support_changed || []).map((c) => `${c.key} ${bpLabel(c.now || 'removed').toLowerCase()}`);
   return { ...r, said: ch.length ? ` · ${ch.slice(0, 2).join(', ')}` : '' };
 }
+/* Clarify (docs/dashboard-ux.md, Clarify): one sheet for an unclear requirement, from Needs you, Blueprint Review and the
+   item's Unclear pill. The team's question is its open team_ask (fields.unclear_ask); Send answers it, and the hub clears
+   the mark in the same write. Edit and Drop are the admin's ops writes, made after the answer, with it as the revision note.
+   An item marked before asks existed has no question: the sheet offers "Ask the team what's unclear" and no Send. */
+const CL_CLEARED = 'The team cleared this already';
+const clAdmin = () => !!S.me && S.me.role !== 'member';
+const clOpenAsk = (q) => !!q && ['open', 'needs_info'].includes(q.status);
+/* The sheet's markup: what the viewer may do follows from the ask (open or not) and the role (adm: Edit, Drop, Ask). */
+function clSheetH(it, ask, team, adm) {
+  const f = it.fields || {}, open = clOpenAsk(ask);
+  const when = ask?.created_at || it.updated_at;
+  const meta = [f.priority ? PRI[f.priority] || f.priority : '', `marked unclear by ${team}`, when ? planDate(when) : ''].filter(Boolean).join(' · ');
+  // The requirement's own words are its body (a requirement has no statement field).
+  const stmt = it.body || '', ev = bpF(it, 'evidence');
+  // The question is an agent's text (L1): escaped, never Markdown or links.
+  const q = open ? `<div class="cl-q">${overline(`${team} asks`)}<p class="cl-qt">${esc(ask.question)}</p></div>`
+    : `<p class="hint cl-none">${esc(!ask ? "The team didn't say what is unclear." : ask.status === 'declined' ? `${team}'s question was declined, so there is nothing to answer. Ask the team again what is unclear, or edit or drop the requirement.` : `${team}'s question is closed, so there is nothing to answer here.`)}</p>`;
+  const ctx = `<div class="cl-ctx">${overline('The requirement')}${stmt ? prose(stmt, 'cl-st') : '<p class="meta bp-empty">No summary written</p>'}`
+    + (ev ? `<details class="cl-ev"${open ? '' : ' open'}><summary>Evidence</summary>${prose(ev)}</details>` : '') + '</div>';
+  const area = (lbl) => `<label class="fld"><span class="vlabel">${esc(lbl)}</span><textarea class="inp" id="clA" rows="4" maxlength="2000"${open ? ' data-req' : ''}></textarea></label>`;
+  const edit = `<div class="cl-edit" id="clEd" hidden><label class="fld"><span class="vlabel">Title</span><input class="inp" id="clT" maxlength="200" value="${esc(it.title)}"></label>`
+    + `<label class="fld"><span class="vlabel">What it says</span><textarea class="inp" id="clS" rows="4" maxlength="4000">${esc(stmt || '')}</textarea></label></div>`;
+  const btn = (id, label, cls = '') => `<button type="button" class="btn lg${cls}" id="${id}">${esc(label)}</button>`;
+  const acts = [open ? btn('clSend', 'Send and mark clear', ' pri') : adm ? btn('clAsk', "Ask the team what's unclear", ' pri') : '',
+    adm ? btn('clEdit', 'Edit the requirement') : '', adm ? btn('clDrop', 'Drop it', ' bad') : '', '<button type="button" class="btn lg" data-sheet-close>Later</button>'].filter(Boolean).join('');
+  return `<div class="sheet-form"><p class="meta cl-meta">${esc(meta)}</p>${q}${ctx}${adm ? edit : ''}${open || adm ? area(open ? 'Your answer' : 'Your note to the team (the revision note)') : ''}`
+      + `<span class="err" id="clErr" role="alert"></span><div class="sheet-acts cl-acts">${acts}</div></div>`;
+}
+async function clarifySheet(pid, key, anchor) {
+  const P = bpP(pid), d = await api(`${P}/items/${encodeURIComponent(key)}`), it = d.item, f = it.fields || {}, adm = clAdmin();
+  const back = async () => { await refresh(); if (DR.type) openD(DR.type, DR.arg, true); };
+  const gone = (msg) => fbSheet({ title: `${it.key} · ${trunc(it.title, 60)}`, anchor, label: 'Open the requirement', dismiss: 'Close',
+    fields: `<p class="hint">${esc(msg)}</p>`, onGo: async () => { openD('bp', bpItemArg(pid, it.key)); } });
+  if (!f.unclear) { gone(`${CL_CLEARED}: ${it.key} is no longer marked unclear.`); return; }
+  const ask = f.unclear_ask ? await api('/decisions/' + encodeURIComponent(f.unclear_ask)).then((r) => r.decision, () => null) : null;
+  const team = S.teams.find((t) => t.id === (ask?.team_id || it.team_id))?.name || 'The team';
+  const open = clOpenAsk(ask);
+  const sh = openSheet({ title: `${it.key} · ${trunc(it.title, 60)}`, anchor, cls: 'form wide cl-sheet', html: clSheetH(it, ask, team, adm) });
+  const errEl = $('#clErr', sh), val = () => $('#clA', sh)?.value.trim() || '';
+  const fail = (msg, at) => { errEl.textContent = msg; const el = at && $('#' + at, sh); if (el) { el.setAttribute('aria-invalid', 'true'); el.setAttribute('aria-describedby', 'clErr'); el.focus(); } };
+  // The team moved first: say so in words, with the way to the requirement, instead of a bare conflict.
+  const cleared = () => { $('.cl-acts', sh).innerHTML = `<button type="button" class="btn lg pri" id="clOpen">Open the requirement</button><button type="button" class="btn lg" data-sheet-close>Close</button>`;
+    errEl.textContent = `${CL_CLEARED}. Your answer was not sent.`; $('#clOpen', sh).onclick = () => { closeSheet(); openD('bp', bpItemArg(pid, it.key)); }; };
+  const answer = async (text) => {
+    try { await post(`/decisions/${encodeURIComponent(ask.id)}/answer`, { text, item_rev: it.rev }); return true; }
+    catch (e) { if (e.code === 'already_clear') { cleared(); return false; } if (e.status === 409) { fail(`${it.key} changed while this was open. Close and open Clarify again to see it.`); return false; } throw e; }
+  };
+  const go = (fn) => () => run(async () => { errEl.textContent = ''; $$('[aria-invalid="true"]', sh).forEach((x) => x.removeAttribute('aria-invalid')); if (await fn() !== false) { closeSheet(); await back(); } });
+  // An answer is needed to send it, and is the reason for an edit or a drop (it becomes the revision note).
+  const need = (what) => { const t = val(); if (!t) { fail(open ? `Write your answer to ${what}.` : `Say why, for the team, to ${what}.`, 'clA'); return null; } return t; };
+  $('#clSend', sh)?.addEventListener('click', go(async () => { const t = need('send it'); if (!t || !(await answer(t))) return false; toast(`Sent · ${it.key} is clear`); }));
+  $('#clAsk', sh)?.addEventListener('click', go(async () => {
+    try { await post(`${P}/items/${encodeURIComponent(it.key)}/ask-unclear`); } catch (e) { if (e.status === 409) { fail(e.message); return false; } throw e; }
+    toast(`Asked ${team} what is unclear in ${it.key}`);
+  }));
+  // Edit opens the title and statement in place; the answer box stays, and saving sends it first.
+  $('#clEdit', sh)?.addEventListener('click', (e) => {
+    const ed = $('#clEd', sh);
+    if (ed.hidden) { ed.hidden = false; e.currentTarget.textContent = 'Save the edit'; e.currentTarget.classList.add('pri'); $('#clSend', sh)?.classList.remove('pri'); $('#clT', sh).focus(); return; }
+    go(async () => {
+      const title = $('#clT', sh).value.trim(), st = $('#clS', sh).value.trim();
+      if (!title) { fail('The requirement needs a title.', 'clT'); return false; }
+      const t = need('save the edit'); if (!t) return false;
+      if (open && !(await answer(t))) return false;
+      await bpWrite(pid, [{ op: 'upsert', kind: it.kind, key: it.key, title, body: st, ...(open ? {} : { fields: { unclear: null } }) }], t);
+      toast(`Saved ${it.key}${open ? ' · answer sent' : ''}`);
+    })();
+  });
+  $('#clDrop', sh)?.addEventListener('click', go(async () => {
+    const t = need('drop it'); if (!t) return false;
+    if (open && !(await answer(t))) return false;
+    await bpWrite(pid, [{ op: 'upsert', kind: it.kind, key: it.key, status: 'dropped', ...(open ? {} : { fields: { unclear: null } }) }], t);
+    toast(`Dropped ${it.key}${open ? ' · answer sent' : ''}`);
+  }));
+  sh.addEventListener('input', (e) => { if (e.target.closest('[aria-invalid="true"]')) { e.target.removeAttribute('aria-invalid'); errEl.textContent = ''; } });
+}
+/* The item page after an answer: who clarified it and when, with the answer (the ask's, read through unclear_ask). */
+const bpClarified = (d) => { const c = d.clarification; if (!c?.text) return '';
+  const me = MU.on ? MU.me : S.me, by = c.by_label && me && c.by_label === me.username ? 'you' : c.by_label || 'the operator';
+  return `<div class="cl-done"><p class="meta">Clarified by ${esc(by)}${c.at ? ` · ${esc(planDate(c.at))}` : ''}</p><p class="cl-qt">${esc(c.text)}</p></div>`; };
 /* Add as claim (§2.4): a draft claim in a paper, worded from the result, with the evidence link already set. */
 function bpAddClaim(pid, it, papers, anchor) {
   if (!papers.length) { toast('No paper yet: add one in Planning & Execution first', true); return; }
@@ -7567,11 +8333,12 @@ const bpConf = (c) => { const n = { low: 1, medium: 2, high: 3 }[c] || 0; return
 /* A hypothesis's drill-downs, in reading order: results (findings linked to it as evidence, newest first, under its evidence note),
    papers about it (each with why), experiment runs (tasks the team tagged run that name it; empty without task access) and its
    dated status changes. */
-function bpHypResearch(pid, x, card, note = '') {
+function bpHypResearch(pid, x, card, note = '', o = {}) {
+  const who = o.who || bpWho, runs = o.runs !== false;
   const paper = (p) => row({ ...bpTM(p.key, p.title, p.reasons.map((r) => r.text).join(' · '), { 'data-bp': bpItemArg(pid, p.key) }), trail: bpSt(p.status), chev: true });
   const result = (f) => row({ ...bpTM(f.key, f.title, `${cap(f.confidence || 'no')} confidence · ${planDate(f.created_at)}`, { 'data-bp': bpItemArg(pid, f.key) }), trail: bpConf(f.confidence), chev: true });
-  const run = (k) => row({ title: k.title, meta: `${cap(k.status.replace('_', ' '))} · ${planDate(k.updated_at)}`, chev: true, attrs: { 'data-task': `${k.team_id}|${k.id}` } });
-  const change = (c) => row({ one: true, as: 'div', title: c.was ? `${bpLabel(c.was)} → ${bpLabel(c.to)}` : `Created as ${bpLabel(c.to || 'untested').toLowerCase()}`, trail: `<span class="meta">${c.actor ? `${esc(bpWho(c.actor))} · ` : ''}${esc(planDate(c.at))}</span>` });
+  const run = (k) => row({ title: k.title, meta: `${cap(k.status.replace('_', ' '))} · ${planDate(k.updated_at)}`, ...(runs ? { chev: true, attrs: { 'data-task': `${k.team_id}|${k.id}` } } : { as: 'div' }) });
+  const change = (c) => row({ one: true, as: 'div', title: c.was ? `${bpLabel(c.was)} → ${bpLabel(c.to)}` : `Created as ${bpLabel(c.to || 'untested').toLowerCase()}`, trail: `<span class="meta">${c.actor ? `${esc(who(c.actor, c))} · ` : ''}${esc(planDate(c.at))}</span>` });
   // Newest first; findings from the same moment by key, the higher one first.
   const results = [...x.results].sort((a, b) => (b.created_at || 0) - (a.created_at || 0) || String(b.key).localeCompare(String(a.key), undefined, { numeric: true }));
   const ev = note ? `<div class="bp-ev"><b>Evidence note</b>${prose(note)}</div>` : '';
@@ -7631,6 +8398,8 @@ function bpSources(L, head = true) {
   if (!L?.length) return '';
   const r = (s) => (s.where === 'vault' && s.path
     ? row({ title: s.path.split('/').pop(), meta: raw(`${s.cited ? 'Found at ' : ''}<span class="tid">${esc(s.path)}</span>`), chev: true, attrs: { 'data-vf': s.path, title: s.cited ? `Cited as ${s.cited}` : s.path } })
+    // The hub answers missing for a note outside a collaborator's folders too: its name only, never its path.
+    : s.where === 'missing' && MU.on ? row({ as: 'div', title: String(s.text).split(/[\\/]/).pop() || s.text, meta: 'Not available to you' })
     : s.where === 'missing' ? row({ as: 'div', title: raw(`<span class="tid">${esc(s.text)}</span>`), meta: raw('<span class="warn-t">Not in the vault</span>') })
     : row({ one: true, as: 'div', title: raw(`<span class="tid">${esc(s.text)}</span>`) }));
   return `<div class="bp-src">${head ? overline('Sources', L.length) : ''}${L.map(r).join('')}</div>`;
@@ -7652,10 +8421,20 @@ function bpDefine(pid, token, anchor) {
     } });
 }
 
-VIEWS.bp = async (arg) => {
-  const s = String(arg), cut = s.indexOf('|'), pid = s.slice(0, cut), key = s.slice(cut + 1), P = bpP(pid);
+/* One Blueprint item's screen (dashboard-ux.md, Paper and the item screens), shared by both consoles. viewer 'admin' is the
+   operator's screen with its actions; 'member' is the collaborator's read-only page (docs/multi-user.md §7): no actions,
+   overflow, Undo, Clarify or History, and what the hub sends a member already names agents by label and people as operator.
+   Returns the parts each console frames in its own way: the body (b), the actions and overflow (admin only), and after(). */
+async function bpItemScreen(pid, key, viewer = 'admin', o = {}) {
+  const ADM = viewer === 'admin', P = bpP(pid), arg = bpItemArg(pid, key);
   const d = await api(`${P}/items/${encodeURIComponent(key)}`), it = d.item, f = it.fields || {};
-  const [sum, teamV, par] = await Promise.all([['hypothesis', 'finding', 'fr', 'nfr'].includes(it.kind) ? api(P + '/summary').catch(() => null) : null, it.team_id ? api('/teams/' + encodeURIComponent(it.team_id)).then((r) => r.team).catch(() => null) : null,
+  // Who: the admin reads "agent:<id>" and "operator:…" through bpWho; a member's answer already holds the label or "operator".
+  const who = ADM ? bpWho : (x) => (x === 'operator' ? 'the operator' : String(x || '—'));
+  const named = (x) => (ADM ? (/^agent-/.test(x) ? agLabel(x) : x === 'operator' ? 'You' : x) : who(x));
+  // Issue marks are addressed to the operator and the team (Check · n): never on a collaborator's page, whatever arrives.
+  if (!ADM && d.plain) d.plain.issues = [];
+  const [sum, teamV, par] = await Promise.all([ADM && ['hypothesis', 'finding', 'fr', 'nfr'].includes(it.kind) ? api(P + '/summary').catch(() => null) : null,
+    !it.team_id ? null : ADM ? api('/teams/' + encodeURIComponent(it.team_id)).then((r) => r.team).catch(() => null) : o.team?.(it.team_id) || null,
     it.parent && !['claim', 'paper', 'decision', 'report'].includes(it.kind) ? api(`${P}/items/${encodeURIComponent(it.parent)}`).then((r) => r.item).catch(() => null) : null]);
   // "Requirement in SL" names nothing: the item's parent reads as its key and title, and opens it.
   const inParent = it.parent ? ` in <button type="button" class="bp-inl bp-par" data-bp="${esc(bpItemArg(pid, it.parent))}" title="Open ${esc(it.parent)}">${esc(par?.title ? `${it.parent} · ${par.title}` : it.parent)}</button>` : '';
@@ -7667,14 +8446,14 @@ VIEWS.bp = async (arg) => {
   const card = (title, body, right = '') => `<section class="sec bp-sec"><h4>${esc(title)}${right}</h4>${body}</section>`;
   const gwt = (a) => { const F = ['given', 'when', 'then'].filter((k) => a.fields?.[k]); return `<div class="bp-ac"><div class="bp-ac-h">${bpK(a.key.split('/').pop())}${bpStM('ac', a.status, d.project?.status_meanings)}</div>${F.length ? `<dl class="bp-gwt">${F.map((k) => `<dt>${cap(k)}</dt><dd>${prose(a.fields[k])}</dd>`).join('')}</dl>` : '<p class="meta warn-t bp-empty">No given, when or then written</p>'}${a.fields?.evidence ? `<p class="meta">Evidence · <span class="id">${esc(a.fields.evidence)}</span></p>` : ''}</div>`; };
   let main = '', side = '', tail = '', acts = '', after = [], menu = []; // menu: the overflow ("...") of the screen's own actions
-  const head = `<div class="bp-ih"><h3 class="bp-ih-t">${mdText(it.title)}</h3><span class="bp-ih-p">${d.support ? bpSt(d.support) : bpStM(it.kind, it.status, d.project?.status_meanings)}${f.priority ? pill(PRI[f.priority] || f.priority, 'idle') : ''}${f.unclear ? pill('Unclear', 'warn') : ''}${bpCheck(d.plain)}${it.deleted_at ? pill('Removed', 'bad') : ''}${it.archived ? pill('Archived', 'idle') : ''}</span></div>`;
+  const head = `<div class="bp-ih"><h3 class="bp-ih-t">${mdText(it.title)}</h3><span class="bp-ih-p">${d.support ? bpSt(d.support) : bpStM(it.kind, it.status, d.project?.status_meanings)}${f.priority ? pill(PRI[f.priority] || f.priority, 'idle') : ''}${f.unclear ? (ADM && ['fr', 'nfr'].includes(it.kind) && !it.deleted_at ? `<button type="button" class="pill warn pill-btn" data-clarify="${esc(bpItemArg(pid, it.key))}" aria-label="${esc(`Unclear: clarify ${it.key}`)}">Unclear · Clarify</button>` : pill('Unclear', 'warn')) : ''}${ADM ? bpCheck(d.plain) : ''}${it.deleted_at ? pill('Removed', 'bad') : ''}${it.archived ? pill('Archived', 'idle') : ''}</span></div>`;
   const srcs = bpSources(d.sources), xr = bpXrefs(d.external);
   // From (§2.7): the vault note its source names, by title and date, opening the note in the vault viewer.
   const fromL = d.from ? `<p class="meta bp-from">From: <a class="bp-vf" href="${esc(vlHref(d.from.path))}" data-vf="${esc(d.from.path)}" title="${esc(d.from.path)}">${esc(d.from.title)}</a>${d.from.date ? ` · ${esc(bpNoteDate(d.from.date))}` : ''}</p>` : '';
   const kvs = (pairs) => pairs.filter(([, v]) => v !== undefined && v !== null && v !== '' && !(Array.isArray(v) && !v.length)).map(([k, v]) => kv(k, typeof v === 'object' && 'html' in v ? v.html : esc(Array.isArray(v) ? v.join(', ') : v))).join('');
   const papers = sum?.papers || [];
   // The hub says what this viewer may do with the item (docs/blueprint.md §6.1) and checks it again on the write.
-  const A = d.actions || [], has = (id) => A.some((a) => a.id === id), undo = A.find((a) => a.id === 'undo');
+  const A = ADM ? d.actions || [] : [], has = (id) => A.some((a) => a.id === id), undo = A.find((a) => a.id === 'undo');
   if (has('add_as_claim')) { acts += `<button type="button" class="btn sm" id="bpAsClaim">${ic('plus')}Add as claim</button>`; after.push(() => { $('#bpAsClaim').onclick = (e) => bpAddClaim(pid, it, papers, e.currentTarget); }); }
 
   if (it.kind === 'paper') {
@@ -7709,7 +8488,7 @@ VIEWS.bp = async (arg) => {
     // A milestone's short name (up to 24 characters) is what Delivers shows; without one, its title cut off with an ellipsis. The tooltip holds the full title.
     const dlName = (l) => { const t = String(l.title || l.key); return l.short ? String(l.short) : t.length > 24 ? `${t.slice(0, 23).trimEnd()}…` : t; };
     const dlLinks = delivered.map((l) => `<button type="button" class="bp-inl" data-bp="${esc(bpItemArg(pid, l.key))}" title="${esc(l.title || l.key)}">${esc(dlName(l))}</button>`).join(' · ');
-    const auth = (f.authors || []).map((x) => (/^agent-/.test(x) ? agLabel(x) : x === 'operator' ? 'You' : x)).join(', ');
+    const auth = (f.authors || []).map(named).join(', ');
     const hl = (k, v) => (v ? `<span class="bp-hk">${k}</span><span class="bp-hv">${v}</span>` : '');
     const lines = hl('Manuscript', msFile) + hl('Delivers', dlLinks) + hl('Authors', esc(auth));
     main = `<section class="sec bp-sec bp-pcard" aria-label="Paper summary"><div class="bp-top"><div class="bp-ph">${bpPh(it, d.plain)}<p class="meta">${meta}</p>${xr}${lines ? `<div class="bp-hl">${lines}</div>` : ''}</div>`
@@ -7721,8 +8500,9 @@ VIEWS.bp = async (arg) => {
       + (d.standing ? bpStand(d) : '')
       + '</section>'
       + (pp.claims.length ? `<section class="sec bp-sec" id="bpOutline" tabindex="-1"><h4>Claims by part · ${pp.claims.length}</h4>${BP_PARTS.map(([k, l]) => { const L = pp.claims.filter((c) => (c.part || null) === k); return L.length ? overline(l, L.length) + L.map(claimRow).join('') : ''; }).join('')}</section>` : '')
-      + (d.sources?.length ? card(`Sources · ${d.sources.length}`, bpSources(d.sources, false)) : '')
-      + (pl.records ? `<section class="sec bp-sec">${bpRec(pl.records)}</section>` : '');
+      + (d.sources?.length ? card(`Sources · ${d.sources.length}`, bpSources(d.sources, false)) : '');
+    // Records go last: under the left column on desktop, after the side cards on a phone.
+    if (pl.records) tail = `<section class="sec bp-sec">${bpRec(pl.records)}</section>`;
     after.push(() => { const b = $('[data-bp-outline]'); if (b) b.onclick = () => { const o = $('#bpOutline'); o.scrollIntoView({ behavior: 'smooth', block: 'start' }); o.focus({ preventScroll: true }); }; });
     // Studies leave the Links card for their own card (the right column).
     const studies = links.filter((l) => l.dir === 'out' && l.rel === 'studies');
@@ -7730,8 +8510,8 @@ VIEWS.bp = async (arg) => {
     side = (studies.length ? card(`Studies · ${studies.length}`, studies.map(link).join('')) : '');
     // One visible action: Mark submitted (your call, even when not ready); Export outline sits in the overflow.
     if (has('mark_submitted')) { acts += `<button type="button" class="btn sm" id="bpSubmit">${ic('check')}Mark submitted</button>`; after.push(() => { $('#bpSubmit').onclick = (e) => bpSubmit(pid, it, pp, e.currentTarget); }); }
-    menu.push({ label: 'Export outline', icon: 'dl', fn: () => download(`/api${P}/export.md?paper=${encodeURIComponent(it.key)}`) });
-    if (['planned', 'drafting'].includes(it.status) && !it.deleted_at) menu.push({ label: 'Add a hypothesis it studies', icon: 'link', fn: () => bpAddStudies(pid, it.key, $('[data-dbar-more]')) });
+    if (ADM) menu.push({ label: 'Export outline', icon: 'dl', fn: () => download(`/api${P}/export.md?paper=${encodeURIComponent(it.key)}`) });
+    if (ADM && ['planned', 'drafting'].includes(it.status) && !it.deleted_at) menu.push({ label: 'Add a hypothesis it studies', icon: 'link', fn: () => bpAddStudies(pid, it.key, $('[data-dbar-more]')) });
   } else if (it.kind === 'claim') {
     // A claim is a verdict and the evidence behind it: the statement, why it is (not) supported, then the evidence as rows that open the item.
     const flat = []; const walk = (L) => (L || []).forEach((e) => { if (!flat.some((x) => x.key === e.key)) flat.push(e); walk(e.from); }); walk(d.chain);
@@ -7755,8 +8535,9 @@ VIEWS.bp = async (arg) => {
       + (opts.length ? overline('Options considered') + `<div class="bp-opts">${opts.map((o) => `<div class="bp-opt${o.key === f.chosen ? ' ch' : ''}"><div class="bp-opt-h"><b>${esc(o.key)}. ${proseLine(o.label)}</b>${o.key === f.chosen ? pill('Chosen', 'acc') : ''}</div>${o.pros || o.cons ? `<span class="meta">${[o.pros, o.cons].filter(Boolean).map(proseLine).join(' · ')}</span>` : ''}</div>`).join('')}</div>` : '')
       + (it.body ? overline('Decision') + bpBody(it, d.plain, '', srcs) : srcs)
       + (f.consequences ? overline('Consequences') + prose(Array.isArray(f.consequences) ? f.consequences.join('\n') : f.consequences) : '') + '</section>';
-    side = card('Decision', kvs([['Decided', f.decided_at ? planDate(f.decided_at) : ''], ['Decided by', f.decided_by ? (f.decided_by === 'operator' ? 'You' : agLabel(f.decided_by)) : ''],
-      ['Source', src.startsWith('team_ask:') ? raw(`<button type="button" class="bp-inl" data-dec="${esc(src.slice(9))}">via question ${esc(src.slice(9))}</button>`)
+    side = card('Decision', kvs([['Decided', f.decided_at ? planDate(f.decided_at) : ''], ['Decided by', f.decided_by ? named(f.decided_by) : ''],
+      // A member has no decision screen: the question it came from is named, not opened.
+      ['Source', src.startsWith('team_ask:') ? !ADM ? `via question ${src.slice(9)}` : raw(`<button type="button" class="bp-inl" data-dec="${esc(src.slice(9))}">via question ${esc(src.slice(9))}</button>`)
         : /^bp:Q-[A-Z0-9.-]+$/.test(src) ? raw(`<button type="button" class="bp-inl" data-bp="${esc(bpItemArg(pid, src.slice(3)))}">From ${esc(src.slice(3))}</button>`) : src === 'adr' ? 'ADR' : src],
       ['Governs', gov.map((l) => l.key)], ['Supersedes', sup.map((l) => l.key)], ['Superseded by', d.links.in.filter((l) => l.rel === 'supersedes').map((l) => l.key)]]));
   } else if (it.kind === 'report') {
@@ -7774,23 +8555,25 @@ VIEWS.bp = async (arg) => {
       + `<div class="bp-rep"><span class="kv-k">Done</span>${list(f.done)}<span class="kv-k">Next</span>${list(f.next)}<span class="kv-k">Blockers</span>${list(f.blockers)}`
       + `<span class="kv-k">Hub facts</span><span class="meta">${esc(facts.join(' · ') || 'Nothing recorded')}</span>${f.requested ? `<span class="kv-k">Answers</span><span class="meta">Your request${f.requested.note ? `: "${esc(f.requested.note)}"` : ''}</span>` : ''}</div>`
       + (it.body && !(f.done || []).length ? bpBody(it, d.plain) : '') + '</section>';
-    side = card('Report', kvs([['By', bpWho(it.created_by)], ['Filed', dt(it.created_at)], ['Team', teamV?.name || ''], ['Refs', f.refs || []]]));
+    side = card('Report', kvs([['By', who(it.created_by)], ['Filed', dt(it.created_at)], ['Team', teamV?.name || ''], ['Refs', f.refs || []]]));
   } else if (it.kind === 'hypothesis') {
     // The hypothesis screen (dashboard-ux.md, Research workspace) in the order a reader asks: where it stands and what is next,
     // what it says, how it is judged, what was found, who cites it, then the runs and status changes; Records last, always folded.
     const x = d.research || { papers: [], results: [], runs: [], changes: [] }, pl = d.plain || { summary: String(it.body || '').trim(), records: null };
     const validates = par?.fields?.mode === 'validate';
     const meta = [inParent ? `<button type="button" class="bp-inl bp-par" data-bp="${esc(bpItemArg(pid, it.parent))}" title="Open ${esc(it.parent)}">${esc(par?.title ? `${it.parent} · ${par.title}` : it.parent)}</button>` : '',
-      par?.fields?.mode ? (validates ? 'Validates' : 'Explores') : '', teamV?.name ? esc(teamV.name) : '', `changed by ${esc(bpWho(it.updated_by))}, ${esc(planDate(it.updated_at))}`].filter(Boolean).join(' · ');
+      par?.fields?.mode ? (validates ? 'Validates' : 'Explores') : '', teamV?.name ? esc(teamV.name) : '', `changed by ${esc(who(it.updated_by))}, ${esc(planDate(it.updated_at))}`].filter(Boolean).join(' · ');
     // The standing line and the next step both come from the hub (§2.7), never from agent text.
-    const stand = d.standing || d.next ? `<div class="bp-hs">${ic('pulse')}<div>${d.standing ? `<p class="bp-hs-l">${esc(d.standing)}</p>` : ''}${d.next ? `<p class="bp-hs-n"><b>Next:</b> ${esc(d.next)}</p>` : ''}</div></div>` : '';
+    // Next is addressed to the operator and the team: never on a collaborator's page (the hub leaves it out for them too).
+    const next = ADM ? d.next : null;
+    const stand = d.standing || next ? `<div class="bp-hs">${ic('pulse')}<div>${d.standing ? `<p class="bp-hs-l">${esc(d.standing)}</p>` : ''}${next ? `<p class="bp-hs-n"><b>Next:</b> ${esc(next)}</p>` : ''}</div></div>` : '';
     const shown = new Set(['statement', 'criteria', 'evidence', 'priority', 'unclear']);
     const rest = Object.entries(f).filter(([k, v]) => !shown.has(k) && v !== null && v !== '' && !(Array.isArray(v) && !v.length) && typeof v !== 'object');
     main = `<div class="bp-ph">${head}<p class="meta bp-hm">${meta}</p>${fromL}${xr}${bpWait(pid, d)}${stand}</div>`
       + card('Statement', (f.statement ? prose(f.statement, 'bp-lead') : '') + (pl.summary ? prose(pl.summary, `bp-sum${f.statement ? ' bp-why' : ''}`) : '')
         + (!f.statement && !pl.summary ? '<p class="meta warn-t bp-empty">No statement written</p>' : '') + srcs)
       + (f.criteria || validates ? card('Criteria', f.criteria ? prose(f.criteria) : '<p class="meta warn-t bp-empty">No criteria written</p>') : '')
-      + bpHypResearch(pid, x, card, f.evidence)
+      + bpHypResearch(pid, x, card, f.evidence, { who, runs: ADM })
       + (rest.length ? card('Other fields', `<div class="bp-fields">${rest.map(([k, v]) => kv(cap(k.replace(/_at$/, '').replace(/_/g, ' ')), /_at$/.test(k) && typeof v === 'number' ? esc(planDate(v)) : esc(v))).join('')}</div>`) : '')
       + (d.children.length ? card('Inside', d.children.map((c) => row({ ...bpTM(c.key, c.title, BP_KIND[c.kind] || c.kind, { 'data-bp': bpItemArg(pid, c.key) }), trail: bpSt(c.status), chev: true })).join('')) : '');
     // Records come after the side column on a phone, and stay folded whatever their length.
@@ -7801,12 +8584,12 @@ VIEWS.bp = async (arg) => {
     // An archived item's ACs went with it, out of every browse read: the hub sends them with their fields as its children.
     const acFull = it.archived ? acs : acs.length ? await bpLoad(pid, { kind: 'ac', q: `${it.key}/AC` }).then((r) => r.items.filter((a) => a.parent === it.key), () => acs) : [];
     const stories = Array.isArray(f.stories) ? f.stories : [];
-    const fieldsShown = new Set(['priority', 'unclear', 'stories', 'given', 'when', 'then', 'auto', ...(it.kind === 'risk' ? ['likelihood', 'impact', 'owner'] : []), ...(it.kind === 'question' ? ['purpose'] : [])]);
+    const fieldsShown = new Set(['priority', 'unclear', 'unclear_ask', 'stories', 'given', 'when', 'then', 'auto', ...(it.kind === 'risk' ? ['likelihood', 'impact', 'owner'] : []), ...(it.kind === 'question' ? ['purpose'] : [])]);
     // A question (§9): its step line, then the purpose (or the soft hint), under its head.
     const qTop = it.kind === 'question' && !it.deleted_at ? bpQSteps(it, d, par?.kind === 'line') + `<div class="bp-qpur">${overline('Purpose')}${f.purpose ? prose(f.purpose) : `<p class="meta bp-empty">${esc(BP_Q_HINT)}</p>`}</div>` : '';
     // A risk reads as how likely, how bad and whose, on one line under its title (§9).
     const lmh = (v, w) => (v ? `${cap(v)} ${w}` : '');
-    const riskLine = it.kind === 'risk' ? [lmh(f.likelihood, 'likelihood'), lmh(f.impact, 'impact'), f.owner ? `Owner ${/^agent-/.test(f.owner) ? agLabel(f.owner) : f.owner === 'operator' ? 'You' : f.owner}` : ''].filter(Boolean).join(' · ') : '';
+    const riskLine = it.kind === 'risk' ? [lmh(f.likelihood, 'likelihood'), lmh(f.impact, 'impact'), f.owner ? `Owner ${named(f.owner)}` : ''].filter(Boolean).join(' · ') : '';
     // A milestone's progress counts only the tasks this viewer may see, and only live or accepted ones (§9).
     // A milestone with no body of its own (a missed one often has only the reason in its change note) shows that note as its summary; the body stays first.
     const msNote = it.kind === 'milestone' && !String(d.plain?.summary || it.body || '').trim() ? [...d.history.revisions].sort((a, b) => b.rev - a.rev).find((r) => { const n = String(r.note || '').trim(); return n && !/^(created|changed)$/i.test(n); }) : null;
@@ -7817,10 +8600,10 @@ VIEWS.bp = async (arg) => {
     const fieldRows = rest.map(([k, v]) => { const r = kv(cap(k.replace(/_at$/, '').replace(/_/g, ' ')), /_at$/.test(k) && typeof v === 'number' ? esc(planDate(v)) : esc(v)); return typeof v === 'string' && v.length > 40 ? r.replace('class="kv"', 'class="kv kv-long"') : r; }).join('') + (aliases.length ? kv('Also written', `<span class="tid">${esc(aliases.join(', '))}</span>`) : '');
     const nEmpty = acFull.filter((a) => a.plain?.empty_ac).length;
     // The summary is the item (§5.1): no "Detail" overline; an AC's empty state is its given/when/then block.
-    main = `<section class="sec bp-sec">${head}<p class="meta bp-kind">${esc(BP_KIND[it.kind] || it.kind)}${inParent}</p>${fromL}${xr}${bpWait(pid, d)}${riskLine ? `<p class="meta bp-risk">${esc(riskLine)}</p>` : ''}${qTop}${bpStand(d)}`
+    main = `<section class="sec bp-sec">${head}<p class="meta bp-kind">${esc(BP_KIND[it.kind] || it.kind)}${inParent}</p>${fromL}${xr}${bpWait(pid, d)}${bpClarified(d)}${riskLine ? `<p class="meta bp-risk">${esc(riskLine)}</p>` : ''}${qTop}${bpStand(d)}`
       + (it.kind === 'architecture' && (d.plain?.summary || it.body) ? overline('Overview') : '')
       + bpBody(it, d.plain, it.kind === 'ac' || msNote ? '' : 'No summary written', srcs)
-      + (msNote ? `${prose(msNote.note, 'bp-sum')}<p class="meta bp-note">From the latest change · ${esc(bpWho(msNote.actor))} · ${esc(dt(msNote.at))}</p>` : '')
+      + (msNote ? `${prose(msNote.note, 'bp-sum')}<p class="meta bp-note">From the latest change · ${esc(bpWho(msNote.actor, msNote))} · ${esc(dt(msNote.at))}</p>` : '')
       + (stories.length ? overline('User stories') + stories.map((x) => prose(x)).join('') : '')
       + (it.kind === 'ac' ? gwt(it) : '') + msBar
       + (fieldRows ? `<div class="bp-fields">${fieldRows}</div>` : '') + '</section>'
@@ -7829,35 +8612,46 @@ VIEWS.bp = async (arg) => {
       + (d.children.filter((c) => c.kind !== 'ac').length ? card('Inside', d.children.filter((c) => c.kind !== 'ac').map((c) => row({ ...bpTM(c.key, c.title, BP_KIND[c.kind] || c.kind, { 'data-bp': bpItemArg(pid, c.key) }), trail: bpSt(c.status), chev: true })).join('')) : '');
   }
   // A blocked task still opens on click (the row is a div with role=button, so Unblock can sit inside it as its own button).
-  const taskRows = tasks.map((k) => k.status === 'blocked'
+  // A member reads the rows only (the hub sends them only with the tasks component): no Unblock, nothing to open.
+  const taskRows = !ADM ? tasks.map((k) => row({ as: 'div', title: k.title, meta: raw(k.status === 'blocked' ? '<span class="bad-t">Blocked</span>' : esc(cap(k.status.replace('_', ' ')))) }))
+    : tasks.map((k) => k.status === 'blocked'
     ? row({ as: 'div', extra: 'role="button" tabindex="0"', title: k.title, meta: raw('<span class="bad-t">Blocked</span>'), trail: `<button type="button" class="btn sm" data-unb="${esc(k.team_id)}|${esc(k.id)}">${ic('play')}Unblock</button>`, attrs: { 'data-task': `${k.team_id}|${k.id}` } })
     : row({ title: k.title, meta: cap(k.status.replace('_', ' ')), chev: true, attrs: { 'data-task': `${k.team_id}|${k.id}` } }));
   side += (links.length && it.kind !== 'claim' ? card('Links', links.map(link).join('')) : '') // a claim's links are its evidence, shown on the left
-    + (tasks.length ? card(`Tasks · ${d.tasks.done} of ${d.tasks.total ?? tasks.length} done`, taskRows.join('') + (blocked.length ? `<p class="meta bp-foot">${plural(blocked.length, 'blocked task')}: unblocking returns each to where it stopped.</p>` : '')) : '')
-    + card('History', d.history.revisions.map((r, i) => row({ title: cap(r.note || (r.rev === 1 ? 'created' : 'changed')), meta: `${bpWho(r.actor)} · ${dt(r.at)}`, trail: `<span class="meta">rev ${r.rev}</span>${undo && undo.rev === r.rev ? `<button type="button" class="btn sm" data-bpundo="${r.rev}" aria-label="Undo: ${esc(it.key)} back to ${esc(bpLabel(undo.to).toLowerCase())}">${ic('rot')}Undo</button>` : ''}` })).join('') + admBpOlder(d)
+    + (tasks.length ? card(`Tasks · ${d.tasks.done} of ${d.tasks.total ?? tasks.length} done`, taskRows.join('') + (ADM && blocked.length ? `<p class="meta bp-foot">${plural(blocked.length, 'blocked task')}: unblocking returns each to where it stopped.</p>` : '')) : '')
+    + (!ADM ? '' : card('History', d.history.revisions.map((r, i) => row({ title: cap(r.note || (r.rev === 1 ? 'created' : 'changed')), meta: `${bpWhoRev(r)} · ${dt(r.at)}`, trail: `<span class="meta">rev ${r.rev}</span>${undo && undo.rev === r.rev ? `<button type="button" class="btn sm" data-bpundo="${r.rev}" aria-label="Undo: ${esc(it.key)} back to ${esc(bpLabel(undo.to).toLowerCase())}">${ic('rot')}Undo</button>` : ''}` })).join('') + admBpOlder(d)
       // The rows already say who created and changed it when the first revision is in view; the line stays only for a longer history.
-      + (d.history.total > d.history.revisions.length ? `<p class="meta bp-foot">Created by ${esc(bpWho(it.created_by))} ${planDate(it.created_at)} · changed by ${esc(bpWho(it.updated_by))} ${planDate(it.updated_at)}</p>` : ''));
-  after.push(() => admBpOlderBind(P, key, d, arg));
-  after.push(() => $$('[data-bpundo]').forEach((b) => (b.onclick = () => {
+      + (d.history.total > d.history.revisions.length ? `<p class="meta bp-foot">Created by ${esc(bpWho(it.created_by))} ${planDate(it.created_at)} · changed by ${esc(bpWho(it.updated_by))} ${planDate(it.updated_at)}</p>` : '')));
+  if (ADM) after.push(() => admBpOlderBind(P, key, d, arg));
+  if (ADM) after.push(() => $$('[data-bpundo]').forEach((b) => (b.onclick = () => {
     const was = undo?.to;
     if (!was) return;
     fbSheet({ title: `Undo ${it.key}?`, anchor: b, label: 'Undo', fields: `<p class="meta">${esc(it.key)} goes back to ${esc(bpLabel(was).toLowerCase())}, as before the coordinator agreed it. The history keeps both.</p>`,
       onGo: async () => { await bpWrite(pid, [{ op: 'upsert', kind: it.kind, key: it.key, status: was }], `Undo: ${it.key} back to ${was}`); toast(`${it.key} is ${bpLabel(was).toLowerCase()} again`); openD('bp', DR.arg, true); } });
   })));
-  after.push(() => { const r = $('#dB .bp-grid'); bpMarkAgents(r); bpMarkCodes(r, d.plain?.codes, pid); });
+  // Codes read as their glossary term; a member gets no "define it here" mark (defining is the operator's) and no agent links.
+  after.push(() => { const r = $(ADM ? '#dB .bp-grid' : '#muBody .bp-grid'); if (ADM) bpMarkAgents(r); bpMarkCodes(r, ADM ? d.plain?.codes : (d.plain?.codes || []).filter((c) => c?.term), pid); });
   // Archive (a dropped item) and Unarchive sit in the overflow: rare, and the sheet says what goes with the item first.
-  for (const to of ['archive', 'unarchive']) if (has(to)) menu.push({ label: to === 'archive' ? 'Archive' : 'Unarchive', icon: to === 'archive' ? 'off' : 'rot', fn: () => run(() => bpArchive(pid, it.key, to, $('[data-dbar-more]'), () => openD('bp', DR.arg, true))) });
+  for (const to of ['archive', 'unarchive']) if (ADM && has(to)) menu.push({ label: to === 'archive' ? 'Archive' : 'Unarchive', icon: to === 'archive' ? 'off' : 'rot', fn: () => run(() => bpArchive(pid, it.key, to, $('[data-dbar-more]'), () => openD('bp', DR.arg, true))) });
   if (menu.length) acts += moreBtn();
-  const secn = BP_SECTION[it.kind] || 2;
+  return {
+    d, it, acts: ADM ? acts : '', menu: ADM ? menu : [],
+    b: `<div class="bp-grid${tail ? ' bp-g3' : ''}"><div class="bp-col">${main}</div><div class="bp-col">${side}</div>${tail ? `<div class="bp-col bp-tail">${tail}</div>` : ''}</div>`,
+    after() { after.forEach((fn) => fn()); },
+  };
+}
+VIEWS.bp = async (arg) => {
+  const s = String(arg), cut = s.indexOf('|'), pid = s.slice(0, cut), key = s.slice(cut + 1);
+  const r = await bpItemScreen(pid, key, 'admin'), { d, it } = r;
   // The item hangs under its section (ROUTES.bp); Back returns to the Blueprint screen or the item it was opened from (navTrail).
   navName(pid, d.project.name);
   return {
     t: `${ic('graph')}<span class="ellip">${esc(d.project.name)} · ${esc(it.key)}</span>`,
-    a: acts,
-    here: { label: it.key, section: secn },
-    dbar: { title: it.key, menu },
-    b: `<div class="bp-grid${tail ? ' bp-g3' : ''}"><div class="bp-col">${main}</div><div class="bp-col">${side}</div>${tail ? `<div class="bp-col bp-tail">${tail}</div>` : ''}</div>`,
-    after() { after.forEach((fn) => fn()); },
+    a: r.acts,
+    here: { label: it.key, section: BP_SECTION[it.kind] || 2 },
+    dbar: { title: it.key, menu: r.menu },
+    b: r.b,
+    after: r.after,
   };
 };
 
@@ -8095,11 +8889,14 @@ const decForm = (d) => {
       <span class="err" id="dcErr" role="alert"></span></section>`;
 };
 /* One click answers: the option (or none, for a written answer) with the note, if any. The buttons lock while it sends. */
-const decBind = (dp, done) => {
+const decBind = (dp, done, version, reload = done) => {
   const text = $('#dcText'), err = $('#dcErr'), btns = $$('[data-dc-choose], #dcOwn');
   const send = (option) => run(async () => {
     btns.forEach((b) => (b.disabled = true));
-    try { await post(dp + '/answer', { option, text: text.value.trim() || null }); } finally { btns.forEach((b) => (b.disabled = false)); }
+    // The options this screen shows: if the agent changed them since, the hub refuses and the question reloads with the new ones.
+    try { await post(dp + '/answer', { option, text: text.value.trim() || null, options_version: version ?? null }); }
+    catch (e) { if (e.code === 'conflict') { await reload('The options changed. Read them again.'); return; } throw e; }
+    finally { btns.forEach((b) => (b.disabled = false)); }
     await done('Answered');
   });
   $$('[data-dc-choose]').forEach((b) => (b.onclick = () => send(b.dataset.dcChoose)));
@@ -8171,7 +8968,7 @@ VIEWS.dec = async (id) => {
         if (e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return;
         e.preventDefault(); go('vault', nextNote);
       };
-      if (open) decBind(dp, re);
+      if (open) decBind(dp, re, d.options_version);
     },
   };
 };
@@ -8381,7 +9178,7 @@ function dirCatChips(f) {
 const dirReadPill = (d) => !d.agents ? '<span class="faint">No agents</span>'
   : d.current >= d.agents ? `<span class="dl-n">${d.current}/${d.agents} read</span>` : pill(`${d.current}/${d.agents} read`, 'warn');
 const dirTarget = (d) => d.scope_kind === 'hub' ? 'All agents' : d.scope_kind === 'role' ? cap(d.scope_label) : String(d.scope_label).replace(/^(project|team|agent) /, '');
-/* What the exemptions add to the scope (the hub's except_label): "Except team BIRAZ Research", or '' when nothing is kept off. */
+/* What the exemptions add to the scope (the hub's except_label): "Except team ECHO Research", or '' when nothing is kept off. */
 const dirExcept = (d) => (d.exempt_count && d.except_label) || '';
 function dirRow(d, f) {
   const live = d.status === 'active', sel = d.id === f.d;
@@ -8548,7 +9345,7 @@ VIEWS.directives = async (arg = '') => {
     },
   };
 };
-/* ---------- a directive's agent list (docs/mockups/directives.html): search, Team, state chips, one flat list by state ----------
+/* ---------- a directive's agent list: search, Team, state chips, one flat list by state ----------
    Its filters live in the route, so Back and reload keep them: aq= (search), at= (team ids) and as= (state), after the id on
    #directive/<id>&…, after the team, id and tab on #tdir/<team>|<id>[|tab]&…, and beside the list's own keys on #directives/…&d=<id>&…
    The hub's coverage rows carry each agent's live teams and its role there (GET /api/directives/:id). */
@@ -8785,7 +9582,7 @@ function cardState(k, t) {
   const q = t.decTask?.[k.id];
   if (q) return { ico: 'dec', text: q.status === 'needs_info' ? 'Question · waiting for the agent' : `Question for you: ${q.question}`, tone: 'warn', clamp: true, tip: q.question };
   if (k.awaiting_approval) return { ico: 'check', text: 'Approved · waits for you', tone: 'warn', tip: 'The reviewer approved it; it waits for you' };
-  if (k.blocked_reason) return { ico: 'warn', text: k.blocked_reason, tone: 'bad', clamp: true };
+  if (k.blocked_reason) return { ico: 'warn', text: tkReason(k.blocked_reason), tone: 'bad', clamp: true };
   const ts = tkText(k, t); if (!ts) return null;
   const tip = k.overdue_at ? `Past its check-in time since ${dt(k.overdue_at)}; the assignee still holds it` : k.status === 'in_review' ? 'Submitted; waiting for the reviewer' : k.lease_expires_at ? `${t.delivery_mode === 'on_demand' ? 'Check-in' : 'Lease'} ${dt(k.lease_expires_at)}` : '';
   return { ico: ts.review ? 'eye' : 'clock', text: ts.text, tone: ts.cls === 'bad-t' ? 'bad' : ts.cls === 'warn-t' ? 'warn' : '', tip };
@@ -8795,7 +9592,15 @@ function cardState(k, t) {
    task's own project (#bp/<project>|<key>), on touch a sheet with Open; a key no longer in the Blueprint does not navigate and its
    tip says so. On board cards (task) a chip is a tip only: a span, not focusable, and a click on it opens the task. */
 function refChips(k, t, { open = false, task = '', max = open ? Infinity : 3 } = {}) {
-  if (!(k.refs || []).length) return '';
+  if (!(k.refs || []).length && !(k.pending_refs || []).length) return '';
+  k = { ...k, refs: k.refs || [] };
+  // A ref to an item the team proposed but the operator has not applied yet (blueprint.md §2.3): a dashed chip whose tip says
+  // so. It never opens the Blueprint (the item is not there yet); applied, it becomes an ordinary chip, rejected it goes.
+  const pend = (k.pending_refs || []).map((key) => {
+    const say = 'Waiting for the operator to apply the plan.', tip = `<span class="info-tip" role="tooltip"><b>${esc(`${key} · pending`)}</b><span>${esc(say)}</span></span>`;
+    return open ? `<button type="button" class="ref pend" data-info="${esc(`${key}: ${say}`)}" aria-label="${esc(`${key}: ${say}`)}">${esc(key)}${tip}</button>`
+      : `<span class="ref pend"${task ? ` data-task="${esc(task)}"` : ''}>${esc(key)}${tip}</span>`;
+  }).join('');
   const R = Object.fromEntries((t.plan?.requirements || []).map((r) => [r.key, r])), M = Object.fromEntries((t.plan?.milestones || []).map((m) => [m.key, m]));
   const keys = k.refs.length > max + 1 ? k.refs.slice(0, max) : k.refs, rest = k.refs.slice(keys.length);
   // Board cards only (the task page shows every chip, each one openable): more than max + 1 chips shows the first few, then one "+N" chip whose tip lists the rest (a lone extra chip shows itself).
@@ -8810,7 +9615,7 @@ function refChips(k, t, { open = false, task = '', max = open ? Infinity : 3 } =
     if (!open) return `<span class="ref"${task ? ` data-task="${esc(task)}"` : ''}>${esc(key)}${tip}</span>`;
     if (!title || !t.project_id) return `<button type="button" class="ref" data-info="${esc(full)}" aria-label="${esc(full)}">${esc(key)}${tip}</button>`;
     return `<button type="button" class="ref" data-ref-bp="${esc(bpItemArg(t.project_id, key))}" aria-label="${esc(`Open ${full}`)}">${esc(key)}${tip}</button>`;
-  }).join('')}${more}</span>`;
+  }).join('')}${more}${pend}</span>`;
 }
 /* Board card: the title (the whole card opens the task), one meta line, one state line, at most one button. */
 function taskCard(k, main, t, id, nm) {
@@ -8834,7 +9639,7 @@ function taskRow(k, main, t, id, nm) {
     meta: raw(`${tkTagMeta(k)}${esc(k.assignee ? nm(k.assignee) : 'Unassigned')}${st ? ' · ' + esc(st) : ''}${k.review_rounds ? ` · round ${k.review_rounds}` : ''}${k.operator_request ? ' · on your relayed request' : ''}${ts ? ` · <span class="${ts.cls}">${esc(ts.text)}</span>` : ''}`) })
     + (k.awaiting_approval ? `<div class="tk-act"><span>Waiting for your approval</span><button type="button" class="btn sm ok" data-appr="${esc(k.id)}">${ic('check')}Approve</button></div>` : '')
     + (t.decTask?.[k.id] ? `<div class="tk-act"><span>Question for you</span><button type="button" class="btn sm" data-dec="${esc(t.decTask[k.id].id)}">${ic('chat')}Answer</button></div>`
-      : (k.blocked_reason ? `<div class="tk-block">${ic('warn')}${esc(k.blocked_reason)}</div>` : '') + (k.status === 'blocked' ? unblockBar(id, k) : ''));
+      : (k.blocked_reason ? tkBlock(k.blocked_reason) : '') + (k.status === 'blocked' ? unblockBar(id, k) : ''));
 }
 const memberRow = (m, nm) => row({ lead: `<span class="av lg">${esc(initials(m.label || m.agent_id || '?'))}<i class="st ${m.stalled ? 'warn' : 'on'}"></i></span>`,
   title: raw(`<button type="button" class="mem-name" data-ses="${esc(m.agent_id)}">${esc(m.label || m.agent_id)}</button>`),
@@ -8899,8 +9704,8 @@ VIEWS.team = async (id) => {
   const tp = '/teams/' + encodeURIComponent(id), pid0 = S.teams.find((x) => x.id === id)?.project_id, summary = (p) => api(`${bpP(p)}/summary?team=${encodeURIComponent(id)}`).catch(() => null);
   // The card's line reads what Blueprint Review lists, with the team scope that screen uses (bpReviewTeam).
   const withReview = (sp) => sp.then((s) => (s ? Promise.all([s, nyRead(bpReviewQ(s.project.id, bpReviewTeam(s.contributing, id))).catch(() => null)]) : [null, null]));
-  const [t, tdir, cv, bps0, nyT] = await Promise.all([api(tp).then((r) => withDecisions({ ...r.team, setup: r.setup || null })), api(tp + '/directives').catch(() => null), api('/conversations').catch(() => null), pid0 ? withReview(summary(pid0)) : [null, null],
-    nyRead(`${NY_Q}&team=${encodeURIComponent(id)}`).catch(() => null)]), nm = teamNm(t);
+  const [t, tdir, cv, bps0, nyT, tUse] = await Promise.all([api(tp).then((r) => withDecisions({ ...r.team, setup: r.setup || null })), api(tp + '/directives').catch(() => null), api('/conversations').catch(() => null), pid0 ? withReview(summary(pid0)) : [null, null],
+    nyRead(`${NY_Q}&team=${encodeURIComponent(id)}`).catch(() => null), S.me?.role === 'admin' ? api(tp + '/usage').catch(() => null) : null]), nm = teamNm(t);
   const [bps, bpRev] = pid0 ? bps0 : t.project_id ? await withReview(summary(t.project_id)) : [null, null];
 
   const chats = cv ? teamChats(t, cv.conversations) : null, sess = teamSessions(t), liveN = sess.filter((x) => x.live).length;
@@ -8943,7 +9748,7 @@ VIEWS.team = async (id) => {
     dbar: { title: t.name,
       menu: [...teamPhoneActs(), { label: 'Team status', icon: 'note', fn: () => openD('tstatus', id) }, coMenuItem(t), t.status === 'paused' && ['admin', 'coordinator'].includes(t.paused_reason) ? { label: 'Change the pause', icon: 'clock', fn: () => teamPauseSheet(t, tp, async () => { await refresh(); openD('team', id, true); }) } : null, ['draft', 'running', 'paused'].includes(t.status) ? { label: 'Stop team', icon: 'stop', bad: true, confirm: 'Tap again to stop the team', fn: stopTeam } : null] },
     b: `<div class="tm-grid"><div class="tm-a">${coTeamSlot(id)}${teamAttention(t, id, nm, bps, nyT)}${recruits}${t.setup && !obSetupFolds(t.setup, bps) ? obSetupCard(t.setup, t.project_id) : ''}</div><div class="tm-gp">${bpCard(t, id, bps, bpRev)}</div>`
-      + `<div class="tm-tasks only-m">${sec(total ? `Tasks · ${total}` : 'Tasks', tasksIdx)}</div><div class="tm-team">${teamCard}</div></div>`
+      + `<div class="tm-tasks only-m">${sec(total ? `Tasks · ${total}` : 'Tasks', tasksIdx)}</div><div class="tm-team">${teamCard}${tUse ? sec('Usage · 30 days', `<div class="kvc" id="tmUse">${cnUseH(tUse, 'agent')}</div>`, info("Tokens, turns and cost at API list prices of the team's current members, from every PC that reported them, whatever team the work was for. Admins only.")) : ''}</div></div>`
       + `<section class="sec tm-board only-d"><div class="bh"><h4>Board</h4>${total ? progressBar(t) + `<span class="meta">${t.progress.done} of ${total} done</span>` : ''}${bl || dc ? `<span class="bh-lists">${bl ? `<button type="button" class="btn sm" data-tasks="${esc(id)}|backlog">Backlog<span class="cnt">${bl}</span></button>` : ''}${dc ? `<button type="button" class="btn sm" data-tasks="${esc(id)}|discarded">Discarded<span class="cnt">${dc}</span></button>` : ''}</span>` : ''}</div>${boardHtml(t, id, nm)}</section>`,
     after() {
       const again = async () => { await refresh(); openD('team', id, true); };
@@ -9135,7 +9940,7 @@ VIEWS.tses = async (teamId) => {
     const a = s.agent, l = s.logins[0], lc = s.last_tool_call, r = roleOf(a.id);
     const lead = `<span class="av lg">${esc(initials(a.label || '?'))}<i class="st${s.live ? ' on' : ''}" title="${s.live ? 'Logged in' : 'Not logged in'}"></i></span>`;
     const meta = raw([r ? esc(cap(r)) : '', lc ? `<span class="tid">${esc(lc.tool)}</span>` : s.live ? '' : 'Not logged in'].filter(Boolean).join(' · ') || 'No calls yet');
-    const when = lc ? ago(lc.at) : a.last_seen_at ? ago(a.last_seen_at) : 'never';
+    const when = actWhen(a);
     const trail = `${s.concurrent_use ? pill('Shared', 'warn') : ''}${lc && lc.result !== 'ok' ? pill(cap(lc.result), 'bad') : ''}${l ? `<span class="tr-where">${esc((l.pc?.name || '—') + ' · ' + (l.app || '—'))}</span>` : ''}<span class="tr-when">${esc(when)}</span>`;
     return row({ lead, title: a.label, meta, trail, chev: true, attrs: { 'data-ses': a.id, title: `Open ${a.label}` } });
   };
@@ -9247,10 +10052,10 @@ function lifecycle(k, t, events) {
   }).join('');
   const odd = blocked || cancelled || backlog, ts = tkText(k, t), chip = ts && !ts.review ? pill(ts.text, ts.cls === 'bad-t' ? 'bad' : ts.cls === 'warn-t' ? 'warn' : 'idle') : '';
   const label = k.status === 'discarded' ? 'Discarded' : cancelled ? 'Cancelled' : backlog ? 'Backlog' : blocked ? 'Blocked' : done ? 'Done' : LC[at][1];
-  const note = k.status === 'changes_requested' ? 'Changes requested' : blocked && k.blocked_reason ? trunc(k.blocked_reason, 90) : '';
+  const note = k.status === 'changes_requested' ? 'Changes requested' : blocked && k.blocked_reason ? trunc(tkReason(k.blocked_reason), 90) : '';
   const round = k.review_rounds ? `<span class="only-m">Round ${k.review_rounds}</span>` : '';
   const sub = [round, note ? esc(note) : ''].filter(Boolean).join('<span class="only-m"> · </span>');
-  const foot = `<div class="lc-foot${odd || note || chip ? '' : ' only-m'}"><span class="lc-now"><b class="${odd ? '' : 'only-m'}${blocked ? ' bad-t' : ''}">${esc(label)}</b>${sub ? `<span class="lc-sub${k.status === 'changes_requested' ? ' warn-t' : ''}"${blocked ? ` title="${esc(k.blocked_reason || '')}"` : ''}>${sub}</span>` : ''}</span>${chip}</div>`;
+  const foot = `<div class="lc-foot${odd || note || chip ? '' : ' only-m'}"><span class="lc-now"><b class="${odd ? '' : 'only-m'}${blocked ? ' bad-t' : ''}">${esc(label)}</b>${sub ? `<span class="lc-sub${k.status === 'changes_requested' ? ' warn-t' : ''}"${blocked ? ` title="${esc(tkReason(k.blocked_reason || ''))}"` : ''}>${sub}</span>` : ''}</span>${chip}</div>`;
   return `<ol class="lc${cancelled ? ' off' : ''}" aria-label="Task progress">${dots}</ol>${foot}`;
 }
 /* Task attachments (docs/dashboard-ux.md, task screen "Attachments"): the brief's files under In short, each review round's
@@ -9373,7 +10178,7 @@ VIEWS.task = async (arg) => {
       + `<button type="button" class="btn sm" data-bl="discard|${esc(teamId)}|${esc(k.id)}">${ic('x')}Discard</button><button type="button" class="btn sm ok" data-bl="acceptn|${esc(teamId)}|${esc(k.id)}">${ic('check')}Accept</button></span></div>`
     : gone ? vnote(`<b>Discarded${dEv ? ' ' + esc(dt(dEv.created_at)) : ''}.</b> Nobody works on it; it stays in the history.${dEv?.note ? ' Your note: ' + esc(dEv.note) : ''}`) : '';
   const hideTask = () => run(async () => { await post(`${tp}/tasks/${encodeURIComponent(taskId)}/dismiss`, { dismissed: !k.dismissed_at }); toast(k.dismissed_at ? 'Shown on the board' : 'Hidden from the board'); openD('task', arg, true); });
-  const closed = k.status === 'done' || k.status === 'cancelled', refs = (k.refs || []).join(', '), status = tkStatus(k.status);
+  const closed = k.status === 'done' || k.status === 'cancelled', refs = (k.refs || []).join(', '), pend = (k.pending_refs || []).length, status = tkStatus(k.status);
   const metaLine = [t.name, refs, status].filter(Boolean).join(' · ');
   // People: who does the work and who reviews it, then the dates.
   const person = (aid, what) => {
@@ -9405,7 +10210,7 @@ VIEWS.task = async (arg) => {
   const FBK = fbk?.reports || [];
   const fromFb = FBK.length ? sec(`From feedback · ${FBK.length}`, FBK.map((x) => row({ title: x.title, meta: [fbStatusName(x.status), x.closed_by_task ? 'closed by this work' : '', x.hidden ? 'hidden' : ''].filter(Boolean).join(' · '), lead: `<span class="pl-lead">${ic('wish')}</span>`, chev: true, attrs: { 'data-fb': x.id } })).join('')) : '';
   const people = sec('People', relay + person(k.assignee, 'Assignee') + revRow
-    + `<div class="tk-kv">${canRev ? kv('Review', `<span class="tk-rev">${noRev ? 'None' : 'Required'}${reviewBtn(t.id, k, noRev ? 'required' : 'none')}</span>`) : ''}${kv(k.status === 'backlog' || gone ? 'Proposed' : 'Opened', esc(dt(k.created_at)))}${k.created_by_label ? kv('Created by', esc(k.created_by_label)) : ''}${tagsKv}${k.review_rounds ? kv('Review rounds', String(k.review_rounds)) : ''}${refs ? kv('Requirement', refChips(k, t, { open: true })) : ''}${end ? kv('Closed', esc(dt(end))) + kv('Took', esc(dHM(end - (start || k.created_at)))) : ''}${share}</div>`);
+    + `<div class="tk-kv">${canRev ? kv('Review', `<span class="tk-rev">${noRev ? 'None' : 'Required'}${reviewBtn(t.id, k, noRev ? 'required' : 'none')}</span>`) : ''}${kv(k.status === 'backlog' || gone ? 'Proposed' : 'Opened', esc(dt(k.created_at)))}${k.created_by_label ? kv('Created by', esc(k.created_by_label)) : ''}${tagsKv}${k.review_rounds ? kv('Review rounds', String(k.review_rounds)) : ''}${refs || pend ? kv('Requirement', refChips(k, t, { open: true }) + (pend ? `<span class="meta tk-pend">${esc(pend === 1 ? `${k.pending_refs[0]} is waiting for the operator to apply the plan.` : `${plural(pend, 'item')} are waiting for the operator to apply the plan.`)}</span>` : '')) : ''}${end ? kv('Closed', esc(dt(end))) + kv('Took', esc(dHM(end - (start || k.created_at)))) : ''}${share}</div>`);
   // Review rounds: each submission with the reviewer's verdict under it. The newest round comes first; every comment appears once.
   const rounds = []; let cur = null;
   for (const e of events) {
@@ -9660,13 +10465,32 @@ VIEWS.chats = async () => {
   };
 };
 
-const RM_ = { id: null, msgs: new Map(), room: null, more: false, before: null, last: 0, polling: false, day: null };
+const RM_ = { id: null, msgs: new Map(), room: null, more: false, before: null, last: 0, polling: false, day: null, del: null };
+/* Where each message stands for the agents that receive it (docs/connector.md, "Messages: delivery states"), for admins: Not delivered yet,
+   Delivered, Shown to the session (reported by the PC) and Read. A direct chat names one state; a group counts them. */
+const RM_STATE = ['Not delivered yet', 'Delivered', 'Shown to the session (reported by the PC)', 'Read'];
+function rmDelH(m) {
+  if (!RM_.del || m.from === 'hub' || m.redacted) return '';
+  const to = RM_.del.filter((x) => x.agent_id !== m.from);
+  if (!to.length) return '';
+  const rank = (x) => (x.acked_seq >= m.seq ? 3 : x.shown_seq !== null && x.shown_seq >= m.seq ? 2 : x.delivered_seq >= m.seq ? 1 : 0);
+  const n = [0, 0, 0, 0]; to.forEach((x) => { n[rank(x)]++; });
+  const txt = to.length === 1 ? RM_STATE[rank(to[0])] : [3, 2, 1, 0].filter((k) => n[k]).map((k) => `${n[k]} ${['not delivered yet', 'delivered', 'shown (reported by the PC)', 'read'][k]}`).join(' · ');
+  return `<div class="mdl meta" data-mdl="${m.seq}">${esc(txt)}</div>`;
+}
+const rmDelPaint = () => { for (const e of document.querySelectorAll('#rmL [data-mdl]')) { const m = RM_.msgs.get(Number(e.dataset.mdl)); if (m) { const h = rmDelH(m); if (h) e.outerHTML = h; } } };
+async function rmDelLoad(id) {
+  if (S.me?.role !== 'admin') return;
+  RM_.delAt = Date.now();
+  // A failed poll keeps the last good marks: they are never blanked or left half-drawn by one lost request.
+  try { const d = await api(`/conversations/${encodeURIComponent(id)}/delivery`); if (RM_.id === id) RM_.del = d.members; } catch { /* keep what is shown */ }
+}
 /* Phones show the thread as part of the page (no inner scroll box), so "at the bottom" and "stay at the bottom" use the window there. */
 const rmPaged = (L) => getComputedStyle(L).overflowY === 'visible';
 const rmNear = (L) => (rmPaged(L) ? document.documentElement.scrollHeight - scrollY - innerHeight < 120 : L.scrollHeight - L.scrollTop - L.clientHeight < 80);
 const rmStick = (L) => { if (rmPaged(L)) window.scrollTo(0, document.documentElement.scrollHeight); else L.scrollTop = L.scrollHeight; };
 const msgH = (m) => { const nm = RM_.room?.members.find((x) => x.agent_id === m.from)?.label || agLabel(m.from);
-  return `<div class="msg${m.from === 'hub' ? ' hub' : ''}"><div class="mh"><b>${esc(nm)}</b>${m.kind !== 'text' ? `<span class="tag">${esc(m.kind)}</span>` : ''}<span class="mt" title="${esc(dt(m.created_at))}">${esc(dt(m.created_at).split(', ')[1] || '')}</span></div>${m.redacted ? `<div class="mb">${ic('ban')}</div>` : prose(m.content, 'mb')}</div>`; };
+  return `<div class="msg${m.from === 'hub' ? ' hub' : ''}"><div class="mh"><b>${esc(nm)}</b>${m.kind !== 'text' ? `<span class="tag">${esc(m.kind)}</span>` : ''}<span class="mt" title="${esc(dt(m.created_at))}">${esc(dt(m.created_at).split(', ')[1] || '')}</span></div>${m.redacted ? `<div class="mb">${ic('ban')}</div>` : prose(m.content, 'mb')}${rmDelH(m)}</div>`; };
 /* The thread names each day once (Today, Yesterday, 14 Nov) and its messages show only the time. RM_.day is the day of the last message drawn. */
 const rmDayKey = (t) => new Date(t).toDateString();
 const rmDayH = (t) => { const k = rmDayKey(t), y = new Date(Date.now() - 86400000).toDateString();
@@ -9695,6 +10519,8 @@ async function pollRoom() {
     const id = DR.arg, r = await api(`/conversations/${encodeURIComponent(id)}/messages?limit=50`); if (RM_.id !== id || DR.arg !== id) return;
     const fresh = r.messages.filter((m) => !RM_.msgs.has(m.seq)).sort((a, b) => a.seq - b.seq);
     r.messages.forEach((m) => RM_.msgs.set(m.seq, m)); RM_.room = r.room;
+    // The positions move slowly: asked again with a new message, or at most every 15 s, not on every 3 s poll.
+    if (fresh.length || Date.now() - (RM_.delAt || 0) > 15000) await rmDelLoad(id);
     const L = $('#rmL'); if (!L) return;
     if (fresh.length && fresh[0].seq < RM_.last) { drawRoom(false); return; } // older than what is shown: redraw in order
     if (fresh.length) {
@@ -9704,12 +10530,14 @@ async function pollRoom() {
       RM_.last = fresh.at(-1).seq;
       if (near) rmStick(L);
     }
+    rmDelPaint();
   } catch { /* ignore */ } finally { RM_.polling = false; }
 }
 setInterval(pollRoom, 3000);
 VIEWS.room = async (id) => {
   const r = await api(`/conversations/${encodeURIComponent(id)}/messages?limit=50`);
-  Object.assign(RM_, { id, msgs: new Map(r.messages.map((m) => [m.seq, m])), room: r.room, more: r.more, before: r.next_before });
+  Object.assign(RM_, { id, msgs: new Map(r.messages.map((m) => [m.seq, m])), room: r.room, more: r.more, before: r.next_before, del: null });
+  await rmDelLoad(id);
   const href = `/api/conversations/${encodeURIComponent(id)}/export`, mem = r.room.members, nMem = mem.length;
   const exportRoom = () => download(href);
   return {
@@ -10218,7 +11046,7 @@ const coAlertTeam = (a, d) => alertTeam(a, d) || S.teams.find((x) => x.id === d.
 const NY_KIND = { question: ['Question for you', 'dec'], relayed_answer: ['Relayed answer', 'dec'], access_request: ['Access request', 'key'], checkpoint: ['Waits for your approval', 'check'],
   unblock: ['Task blocked', 'ban'], proposal: ['Blueprint change', 'graph'], backlog: ['New brief', 'note'], onboarding: ['Team request', 'team'], checkout: ['Checkout step', 'pc'],
   directive: ['Directive to review', 'sl'], directive_suggestion: ['Suggestion from an agent', 'sl'], feedback: ['New feedback', 'bug'], vault_conflict: ['Vault conflict', 'note'], unclear: ['Unclear requirement', 'info'],
-  team_pause: ['Team paused', 'pause'], team_paused: ['Team paused', 'pause'],
+  team_pause: ['Team paused', 'pause'], setup: ['Team setup', 'team'], team_paused: ['Team paused', 'pause'],
   stalled: ['Member stalled', 'clock'], missed_milestone: ['Milestone missed', 'warn'], claim_not_supported: ['Claim not supported', 'warn'], keys_not_collected: ['Keys not collected', 'key'], key_collection: ['Key not collected', 'key'], rules_applied: ['Applied by rules', 'check'], blocking_work: ['Blocks work', 'warn'] };
 const nyKind = (k) => NY_KIND[k] || [cap(String(k).replace(/_/g, ' ')), 'info'];
 /* Where a row's record opens in the operator's console. */
@@ -10240,6 +11068,7 @@ function nyOpenAttr(o) {
     case 'agent': return `data-ses="${e(o.id)}"`;
     case 'team': return `data-team="${e(o.id)}"`;
     case 'rules': return `data-go="rules" data-arg="${e(o.team_id)}"`;
+    case 'setup': return `data-ob-setup="${e(o.id)}" data-ob-team="${e(o.team_id)}"`;
     case 'questions': return `data-bpv="${e(bpArg(o.project_id, 'q', o.team_id || ''))}"`;
     default: return '';
   }
@@ -10248,6 +11077,8 @@ function nyOpenAttr(o) {
 /* Later's menu button (SPEC-ATTENTION-05); a row lists it last, the Needs you screen's card on its own at the right. */
 const nyLaterBtn = (r, pfx = 'ny', sm = true) => `<button type="button" class="btn${sm ? ' sm' : ''}" data-${pfx}-later="${esc(`${r.id}|${r.source.version}`)}" aria-haspopup="true" aria-label="${esc('Later: ' + r.title)}">Later</button>`;
 function nyBtns(r, open = nyOpenAttr, pfx = 'ny', sm = true, later = true) {
+  // An unclear requirement's one action is the Clarify sheet (Blueprint Review lists these rows too).
+  if (r.kind === 'unclear' && r.item) return `<button type="button" class="btn${sm ? ' sm' : ''} pri" data-clarify="${esc(bpItemArg(r.item.project_id, r.item.key))}" aria-label="${esc(`Clarify: ${r.title}`)}">Clarify</button>` + (later ? nyLaterBtn(r, pfx, sm) : '');
   const inp = r.actions.find((a) => a.input), o = open(r.open), s = sm ? ' sm' : '', go = inp ? inp.label : 'Open';
   return (o ? `<button type="button" class="btn${s}${inp ? ' pri' : ''}" ${o} aria-label="${esc(`${go}: ${r.title}`)}">${esc(go)}</button>` : '')
     + r.actions.filter((a) => !a.input).map((a) => `<button type="button" class="btn${s}${a.tone === 'ok' ? ' ok' : ''}" data-${pfx}="${esc(`${r.id}|${r.source.version}|${a.id}`)}" aria-label="${esc(`${a.label}: ${r.title}`)}">${esc(a.label)}</button>`).join('')
@@ -10300,18 +11131,11 @@ const nyActBtn = (r, a, pfx, cls = '') => `<button type="button" class="btn${cls
    main decision first, at most three) and the rest, which the ⋯ menu lists. */
 function nyBody(r, open, pfx) {
   const d = r.detail, v = `${r.id}|${r.source.version}`;
-  if (r.kind === 'question' && d?.kind === 'question') {
-    const sum = esc(d.context || '');
-    const opts = [...d.options].sort((a, b) => (b.key === d.recommended) - (a.key === d.recommended)), rec = opts.find((o) => o.key === d.recommended);
-    const meta = [d.blocks?.title ? `blocks ${d.blocks.title}` : '', rec ? `recommends ${rec.label}` : ''];
-    // One click per option, recommended first; no options, or an effect too long for a card, goes to the question's screen.
-    if (!opts.length || opts.some((o) => (o.effect || '').length > NY_EFFECT_MAX)) return { sum, ctx: '', meta, acts: [nyOpenBtn(r, open, 'Answer', ' pri')], more: [] };
-    // What each option does stays readable on the card before anyone chooses (a tooltip does not exist on a phone, and ⋯ drops it): one line per option that has an effect.
-    const fx = opts.filter((o) => o.effect).length ? `<ul class="ny-fx">${opts.filter((o) => o.effect).map((o) => `<li><b>${esc(o.label)}</b> · ${esc(o.effect)}</li>`).join('')}</ul>` : '';
-    const ob = (o, pri) => `<button type="button" class="btn${pri ? ' pri' : ''}" data-${pfx}="${esc(`${v}|opt:${o.key}`)}" data-ny-inline="note" data-ny-label="${esc(o.label)}"${o.effect ? ` title="${esc(o.effect)}"` : ''} aria-label="${esc(`Choose: ${o.label}`)}">${esc(o.label)}</button>`;
-    const [o1, o2, ...on] = opts;
-    return { sum, meta, ctx: fx, reply: nyReplyBox('A note for the team, sent with the option you choose', opts.map((o, i) => ob(o, !i)).join('')),
-      acts: [ob(o1, true), o2 ? ob(o2) : '', nyReplyBtn('Add a note…')], more: [...on.map((o) => ob(o)), nyOpenBtn(r, open, 'Answer…')] };
+  // An unclear requirement (docs/dashboard-ux.md, Clarify): the team's question on the card, as inert text, and Clarify opens the sheet.
+  if (r.kind === 'unclear' && r.item) {
+    const ask = r.ask || null, cl = `<button type="button" class="btn pri" data-clarify="${esc(bpItemArg(r.item.project_id, r.item.key))}" aria-label="${esc(`Clarify: ${r.title}`)}">Clarify</button>`;
+    const sum = ask ? `<b>${esc(ask.team_label || 'The team')} asks:</b> ${esc(ask.question)}` : esc(/declined/.test(r.reason || '') ? "The team's question was declined." : "The team didn't say what is unclear.");
+    return { sum, ctx: '', meta: [r.item.priority ? PRI[r.item.priority] || r.item.priority : ''].filter(Boolean), acts: [cl, nyOpenBtn(r, open, 'Open requirement')], more: [] };
   }
   if (r.kind === 'unblock' && d?.kind === 'blocked') {
     const send = `<button type="button" class="btn pri" data-${pfx}="${esc(v + '|unblock')}" data-ny-inline="note" data-ny-need="1" data-ny-label="Reply and unblock">Send and unblock</button>`;
@@ -10329,6 +11153,45 @@ function nyBody(r, open, pfx) {
   const L = [lead ? nyActBtn(r, lead, pfx, ' pri') : '', o ? `<button type="button" class="btn${lead ? '' : ' pri'}" ${o} aria-label="${esc(`${go}: ${r.title}`)}">${esc(go)}</button>` : '', ...one.filter((a) => a !== lead).map((a) => nyActBtn(r, a, pfx))].filter(Boolean);
   return { sum: mdText([nyUntil(r), nySum(r)].filter(Boolean).join(' · ')), ctx: '', meta: [], acts: L.slice(0, 2), more: L.slice(2) };
 }
+/* A question (docs/dashboard-ux.md, Needs you: a question), read at a glance: a chip for what it blocks, then team · asker ·
+   age; the question; each answer once, as a full-width button with its effect under it, the recommended one marked; then
+   Details (the context as Markdown and the blocked task, folded), Add a note… and ⋯. With no options, or an effect too long
+   for a button, Answer opens the question's own screen. The fold is this viewer's, for this page only (NY_QDET). */
+const NY_QDET = new Set();
+function nyQCard(r, open = nyOpenAttr, pfx = 'ny') {
+  const d = r.detail, v = `${r.id}|${r.source.version}`, team = r.scope.team_id, rk = d.recommended;
+  const opts = [...d.options].sort((a, b) => (b.key === rk) - (a.key === rk));
+  const blocked = d.blocks ? [d.blocks] : [];
+  const tsk = (t) => (team && t.id ? ` data-task="${esc(`${team}|${t.id}`)}"` : '');
+  const tip = blocked.map((t) => t.title).join('\n'), lbl = `Blocks ${plural(blocked.length, 'task')}`;
+  const chip = !blocked.length ? '' : tsk(blocked[0]) ? `<button type="button" class="pill warn pill-btn ny-blocks"${tsk(blocked[0])} title="${esc(tip)}" aria-label="${esc(`${lbl}: ${tip}`)}">${esc(lbl)}</button>`
+    : `<span class="pill warn ny-blocks" title="${esc(tip)}">${esc(lbl)}</span>`;
+  const head = `<p class="ny-hd ny-qhd">${ic(nyKind(r.kind)[1])}${chip}<span>${esc([r.back_from_later ? 'Back from Later' : '', nyTeamOf(r), ...nyWho(r), r.at ? `${ago(r.at)} ago` : ''].filter(Boolean).join(' · '))}</span></p>`;
+  const toScreen = !opts.length || opts.some((o) => (o.effect || '').length > NY_EFFECT_MAX);
+  // One button per answer: the label in bold, the Recommended tag, the effect under it. Same action, note and label as before.
+  const ob = (o) => { const rec = o.key === rk;
+    return `<button type="button" class="ny-opt${rec ? ' rec' : ''}" data-${pfx}="${esc(`${v}|opt:${o.key}`)}" data-ny-inline="note" data-ny-label="${esc(o.label)}" aria-label="${esc(`Choose: ${o.label}${rec ? ' (recommended)' : ''}${o.effect ? `. ${o.effect}` : ''}`)}">`
+      + `<span class="ny-opt-l"><b>${esc(o.label)}</b>${rec ? '<span class="pill acc">Recommended</span>' : ''}</span>${o.effect ? `<span class="ny-opt-fx">${esc(o.effect)}</span>` : ''}</button>`; };
+  const answers = toScreen ? `<div class="ny-acts">${nyOpenBtn(r, open, 'Answer', ' pri')}</div>` : `<div class="ny-opts" role="group" aria-label="Answers">${opts.map(ob).join('')}</div>`;
+  const ctx = d.context || '', extra = [r.step || '', r.next ? `Next: ${r.next}` : ''].filter(Boolean);
+  const hasDet = !!(ctx || blocked.length || extra.length), isOpen = hasDet && NY_QDET.has(r.id);
+  const det = !hasDet ? '' : `<div class="ny-qdet" data-ny-qdet${isOpen ? '' : ' hidden'}>${ctx ? `<article class="md ny-qdet-md">${mdDoc(ctx)}</article>` : ''}`
+    + (blocked.length ? `<p class="ny-qdet-blk"><span class="meta">Blocks</span>${blocked.map((t) => (tsk(t) ? `<button type="button" class="lnk"${tsk(t)}>${esc(t.title)}</button>` : `<span>${esc(t.title)}</span>`)).join('')}</p>` : '')
+    + extra.map((x) => `<p class="meta">${esc(x)}</p>`).join('') + '</div>';
+  const more = [nyOpenBtn(r, open, 'Answer…'), nyLaterBtn(r, pfx, false)].filter(Boolean);
+  const foot = `<div class="ny-acts ny-qfoot">${hasDet ? `<button type="button" class="btn ghost ny-qdet-btn" data-ny-qdet-btn aria-expanded="${isOpen}">${ic('chev')}Details</button>` : ''}`
+    + (toScreen ? '' : nyReplyBtn('Add a note…'))
+    + `<button type="button" class="btn ic ny-more" data-ny-more aria-haspopup="true" aria-label="${esc('More actions: ' + mdPlain(r.title || ''))}">${ic('more')}<span class="only-m">More actions</span></button><div class="ny-more-acts" hidden>${more.join('')}</div></div>`;
+  // Add a note… opens the note box with the answers as before: the note goes with the answer chosen there.
+  const reply = toScreen ? '' : nyReplyBox('A note for the team, sent with the option you choose', opts.map((o, i) => `<button type="button" class="btn${i ? '' : ' pri'}" data-${pfx}="${esc(`${v}|opt:${o.key}`)}" data-ny-inline="note" data-ny-label="${esc(o.label)}" aria-label="${esc(`Choose: ${o.label}`)}">${esc(o.label)}</button>`).join(''));
+  return `<article class="ny-card ny-q" data-ny-row="${esc(r.id)}">${head}<h3 class="ny-msg">${mdText(r.title || '')}</h3>${answers}${foot}${det}${reply}</article>`;
+}
+/* Details on a question card: open or fold it, and remember that for this page. */
+function nyQDet(b) {
+  const card = b.closest('[data-ny-row]'), box = card?.querySelector('[data-ny-qdet]'); if (!box) return;
+  const on = box.hidden; box.hidden = !on; b.setAttribute('aria-expanded', String(on));
+  if (on) NY_QDET.add(card.dataset.nyRow); else NY_QDET.delete(card.dataset.nyRow);
+}
 /* A card (docs/design-guidelines.md, Needs you card): the meta line, the item's own title as the heading, its summary cut to
    three lines, any context, a small line for extras, then the buttons and ⋯ (its items wait in a hidden holder, so every
    action keeps its own button and handler). A card with no summary has no third line. */
@@ -10337,6 +11200,7 @@ const nyCardBox = (id, head, title, sum, ctx, meta, acts, more = [], reply = '')
   + `<div class="ny-acts">${acts.filter(Boolean).join('')}${more.length ? `<button type="button" class="btn ic ny-more" data-ny-more aria-haspopup="true" aria-label="${esc('More actions' + (title ? ': ' + mdPlain(title) : ''))}">${ic('more')}<span class="only-m">More actions</span></button><div class="ny-more-acts" hidden>${more.join('')}</div>` : ''}</div>${reply}</article>`;
 /* A row's current step (one sentence) is its summary; who acts after it joins the extras line. */
 function nyCard(r, open = nyOpenAttr, pfx = 'ny') {
+  if (r.kind === 'question' && r.detail?.kind === 'question') return nyQCard(r, open, pfx);
   const b = nyBody(r, open, pfx), sum = r.step ? esc(r.step) : b.sum;
   return nyCardBox(r.id, nyHead(r), r.title, sum, b.ctx, [...b.meta, r.next ? `next: ${r.next}` : ''].filter(Boolean).join(' · '), b.acts, [...b.more, nyLaterBtn(r, pfx, false)], b.reply || '');
 }
@@ -10496,7 +11360,8 @@ function urgent() {
   L.forEach((x) => { x.g = 'alert'; });
   const tmN = (id) => (id ? S.teams.find((x) => x.id === id)?.name || '' : '');
   // Needs you, oldest waiting first, then For awareness newest first (ts orders newest first).
-  for (const r of ny) { const [l, i] = nyKind(r.kind); L.push({ id: r.id, g: 'ny', s: 'warn', r: 1, ts: -r.at, ico: i, ttl: l, tag: tmN(r.scope.team_id), msg: [r.title, nyUntil(r), nySum(r)].filter(Boolean).join(' · '), btns: nyBtns(r, nyOpenAttr, 'ny', false) }); }
+  for (const r of ny) { const [l, i] = nyKind(r.kind); L.push({ id: r.id, g: 'ny', s: 'warn', r: 1, ts: -r.at, ico: i, ttl: l, tag: tmN(r.scope.team_id), msg: [r.title, nyUntil(r), nySum(r)].filter(Boolean).join(' · '), btns: nyBtns(r, nyOpenAttr, 'ny', false),
+    ...(r.kind === 'question' && r.detail?.kind === 'question' ? { card: r } : {}) }); }
   for (const r of aw) { const [l, i] = nyKind(r.kind); L.push({ id: r.id, g: 'aw', s: 'info', r: 4, ts: r.at, ico: i, ttl: l, tag: tmN(r.scope.team_id), msg: [r.title, nyUntil(r), nySum(r)].filter(Boolean).join(' · '), btns: awBtns(r, nyOpenAttr, 'ny', false) }); }
   for (const p of S.pcs) { const e = S.obPc?.get(p.id)?.enrolment; if (e?.status === 'unused') L.push({ id: 'obc' + p.id, g: 'alert', s: 'info', r: 5, ts: e.created_at, ico: 'pc', ttl: 'Code not used yet', tag: p.name, msg: `The prompt for ${p.name} has not been run · ${ago(e.created_at)}`, btns: bt('Open PC', `data-pc="${esc(p.id)}"`, 'pri') }); }
   for (const u of (S.fbc?.urgent || []).filter((x) => !covered.has(x.id))) L.push({ id: u.id, g: 'alert', s: 'warn', r: 2, ts: u.last_seen_at, ico: 'warn', ttl: 'Blocking feedback', tag: u.tool || u.area, msg: `${u.agents} agents report this blocks their work: ${u.title}`, btns: bt('Open', `data-fb="${esc(u.id)}"`, 'pri') });
@@ -10530,7 +11395,7 @@ function renderAlerts(full = true) {
   const moreMeta = [nN ? `${nN} ${nN === 1 ? 'needs' : 'need'} you` : '', aN ? `${aN} for awareness` : '', oN ? plural(oN, 'alert') : '', S.ny?.later?.total ? `${S.ny.later.total} later` : ''].filter(Boolean).join(' · ');
   // A failed read: a row that says so, above any alert, and never "Nothing needs you".
   const nyErr = S.nyErr ? `<div class="card card-row ny-err" role="status">${row({ lead: ic('warn'), title: 'Could not check what needs you', meta: 'The hub did not answer · it tries again in 10 s', chev: true, attrs: { 'data-go': 'needs' } })}</div>` : '';
-  box.innerHTML = nyErr + (!a ? (lt && !S.nyErr ? `<div class="card card-row">${row({ title: 'Nothing needs you', meta: `${lt} later`, chev: true, attrs: { 'data-go': 'needs', 'data-arg': 's=later' } })}</div>` : '') : `<div class="alert${a.s === 'crit' ? ' bad' : a.s === 'info' ? ' info' : ''}" role="group" aria-label="Most urgent" data-ny-row="${esc(a.id)}"><div class="alert-hd"><span class="alert-ico">${ic(a.ico)}</span><span class="alert-title">${esc(a.ttl)}</span>${a.tag ? `<span class="tag">${esc(trunc(a.tag, 28))}</span>` : ''}</div><p class="alert-msg">${mdText(a.msg)}</p><div class="alert-acts">${a.btns}</div></div>`
+  box.innerHTML = nyErr + (!a ? (lt && !S.nyErr ? `<div class="card card-row">${row({ title: 'Nothing needs you', meta: `${lt} later`, chev: true, attrs: { 'data-go': 'needs', 'data-arg': 's=later' } })}</div>` : '') : (a.card ? nyQCard(a.card) : `<div class="alert${a.s === 'crit' ? ' bad' : a.s === 'info' ? ' info' : ''}" role="group" aria-label="Most urgent" data-ny-row="${esc(a.id)}"><div class="alert-hd"><span class="alert-ico">${ic(a.ico)}</span><span class="alert-title">${esc(a.ttl)}</span>${a.tag ? `<span class="tag">${esc(trunc(a.tag, 28))}</span>` : ''}</div><p class="alert-msg">${mdText(a.msg)}</p><div class="alert-acts">${a.btns}</div></div>`)
     + (L.length > 1 || (a && S.ny?.later?.total) ? `<div class="card card-row">${row({ title: L.length > 1 ? `${L.length - 1} more` : 'Set aside', meta: moreMeta, chev: true, attrs: { 'data-go': 'needs', ...(L.length > 1 ? {} : { 'data-arg': 's=later' }) } })}</div>` : ''));
 }
 
@@ -10617,6 +11482,12 @@ function alertInfoMore(a, d, who, team, keyActs, calls) {
   const keys = Array.isArray(d.keys) ? d.keys.slice(0, 4).join(', ') + (d.keys.length > 4 ? ` and ${d.keys.length - 4} more` : '') : d.keys;
   const from = a.subject ? ` from ${a.subject}` : '';
   return {
+    // An agent keeps presenting a session key the hub never issued (docs/onboarding.md, "Alerts").
+    unknown_session_key: ['Agent key not recognised', (() => {
+      const pcN = d.pc?.name || 'An agent', where = d.folder ? ` in the folder ${d.folder}` : '', v = d.session_var ? ` (${d.session_var})` : '';
+      const tms = Array.isArray(d.teams) && d.teams.length ? ` Keys on this PC belong to ${d.teams.map((t) => t.name).join(', ')}.` : '';
+      return `${d.pc ? 'An agent on ' + pcN : pcN} tried ${plural(d.count || 3, 'time')} in ${d.window_minutes || 10} min to sign in with a key the hub does not recognise${where}${v}. The key may be stale or mistyped. Collect the agent's keys again on that PC.${tms}`;
+    })(), [...pcBtn(d.pc?.id), ...(Array.isArray(d.teams) && d.teams[0] ? [['Open team', 'team', `data-team="${esc(d.teams[0].id)}"`]] : [])]],
     onboarding_request: ['Team request', `${pcLabel(d.pc)} asks to ${OB_KIND[d.kind] || 'set up a team'}. Open the request to check the team and the access each agent gets, then approve it.`, req()],
     onboarding_pickup_retry: ['Keys collected again', d.refused
       ? `A PC tried to collect the keys of an approved request a fourth time before confirming, and the hub refused. Check the PC, then press Reissue pickup on the request.`
@@ -11281,7 +12152,10 @@ function prose(text, cls = '', id = '') { return `<div class="md prose${cls ? ' 
    Each becomes a link with a real href, a Choose a note button (several visible matches) or an unavailable label.
    Answers are kept for 30 s, so a screen's redraw asks nothing new. */
 const VL = { cache: new Map(), busy: false };
-const vlHref = (path, anchor = '') => (MU.on ? '#m/file/' + encodeURIComponent(path) + (anchor ? '#' + encodeURIComponent(anchor) : '')
+// The hub answers a link to a folder with its path and a trailing slash; it opens as that folder (#vault, #m/vault).
+const vlDir = (path) => (path.endsWith('/') ? path.slice(0, -1) : '');
+const vlHref = (path, anchor = '') => (vlDir(path) ? (MU.on ? '#m/vault/' + encodeURIComponent(vlDir(path)) : routeOf('vault', { tab: 'contents', path: vlDir(path) }))
+  : MU.on ? '#m/file/' + encodeURIComponent(path) + (anchor ? '#' + encodeURIComponent(anchor) : '')
   : routeOf('vault', { tab: 'contents', path, file: true, anchor }));
 const vlLink = (path, anchor, label, cls = 'md-wl') => `<a class="${cls}" href="${esc(vlHref(path, anchor))}" data-vl-path="${esc(path)}"${anchor ? ` data-vl-a="${esc(anchor)}"` : ''} title="${esc(path)}">${label}</a>`;
 async function vlDraw() {
@@ -11306,9 +12180,11 @@ async function vlDraw() {
       }
       for (const e of L) {
         if (!e.isConnected) continue;
-        const found = fresh(e.dataset.vlP ? key('p', e.dataset.vlP) : key('t', e.dataset.vlT))?.v || [], a = e.dataset.vlA || '', label = e.innerHTML;
+        const found = fresh(e.dataset.vlP ? key('p', e.dataset.vlP) : key('t', e.dataset.vlT))?.v || [], a = e.dataset.vlA || '';
+        // A collaborator reads a note they cannot open by its name only, never the folders the text names (multi-user.md §7).
+        const label = MU.on && !found.length ? esc(e.textContent.split('/').pop().trim() || e.textContent) : e.innerHTML;
         // An embed opens one file or none: the vault media player (slice 3e) takes [data-vault-embed]; an ambiguous name is unavailable.
-        if ('vlEmbed' in e.dataset) { e.outerHTML = found.length === 1 ? `<span class="md-embed" data-vault-embed="${esc(found[0])}">${label}</span>` : `<span class="md-embed miss" title="${MD_UNAVAILABLE}">${label}</span>`; continue; }
+        if ('vlEmbed' in e.dataset) { e.outerHTML = found.length === 1 && !vlDir(found[0]) ? `<span class="md-embed" data-vault-embed="${esc(found[0])}">${label}</span>` : `<span class="md-embed miss" title="${MD_UNAVAILABLE}">${label}</span>`; continue; }
         e.outerHTML = found.length === 1 ? vlLink(found[0], a, label)
           : found.length ? `<button type="button" class="md-wl md-wl-pick" data-vl-pick="${esc(found.join('\n'))}"${a ? ` data-vl-a="${esc(a)}"` : ''}>${label}</button>`
           : `<span class="md-wl miss" title="${MD_UNAVAILABLE}">${label}</span>`;
@@ -11330,7 +12206,8 @@ function vlOpen(path, anchor) {
   const here = [...$$('[data-md-from]')].find((x) => x.dataset.mdFrom === path);
   if (here && anchor) { delete here.dataset.mdScrolled; here.dataset.mdAnchor = anchor; mdAnchorScroll(); return; }
   if (MU.on) { history.pushState(null, '', vlHref(path, anchor)); muRoute(); return; }
-  openD('vault', { ...vaultState(DR.type === 'vault' ? DR.arg : undefined), tab: 'contents', path, file: true, collapsed: null, anchor }, DR.type === 'vault');
+  const dir = vlDir(path);
+  openD('vault', { ...vaultState(DR.type === 'vault' ? DR.arg : undefined), tab: 'contents', path: dir || path, file: !dir, collapsed: null, anchor: dir ? '' : anchor }, DR.type === 'vault');
 }
 document.addEventListener('click', (e) => {
   const a = e.target.closest?.('a[data-vl-path]'), pick = e.target.closest?.('[data-vl-pick]');
@@ -12089,7 +12966,7 @@ VIEWS.fbr = async (id) => {
     <div class="fb-gedit" hidden><textarea class="inp" id="fbGTxt" rows="3" maxlength="2000" aria-label="Guidance for agents">${esc(r.guidance || '')}</textarea><div class="row"><button type="button" class="btn sm" id="fbGCancel">Cancel</button><button type="button" class="btn sm pri" id="fbGSave">Save guidance</button></div></div>
     ${r.status_note ? `${overline(r.status === 'needs_info' ? 'Your question' : 'Note')}<p class="fb-text">${esc(r.status_note)}</p>` : ''}</section>`;
   const cells = [['Tried', r.tried], ['Happened', r.happened], ['Expected', r.expected], ['Workaround', r.workaround]].filter(([, v]) => v);
-  const account = cells.length ? `<section class="pcard fb-sec">${overline("Agent's account", null, info('Written by the agent that filed it.'))}<div class="fb-acct">${cells.map(([k, v]) => `<div class="fb-cell">${overline(k)}${prose(v)}</div>`).join('')}</div></section>` : '';
+  const account = cells.length ? `<section class="pcard fb-sec fb-accts">${overline("Agent's account", null, info('Written by the agent that filed it.'))}<div class="fb-acct">${cells.map(([k, v]) => `<div class="fb-cell">${overline(k)}${prose(v)}</div>`).join('')}</div></section>` : '';
 
   // Side: the facts, who is affected, and the hub's own evidence. Empty fields are left out.
   const kvs = [
@@ -12217,6 +13094,7 @@ document.addEventListener('click', (e) => {
   if (!t.closest('#meMenu')) closeMe();
   const c = t.closest('[data-copy]'); if (c) { const v = c.closest('[data-v]'); const once = ONCE && ONCE.el.contains(c) ? ONCE : null; copy(v ? v.dataset.v : c.dataset.copy, () => { if (once && ONCE === once) once.copied = true; }); return; }
   // A Needs you row's one-click actions and dismissals (Home, the Needs you screen, a team or Blueprint page).
+  const nyq = t.closest('[data-ny-qdet-btn]'); if (nyq) { nyQDet(nyq); return; }
   const nyr = t.closest('[data-ny-reply]'); if (nyr) { nyReply(nyr); return; }
   const nyx = t.closest('[data-ny-reply-x]'); if (nyx) { nyReply(nyx, false); return; }
   const nym = t.closest('[data-ny-more]'); if (nym) { nyMore(nym); return; }
@@ -12252,6 +13130,7 @@ document.addEventListener('click', (e) => {
   const df = t.closest('[data-df]'); if (df) { openD('diff', df.dataset.df); return; }
   const grant = t.closest('[data-grant-flow]');
   if (grant) { openD(grant.dataset.grantFlow); return; }
+  const sn = t.closest('[data-sec-new]'); if (sn) { openMenu(SEC_NEW(), sn); return; }
   const nk = t.closest('[data-new-key]');
   if (nk) { openMenu([{ label: 'New session key', icon: 'key', fn: () => go('new') }, { label: 'New app key', icon: 'app', fn: () => go('app') }], nk); return; }
   const g = t.closest('[data-go]'); if (g) { closeSheet(); go(g.dataset.go, g.dataset.arg); return; }
@@ -12277,8 +13156,17 @@ document.addEventListener('click', (e) => {
   // A fold of the section 2 summary (an area, or its settled rows) opens and closes in place; the area's state is remembered per project.
   const fold = t.closest('[data-bp-fold]'); if (fold) { const open = fold.getAttribute('aria-expanded') !== 'true'; fold.setAttribute('aria-expanded', String(open)); const b = fold.closest('.bp-area')?.querySelector('.bp-ab'); if (b) b.hidden = !open; try { const k = 'bp-sum-fold:' + fold.dataset.pid, m = JSON.parse(localStorage.getItem(k) || '{}') || {}; m[fold.dataset.bpFold] = open ? 1 : 0; localStorage.setItem(k, JSON.stringify(m)); } catch { /* remembering is a convenience */ } return; }
   const more = t.closest('[data-bp-more]'); if (more) { const open = more.getAttribute('aria-expanded') !== 'true'; more.setAttribute('aria-expanded', String(open)); if (more.nextElementSibling) more.nextElementSibling.hidden = !open; more.textContent = `${more.dataset.n} ${more.dataset.w} · ${open ? 'Hide' : 'Show'}`; return; }
+  const clr = t.closest('[data-clarify]'); if (clr) { const a = clr.dataset.clarify, c = a.indexOf('|'); run(() => clarifySheet(a.slice(0, c), a.slice(c + 1), clr)); return; }
   const bpi = t.closest('[data-bp]'); if (bpi) { openD('bp', bpi.dataset.bp); return; }
-  const bpv = t.closest('[data-bpv]'); if (bpv) { openD('blueprint', bpv.dataset.bpv, DR.type === 'blueprint' && String(DR.arg).split('|')[0] === bpv.dataset.bpv.split('|')[0]); return; }
+  // The count table's Other cell opens that row's folded columns in a small popover; each one filters as its own cell would.
+  const xo = t.closest('[data-bp-other]'); if (xo) { const tp = $(`template[data-bp-xo="${xo.dataset.bpOther}"]`, xo.closest('.bp-xcard'));
+    if (tp) openSheet({ title: tp.dataset.title, html: `<div class="bp-xop">${tp.innerHTML}</div>`, anchor: xo }); return; }
+  // Focus returns to the control pressed (a cell's fk names it), without moving the page; a swap makes the axes the viewer's.
+  const bpv = t.closest('[data-bpv]'); if (bpv) { const fk = bpv.dataset.bpFk, xc = bpv.closest('.bp-xcard');
+    if (fk === 'xswap' && xc) { const [r, c] = xc.dataset.bpX.split('*'); BP_XU = { x: `${c}*${r}`, w: innerWidth }; }
+    const p = openD('blueprint', bpv.dataset.bpv, DR.type === 'blueprint' && String(DR.arg).split('|')[0] === bpv.dataset.bpv.split('|')[0]);
+    if (fk) Promise.resolve(p).then(() => ($$('[data-bp-fk]', $('#dB')).find((el) => el.dataset.bpFk === fk && el.offsetParent) || $('#dB .bp-where button, #dB .bp-show'))?.focus({ preventScroll: !!(xc || fk.startsWith('xo:')) }));
+    return; }
   const obs = t.closest('[data-ob-src]'); if (obs) { obSourceSheet(obs); return; }
   const obd = t.closest('[data-ob-setup]'); if (obd) { obSetupSheet(obd); return; }
   const unb = t.closest('[data-unb]'); if (unb) { unblockSheet(unb); return; }

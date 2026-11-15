@@ -59,7 +59,7 @@ beforeAll(async () => {
   base = `http://127.0.0.1:${(app.fastify.server.address() as { port: number }).port}`;
   admin = await login('admin');
   cnv = (await call(admin, 'POST', '/projects', { key: 'CNV', name: 'Conclave' })).body.project.id;
-  brz = (await call(admin, 'POST', '/projects', { key: 'BRZ', name: 'Biraz' })).body.project.id;
+  brz = (await call(admin, 'POST', '/projects', { key: 'BRZ', name: 'Echo' })).body.project.id;
   coord = mk('cnv-coord'); coord2 = mk('cnv2-coord');
   one = team(cnv, 'CNV One', coord); two = team(cnv, 'CNV Two', coord2); other = team(brz, 'BRZ One', mk('brz-coord'));
   const w = await call(admin, 'POST', `/projects/${cnv}/ops`, { version: ver(), ops: [
@@ -74,7 +74,7 @@ beforeAll(async () => {
     { op: 'upsert', kind: 'module', key: 'SPARE', title: 'An empty track', team_id: one },
   ] });
   expect(w.status).toBe(200);
-  expect((await call(admin, 'POST', `/projects/${brz}/ops`, { version: ver(brz), ops: [{ op: 'upsert', kind: 'module', key: 'BRZ', title: 'Biraz module', team_id: other }] })).status).toBe(200);
+  expect((await call(admin, 'POST', `/projects/${brz}/ops`, { version: ver(brz), ops: [{ op: 'upsert', kind: 'module', key: 'BRZ', title: 'Echo module', team_id: other }] })).status).toBe(200);
   const mkUser = async (username: string) => {
     const c = await call(admin, 'POST', '/users', { username });
     // Sign in once with the password the hub generated, then choose the test's own.

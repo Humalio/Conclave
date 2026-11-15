@@ -52,7 +52,7 @@ describe('Add dialog', () => {
     expect(sheet).toContain('view(start);');
   });
   it('names the chosen agent in the paste line and shows the waiting line', () => {
-    expect(sheet).toContain('Paste this into <b>${esc(jnAgent(client))}</b> on <b>${esc(made.pc.name)}</b>. The prompt works once');
+    expect(sheet).toContain('Paste this into <b>${esc(jnAgent(client))}</b> on <b>${esc(made.pc.name)}</b>. The pairing code in it works once and is not shown again; ');
     expect(js).toContain("const jnAgent = (c) => (c === 'other' ? 'your coding agent' : promptClient(c));");
     expect(sheet).toContain("Waiting for <b>${esc(made.pc.name)}</b>. You'll approve its request here.");
     expect(sheet).not.toMatch(/into Claude Code/);

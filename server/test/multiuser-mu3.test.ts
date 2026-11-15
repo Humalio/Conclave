@@ -55,7 +55,7 @@ beforeAll(async () => {
   base = `http://127.0.0.1:${(app.fastify.server.address() as { port: number }).port}`;
   admin = await login('admin');
   cnv = (await call(admin, 'POST', '/projects', { key: 'CNV', name: 'Conclave' })).body.project.id;
-  brz = (await call(admin, 'POST', '/projects', { key: 'BRZ', name: 'Biraz' })).body.project.id;
+  brz = (await call(admin, 'POST', '/projects', { key: 'BRZ', name: 'Echo' })).body.project.id;
   coord = mk('cnv-coord'); worker = mk('cnv-worker'); brzCoord = mk('brz-coord');
   one = await team(cnv, 'CNV One', [coord, worker]);
   coord2 = mk('cnv2-coord');
@@ -81,7 +81,7 @@ describe('deciders and the ceiling (admin)', () => {
     expect((await call(admin, 'PUT', `/teams/${one}/deciders`, { user_ids: [adminId] })).status).toBe(400);
     expect((await call(admin, 'PUT', `/teams/${other}/deciders`, { user_ids: [danaId] })).body.message).toMatch(/no grant/);
     expect((await call(admin, 'PUT', `/teams/${one}/deciders`, { user_ids: [danaId], ceiling: { folders: ['/Projects/Conclave/Restricted/'] } })).body.message).toMatch(/restricted/);
-    expect((await call(admin, 'PUT', `/teams/${one}/deciders`, { user_ids: [danaId], ceiling: { folders: ['/Projects/Biraz/'] } })).body.message).toMatch(/outside the project/);
+    expect((await call(admin, 'PUT', `/teams/${one}/deciders`, { user_ids: [danaId], ceiling: { folders: ['/Projects/Echo/'] } })).body.message).toMatch(/outside the project/);
     expect((await call(admin, 'PUT', `/teams/${one}/deciders`, { user_ids: [danaId], ceiling: { actions: ['keys.rotate'] } })).status).toBe(400);
     expect((await call(dana, 'PUT', `/teams/${one}/deciders`, { user_ids: [danaId] })).status).toBe(403);
     const r = await call(admin, 'PUT', `/teams/${one}/deciders`, { user_ids: [danaId] });
@@ -106,7 +106,7 @@ describe('questions', () => {
     // A question of a team she does not decide for (but can see): 403. Another project's: like an unknown id.
     const q2 = app.decisions.ask(who(coord2), { team_id: two, question: 'Other team?' }).id;
     expect((await call(dana, 'POST', `/decisions/${q2}/answer`, { text: 'x' })).body.error).toBe('not_decider');
-    const q3 = app.decisions.ask(who(brzCoord), { team_id: other, question: 'Biraz?' }).id;
+    const q3 = app.decisions.ask(who(brzCoord), { team_id: other, question: 'Echo?' }).id;
     const hidden = await call(dana, 'POST', `/decisions/${q3}/answer`, { text: 'x' }), unknown = await call(dana, 'POST', '/decisions/dec_nope/answer', { text: 'x' });
     expect([hidden.status, hidden.text]).toEqual([unknown.status, unknown.text]);
     expect((await call(dana, 'GET', `/decisions/${q3}`)).status).toBe(404);
@@ -137,7 +137,7 @@ describe('questions', () => {
     const q2 = app.decisions.ask(who(coord), { team_id: one, question: 'Which?', options: opts }).id;
     expect((await call(dana, 'POST', `/decisions/${q2}/answer`, { option: 'z', text: null })).status).toBe(400);
     // Outside the grant: another project's question reads like an unknown one, for the page and for Choose.
-    const out = app.decisions.ask(who(brzCoord), { team_id: other, question: 'Biraz option?', options: opts, recommended: 'a' }).id;
+    const out = app.decisions.ask(who(brzCoord), { team_id: other, question: 'Echo option?', options: opts, recommended: 'a' }).id;
     const [seen, nope] = [await call(dana, 'GET', `/decisions/${out}`), await call(dana, 'GET', '/decisions/dec_nope')];
     expect([seen.status, seen.text]).toEqual([nope.status, nope.text]);
     const [hid, unk] = [await call(dana, 'POST', `/decisions/${out}/answer`, { option: 'a', text: null }), await call(dana, 'POST', '/decisions/dec_nope/answer', { option: 'a', text: null })];
@@ -205,7 +205,7 @@ describe('access requests and the ceiling (D1)', () => {
     expect(ok.team_id).toBe(one);
     const del = ask(['fs.delete'], 'path:/vault/Projects/Conclave/notes/**');
     const restricted = ask(['fs.read'], 'path:/vault/Projects/Conclave/**');
-    const outside = ask(['fs.read'], 'path:/vault/Projects/Biraz/**');
+    const outside = ask(['fs.read'], 'path:/vault/Projects/Echo/**');
     const list = (await call(dana, 'GET', '/requests')).body.requests.map((r: any) => r.id);
     expect(list).toEqual([ok.id]);
     expect((await needs(dana, 'access_request'))).toEqual([ok.id]);

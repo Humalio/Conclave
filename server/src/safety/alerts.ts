@@ -16,8 +16,10 @@ export interface AlertOpts {
   loginMax: number; loginWindowMs: number;
   /** Hourly volume alert fires above max(floor, factor x the key's own average of busy hours). */
   volumeFloor: number; volumeFactor: number;
+  /** Refusals of one session key id from one source within the window before the unknown-key alert (docs/onboarding.md, "Alerts"). */
+  unknownKeyMax: number; unknownKeyWindowMs: number;
 }
-export const DEFAULT_ALERT_OPTS: AlertOpts = { denialMax: 10, denialWindowMs: 10 * 60_000, loginMax: 10, loginWindowMs: 10 * 60_000, volumeFloor: 100, volumeFactor: 5 };
+export const DEFAULT_ALERT_OPTS: AlertOpts = { denialMax: 10, denialWindowMs: 10 * 60_000, loginMax: 10, loginWindowMs: 10 * 60_000, volumeFloor: 100, volumeFactor: 5, unknownKeyMax: 3, unknownKeyWindowMs: 10 * 60_000 };
 const HOUR = 3600_000;
 
 const volumeClass = (tool: string): 'write' | 'message' | 'channel' | null =>
@@ -89,6 +91,26 @@ export class Alerts {
     if (before < this.opts.loginMax && after >= this.opts.loginMax) {
       this.audit.alert('warning', 'login_burst', e.source, { count: after, window_minutes: this.opts.loginWindowMs / 60_000, last_outcome: e.outcome, last_subject: e.subject });
     }
+  }
+
+  /**
+   * A session key the hub does not recognise, refused again and again from one place: an agent whose folder holds a
+   * stale or mistyped key keeps retrying, while a single typo does not. Counted over a sliding window from the sign-in
+   * records, by source and key id; the alert names the PC, the teams whose keys are bound to it, and the folder and
+   * variable the headers helper reported (never the key).
+   */
+  unknownKey(c: { keyId: string | null; source: string | null; appId: string; machineId: string | null; folder?: string | null; sessionVar?: string | null }, now = Date.now()): void {
+    if (!c.keyId) return;
+    const n = (this.db.prepare("SELECT COUNT(*) AS n FROM authentication_events WHERE subject_kind='session_key' AND credential_id IS NULL AND outcome IN ('unknown','invalid') AND key_id_presented=? AND source IS ? AND created_at>?")
+      .get(c.keyId, c.source, now - this.opts.unknownKeyWindowMs) as { n: number }).n;
+    if (n < this.opts.unknownKeyMax) return;
+    const pc = c.machineId ? this.keys.machine(c.machineId) : null;
+    const teams = c.machineId ? (this.db.prepare(`SELECT DISTINCT t.id, t.name FROM credentials k JOIN team_members m ON m.agent_id=k.agent_id AND m.removed_at IS NULL
+      JOIN teams t ON t.id=m.team_id WHERE k.kind='session_key' AND k.status='active' AND k.bound_machine_id=? ORDER BY t.name`).all(c.machineId) as { id: string; name: string }[]) : [];
+    this.audit.alert('warning', 'unknown_session_key', `${c.machineId ?? 'src:' + (c.source ?? '?')}/${c.keyId}`, {
+      presented_id: c.keyId, count: n, window_minutes: this.opts.unknownKeyWindowMs / 60_000,
+      pc: pc ? { id: pc.id, name: pc.name } : null, teams, folder: c.folder ?? null, session_var: c.sessionVar ?? null, app: c.appId, source: c.source,
+    });
   }
 
   /** Forget old counters (called by the scheduler). */

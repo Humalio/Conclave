@@ -335,7 +335,7 @@ describe('console: Dropped rows and section counts', () => {
     expect(js).toContain('const acFull = it.archived ? acs : ');
   });
   it('asks the hub for a page of the browse list only when a filter is set', () => {
-    expect(js).toContain('filtered ? bpBrowse(pid, { ...fq, limit: 25, cursor: f.at }) : null');
+    expect(js).toContain("filtered ? bpBrowse(pid, { ...fq, x: la && f.x !== '-' ? f.x || bpLaX(tab, f.kind) : '', limit: 25, cursor: f.at }) : null");
     expect(js).toContain('counts: r.browse?.counts');
   });
 });

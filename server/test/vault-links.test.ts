@@ -22,7 +22,10 @@ const call = async (who: S, body: unknown, method = 'POST', path = '/api/vault/l
 const FROM = '/vault/Projects/X/Notes/today.md';
 const FILES = ['Projects/X/Notes/today.md', 'Projects/X/Notes/Plan.md', 'Projects/X/Plan.md', 'Projects/X/Records/log.md',
   'Projects/X/Restricted/secret.md', 'Other/Plan.md', 'Other/hidden.md', '.obsidian/workspace.md',
-  'Home.md', 'Projects/X/Notes/My Note.md', 'Shared/Brief.md', 'Projects/X/Notes/Shared/Brief.md'];
+  'Home.md', 'Projects/X/Notes/My Note.md', 'Shared/Brief.md', 'Projects/X/Notes/Shared/Brief.md',
+  // A papers README that links its subfolders' notes and the paper folders themselves (the operator's 05 Papers/README.md).
+  'Papers/README.md', 'Papers/01 Writing/README.md', 'Papers/01 Writing/Paper A/draft.md', 'Papers/03 Published/Paper B.pdf',
+  'Papers/03 Published/Paper C/slides.pdf', 'Papers/Twin.md', 'Papers/Twin/notes.md', 'Shared/01 Writing/README.md'];
 
 beforeAll(async () => {
   const dir = mkdtempSync(join(tmpdir(), 'ahlinks-'));
@@ -106,14 +109,43 @@ describe('POST /api/vault/links', () => {
       log: ['/vault/Projects/X/Records/log.md'],
       'My Note': ['/vault/Projects/X/Notes/My Note.md'],
       'Notes/My Note.md': ['/vault/Projects/X/Notes/My Note.md'],
-      // The vault root comes before the note's folder, as in Obsidian.
-      'Shared/Brief.md': ['/vault/Shared/Brief.md'],
+      // The note's folder comes before the vault root, as in Obsidian.
+      'Shared/Brief.md': ['/vault/Projects/X/Notes/Shared/Brief.md'],
       // Case is ignored when no file has the exact path.
       'projects/x/plan.md': ['/vault/Projects/X/Plan.md'],
       'Projects/X/none.md': [],
       '../../../../x.md': [],
       '/../x.md': [],
     });
+  });
+
+  it('resolves a papers README: paths next to the note first, then from the root, and links to folders', async () => {
+    const R = '/vault/Papers/README.md';
+    expect(await links(admin, R, ['01 Writing/README.md', '01 Writing/Paper A', '03 Published/Paper B.pdf', '03 Published/Paper C',
+      'Papers/01 Writing/Paper A', '/Papers/03 Published/Paper C', '../Papers/01 Writing/Paper A', 'Shared/01 Writing/README.md', 'Twin', '01 Writing/Gone', '../Gone']))
+      .toEqual({
+        // Next to the note, with or without .md, a file or a folder (a paper's folder opens as that folder).
+        '01 Writing/README.md': ['/vault/Papers/01 Writing/README.md'],
+        '01 Writing/Paper A': ['/vault/Papers/01 Writing/Paper A/'],
+        '03 Published/Paper B.pdf': ['/vault/Papers/03 Published/Paper B.pdf'],
+        '03 Published/Paper C': ['/vault/Papers/03 Published/Paper C/'],
+        // Not next to the note: from the vault root, or written from the root or relative.
+        'Papers/01 Writing/Paper A': ['/vault/Papers/01 Writing/Paper A/'],
+        '/Papers/03 Published/Paper C': ['/vault/Papers/03 Published/Paper C/'],
+        '../Papers/01 Writing/Paper A': ['/vault/Papers/01 Writing/Paper A/'],
+        'Shared/01 Writing/README.md': ['/vault/Shared/01 Writing/README.md'],
+        // A note wins over a folder of the same name.
+        Twin: ['/vault/Papers/Twin.md'],
+        '01 Writing/Gone': [],
+        '../Gone': [],
+      });
+    // From the root note, the same folder resolves from the root.
+    expect(await links(admin, '/vault/Home.md', ['Papers/01 Writing/Paper A'])).toEqual({ 'Papers/01 Writing/Paper A': ['/vault/Papers/01 Writing/Paper A/'] });
+  });
+
+  it('opens a folder for a member only when the grant shows it, the same answer as a missing one otherwise', async () => {
+    const r = await links(ana, FROM, ['../Records', '../Restricted', '../../../Papers/01 Writing/Paper A', '../Nothing']);
+    expect(r).toEqual({ '../Records': ['/vault/Projects/X/Records/'], '../Restricted': [], '../../../Papers/01 Writing/Paper A': [], '../Nothing': [] });
   });
 
   it('resolves root-relative links from a note at the vault root', async () => {

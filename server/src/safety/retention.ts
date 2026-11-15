@@ -7,9 +7,10 @@ import type { Alerts } from './alerts.js';
 
 const DAY = 86400_000;
 export const BATCH = 5000;
-export interface RetentionConfig { sharesDays: number; channelsDays: number; workItemsDays: number; blobGraceMs: number }
-export const DEFAULT_RETENTION: RetentionConfig = { sharesDays: 90, channelsDays: 90, workItemsDays: 30, blobGraceMs: DAY };
-export interface RetentionResult { shares: number; channels: number; workItems: number; blobs: number; pruned?: Record<string, number> }
+export interface RetentionConfig { sharesDays: number; channelsDays: number; workItemsDays: number; usageDays: number; blobGraceMs: number }
+/** Connector usage reports are kept 400 days (a year compared with the last), whatever the PC's opt-in says later. */
+export const DEFAULT_RETENTION: RetentionConfig = { sharesDays: 90, channelsDays: 90, workItemsDays: 30, usageDays: 400, blobGraceMs: DAY };
+export interface RetentionResult { shares: number; channels: number; workItems: number; usage: number; blobs: number; pruned?: Record<string, number> }
 
 export class Maintenance {
   private timer: NodeJS.Timeout | null = null;
@@ -35,7 +36,7 @@ export class Maintenance {
     finally { this.running = false; }
   }
 
-  /** Settings override the defaults: retention.shares_days, retention.channels_days, retention.work_items_days. */
+  /** Settings override the defaults: retention.shares_days, retention.channels_days, retention.work_items_days, retention.usage_days. */
   private days(key: string, dflt: number): number {
     const r = this.db.prepare('SELECT value FROM system_settings WHERE key=?').get(key) as { value: string } | undefined;
     const n = r ? Number(JSON.parse(r.value)) : NaN;
@@ -43,10 +44,13 @@ export class Maintenance {
   }
 
   async run(now = Date.now()): Promise<RetentionResult> {
-    const out: RetentionResult = { shares: 0, channels: 0, workItems: 0, blobs: 0 };
+    const out: RetentionResult = { shares: 0, channels: 0, workItems: 0, usage: 0, blobs: 0 };
     out.shares = this.deleteShares(now - this.days('retention.shares_days', this.cfg.sharesDays) * DAY);
     out.channels = this.batched("DELETE FROM data_channels WHERE id IN (SELECT id FROM data_channels WHERE status IN ('done','expired','closed','failed') AND COALESCE(finished_at, created_at)<? LIMIT ?)", now - this.days('retention.channels_days', this.cfg.channelsDays) * DAY);
     out.workItems = this.batched('DELETE FROM work_items WHERE id IN (SELECT id FROM work_items WHERE acked_at IS NOT NULL AND acked_at<? LIMIT ?)', now - this.days('retention.work_items_days', this.cfg.workItemsDays) * DAY);
+    // Usage days older than the rule go, by the day they describe. Turning reports off on the PC stops new ones only.
+    const usageCutoff = new Date(now - this.days('retention.usage_days', this.cfg.usageDays) * DAY).toISOString().slice(0, 10);
+    out.usage = this.batched('DELETE FROM connector_usage WHERE rowid IN (SELECT rowid FROM connector_usage WHERE day<? LIMIT ?)', usageCutoff);
     out.pruned = this.prune(now);
     out.blobs = await this.gcBlobs(now - this.cfg.blobGraceMs);
     return out;
@@ -83,7 +87,7 @@ export class Maintenance {
     return out;
   }
 
-  private batched(sql: string, cutoff: number): number {
+  private batched(sql: string, cutoff: number | string): number {
     let total = 0;
     for (;;) {
       const n = Number(this.db.prepare(sql).run(cutoff, BATCH).changes);

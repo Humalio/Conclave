@@ -41,11 +41,11 @@ export const KINDS: Record<string, KindSpec> = {
   module: { key: /^[A-Z]{2,6}$/, format: '2 to 6 capitals', example: 'TEAM', track: true, fields: { epic: 'str' } },
   fr: {
     key: /^FR-[A-Z]{2,6}-\d{2,}$/, format: 'FR-<module>-nn', example: 'FR-TEAM-04', pad: 2, parents: ['module'], parentRequired: true, statuses: REQ_STATUS,
-    fields: { priority: PRIORITY, stories: 'strs', unclear: 'bool', evidence: 'str', source: 'str' },
+    fields: { priority: PRIORITY, stories: 'strs', unclear: 'bool', unclear_ask: 'str', evidence: 'str', source: 'str' },
   },
   nfr: {
     key: /^NFR-(PERF|SEC|REL|USE|OPS)-\d{2,}$/, format: 'NFR-<CAT>-nn, CAT one of PERF, SEC, REL, USE, OPS', example: 'NFR-SEC-01', pad: 2, parents: ['module'], statuses: REQ_STATUS,
-    fields: { category: ['performance', 'security', 'reliability', 'usability', 'operations'], subcategory: 'str', target: 'str', priority: PRIORITY, unclear: 'bool', evidence: 'str', source: 'str' },
+    fields: { category: ['performance', 'security', 'reliability', 'usability', 'operations'], subcategory: 'str', target: 'str', priority: PRIORITY, unclear: 'bool', unclear_ask: 'str', evidence: 'str', source: 'str' },
   },
   ac: {
     key: /^.+\/AC\d+$/, format: '<parent>/ACn', example: 'FR-TEAM-04/AC1', pad: 0, parents: ['fr', 'nfr'], parentRequired: true, statuses: ['open', 'passing', 'failing', 'waived'],

@@ -10,8 +10,9 @@ import type { CheckoutKeys } from '../checkout/render.js';
 import { LEFTOVER_KINDS, DEFAULT_REPO_HOSTS, REPO_HOSTS_MAX } from '../checkout/fields.js';
 import type { Teams } from '../teams/teams.js';
 import { checkoutStep, type CheckoutStep } from '../checkout/step.js';
+import type { Delegations } from '../checkout/delegate.js';
 
-export interface CheckoutApiDeps { checkouts: Checkouts; checkoutKeys: CheckoutKeys; teams?: Teams; label?: (agentId: string) => string }
+export interface CheckoutApiDeps { checkouts: Checkouts; checkoutKeys: CheckoutKeys; delegations?: Delegations; teams?: Teams; label?: (agentId: string) => string }
 
 const agentChoice = z.object({ provider: z.string().optional(), model: z.string().nullable().optional(), permissions: z.string().optional() }).strict();
 const renderBody = z.object({
@@ -39,7 +40,9 @@ export function registerCheckoutApi(api: FastifyInstance, d: CheckoutApiDeps, ac
   const full = (id: string) => ({ checkout: { ...co.view(id), step: stepOf(id) }, ...ck.details(id) });
 
   api.post('/api/teams/:id/checkout', async (req) => full(co.start(idOf(req), actor(req)).id));
-  api.get('/api/teams/:id/checkout', async (req) => { const c = co.openFor(idOf(req)); return c ? full(c.id) : { checkout: null }; });
+  // A team checkout lists the members delegated elsewhere: they must be taken back first (F1).
+  const delegatedIn = (teamId: string) => co.delegations({ teamId }).map((c) => ({ checkout_id: c.id, agent_id: c.agent_id, agent: d.label?.(c.agent_id!) ?? c.agent_id, delegate: co.personLabel(c.delegate_user_id), status: c.status }));
+  api.get('/api/teams/:id/checkout', async (req) => { const c = co.openFor(idOf(req)); return { ...(c ? full(c.id) : { checkout: null }), delegated: delegatedIn(idOf(req)) }; });
   // Attention (§7): open checkouts with the steps that wait on the operator (needs_operator); without open=1, the latest 50.
   api.get('/api/checkouts', async (req) => {
     const q = req.query as { open?: string; limit?: string };
@@ -51,7 +54,7 @@ export function registerCheckoutApi(api: FastifyInstance, d: CheckoutApiDeps, ac
       const needs = (open || ['collecting', 'ready', 'rendered', 'restoring'].includes(c.status)) ? co.needsOperator(c, now) : [];
       const pc = pcWaits(c);
       if (pc) needs.push({ kind: 'approve_pc', ...pc });
-      return { id: c.id, team_id: c.team_id, team: t?.name ?? null, status: c.status, created_at: c.created_at, expires_at: c.expires_at, overdue_at: c.overdue_at,
+      return { id: c.id, team_id: c.team_id, team: t?.name ?? null, status: c.status, scope: c.scope ?? 'team', agent_id: c.agent_id ?? null, created_at: c.created_at, expires_at: c.expires_at, overdue_at: c.overdue_at,
         handouts: { total: H.length, written: H.filter((h) => h.status === 'written' || h.status === 'consumed').length }, needs_operator: needs, step: stepOf(c.id) };
     }) };
   });
@@ -102,4 +105,35 @@ export function registerCheckoutApi(api: FastifyInstance, d: CheckoutApiDeps, ac
     return full(idOf(req));
   });
   api.post('/api/checkouts/:id/finish', async (req) => { co.finish(idOf(req), actor(req)); return full(idOf(req)); });
+
+  // ───── Delegate one agent to a collaborator (§9 F1) ─────
+  // Admin: the sheet's preview (what the agent keeps and loses with this person), Delegate, the list and Take back. The
+  // prompt never appears here: the delegate opens it in their own console.
+  const dl = d.delegations;
+  if (!dl) return;
+  const userId = (req: FastifyRequest) => (req as FastifyRequest & { admin?: { id: string } }).admin!.id;
+  api.get('/api/agents/:id/delegate/preview', async (req) => {
+    const q = z.object({ user_id: z.string().min(1) }).parse(req.query ?? {});
+    return { preview: dl.preview(idOf(req), q.user_id) };
+  });
+  api.post('/api/agents/:id/delegate', async (req) => {
+    const b = body(z.object({ user_id: z.string().min(1), team_id: z.string().nullable().optional(), machine_id: z.string().nullable().optional(),
+      new_pc_name: z.string().max(200).nullable().optional(), drafts_folder: z.string().max(400).nullable().optional(), agents: z.record(z.string(), agentChoice).optional() }).strict(), req);
+    return dl.delegate(idOf(req), b, actor(req));
+  });
+  api.get('/api/delegations', async (req) => {
+    const q = z.object({ agent_id: z.string().optional() }).parse(req.query ?? {});
+    return { delegations: dl.list({ agentId: q.agent_id }) };
+  });
+  api.post('/api/delegations/:id/take-back', async (req) => {
+    const b = body(z.object({ retire_pc: z.boolean().optional() }).strict(), req);
+    return dl.takeBack(idOf(req), b, actor(req));
+  });
+  // The delegate (self): their Home rows, the prompt (rendered now, shown only in this response) and the new PC's confirmation.
+  api.get('/api/me/delegations', async (req) => ({ delegations: dl.mine(userId(req)) }));
+  api.post('/api/me/delegations/:id/prompt', async (req) => dl.openPrompt(idOf(req), userId(req)));
+  api.post('/api/me/delegations/:id/pc', async (req) => {
+    const b = body(z.object({ mine: z.boolean() }).strict(), req);
+    return dl.confirmPc(idOf(req), userId(req), b.mine);
+  });
 }

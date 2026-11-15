@@ -84,7 +84,7 @@ export function registerTelemetryApi(api: FastifyInstance, d: TelemetryDeps, act
     };
   });
 
-  /** A baseline measured without the hub, entered once by the operator (for example from the BIRAZ evaluation). */
+  /** A baseline measured without the hub, entered once by the operator (for example from the ECHO evaluation). */
   api.put('/api/telemetry/baseline', async (req) => {
     const b = z.object({
       label: z.string().trim().min(1).max(120), calls_per_cycle: z.number().min(0).max(1000), tokens_per_cycle: z.number().min(0).max(1e9),

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Codex wake (docs/codex-wake.md): when the hub gives an opted-in Codex reviewer a review, start one Codex turn in that
+ * Codex wake (docs/connector.md): when the hub gives an opted-in Codex reviewer a review, start one Codex turn in that
  * reviewer's dedicated session, so nobody has to open it and paste a wake line. Node 18 or later, no dependencies.
  *
  * Usage: node codex-wake.mjs run [--config <path>]      (default ~/.config/conclave/codex-wake.json)
@@ -16,14 +16,14 @@
  * (the hub connection is codex-bridge.mjs for this agent, its tools approved and limited to task_list and task_review)
  * in the workspace, with a fixed prompt holding only the task id on stdin, `shell: false`, and an environment built
  * from an allowlist (no Conclave key is in Codex's environment; it reaches the hub through its own MCP connection. The
- * turn can still read the keys file as the PC user: docs/codex-wake.md, "What a woken turn can still read").
+ * turn can still read the keys file as the PC user: docs/connector.md, "What a woken turn can still read").
  * Limits: one turn at a time per agent, at most 6 turns an hour, 30 minutes a turn (then the whole process tree is
  * killed). The item is confirmed (work_ack) only after the hub shows the reviewer's verdict on that task; otherwise it
  * stays pending and a fixed diagnostic goes to stderr and ~/.config/conclave/helper.log. Raw Codex output is not logged;
  * stderr is read only to match one fixed text ("already has an active writer") and is never stored or forwarded.
  *
- * Key collection (docs/codex-wake.md, "Collecting a rotated key"): an entry with "collect_keys": true also polls the hub
- * for a collection Bruno armed, picks the new session key up over HTTPS with the pinned CA, writes it into that entry's
+ * Key collection (docs/connector.md, "Collecting a rotated key"): an entry with "collect_keys": true also polls the hub
+ * for a collection the operator armed, picks the new session key up over HTTPS with the pinned CA, writes it into that entry's
  * keys file (temporary file and rename, then read back), and confirms. An entry with no workspace and no codex_session
  * is collect-only (a Claude Code agent can opt in too). The key goes only into the keys file: never into a Codex
  * environment, argument, prompt or log line.
@@ -137,7 +137,8 @@ export function loadConfig(path, { win = WIN } = {}) {
     return { name: a.name, keys_file: resolve(a.keys_file), session_var: a.session_var, workspace: resolve(a.workspace), codex_exe: resolve(a.codex_exe), codex_session: a.codex_session, bridge: resolve(bridge), collect_keys: collect, wake: true };
   });
 }
-export function readKeys(path, sesVar, { win = WIN } = {}) {
+/** The name=value lines of a keys file, after the checks every reader needs (a file, readable by you only). */
+export function keysEntries(path, { win = WIN } = {}) {
   const st = fileOk(path, 'the keys file');
   if (!win && (st.mode & 0o077)) throw new Error('the keys file must be readable by you only (chmod 600)');
   const out = {};
@@ -147,9 +148,39 @@ export function readKeys(path, sesVar, { win = WIN } = {}) {
     const i = line.indexOf('=');
     out[line.slice(0, i).trim()] = line.slice(i + 1).trim();
   }
+  return out;
+}
+export function readKeys(path, sesVar, { win = WIN } = {}) {
+  const out = keysEntries(path, { win });
   if (!out.AGENT_HUB_APP_KEY || !out[sesVar]) throw new Error(`the keys file lacks the app key or ${sesVar}`);
   if (!/^https?:\/\//.test(out.AGENT_HUB_URL || '')) throw new Error('the keys file has no AGENT_HUB_URL (the pinned hub)');
   return { appKey: out.AGENT_HUB_APP_KEY, sesKey: out[sesVar], url: out.AGENT_HUB_URL, ca: out.AGENT_HUB_CA || null };
+}
+
+/**
+ * The startup check for one entry: { collect, wake }, each null when that part can start, else one plain sentence naming the
+ * missing or unreadable entry (by name, never its value) and the file. What the collector needs (app key, hub address, CA)
+ * is also what the wake needs; the wake needs the entry's session variable besides, which a collection may be about to
+ * repair. `collect` is null for an entry that does not collect, and `wake` for a collect-only entry.
+ */
+export function startProblem(a, { win = WIN } = {}) {
+  const at = `the keys file ${a.keys_file}`;
+  const parts = (collect, wake) => ({ collect: a.collect_keys ? collect : null, wake: a.wake ? wake : null });
+  let out;
+  try { out = keysEntries(a.keys_file, { win }); } catch (e) {
+    const m = oneLine(e.message || e);
+    const why = /readable by you only/.test(m) ? `${at} must be readable by you only (chmod 600)` : `${at} cannot be read`;
+    return parts(why, why);
+  }
+  const noValue = (names) => `${at} has no value for ${names.join(', ')}`;
+  // The wake lists every entry it lacks in one line; the collector only needs what is not the session variable.
+  const lacking = ['AGENT_HUB_APP_KEY', ...(a.wake ? [a.session_var] : []), 'AGENT_HUB_URL'].filter((k) => !out[k]);
+  const sharedLacking = lacking.filter((k) => k !== a.session_var);
+  let other = null;
+  if (!out.AGENT_HUB_URL || /^https?:\/\//.test(out.AGENT_HUB_URL)) {
+    if (out.AGENT_HUB_CA) { try { readFileSync(out.AGENT_HUB_CA); } catch { other = `the CA file named by AGENT_HUB_CA in ${a.keys_file} cannot be read`; } }
+  } else other = `${at} has an AGENT_HUB_URL that is not an http(s) address`;
+  return parts(sharedLacking.length ? noValue(sharedLacking) : other, lacking.length ? noValue(lacking) : other);
 }
 
 // ───────────── the hub, logged in outside the model ─────────────
@@ -407,21 +438,14 @@ export async function writeKeyFile(path, sesVar, secret, { win = WIN } = {}) {
 
 /** The few fields a collection needs from a keys file: the app key and the pinned hub. The session key may be dead or missing. */
 export function readCollectKeys(path, { win = WIN } = {}) {
-  const st = fileOk(path, 'the keys file');
-  if (!win && (st.mode & 0o077)) throw new Error('the keys file must be readable by you only (chmod 600)');
-  const out = {};
-  for (const raw of readFileSync(path, 'utf8').split(/\r?\n/)) {
-    const line = raw.trim();
-    if (!line || line.startsWith('#') || !line.includes('=')) continue;
-    out[line.slice(0, line.indexOf('=')).trim()] = line.slice(line.indexOf('=') + 1).trim();
-  }
+  const out = keysEntries(path, { win });
   if (!out.AGENT_HUB_APP_KEY) throw new Error('the keys file has no AGENT_HUB_APP_KEY');
   if (!/^https?:\/\//.test(out.AGENT_HUB_URL || '')) throw new Error('the keys file has no AGENT_HUB_URL (the pinned hub)');
   return { appKey: out.AGENT_HUB_APP_KEY, url: out.AGENT_HUB_URL, ca: out.AGENT_HUB_CA || null };
 }
 
 /**
- * One agent's key collection (docs/codex-wake.md). deps: readKeys() → {appKey, url, ca (a path or null)}, readCa(path) → Buffer,
+ * One agent's key collection (docs/connector.md). deps: readKeys() → {appKey, url, ca (a path or null)}, readCa(path) → Buffer,
  * write(sesVar, secret) → Promise (throws a fixed reason), post(url, ca, body, headers) → {status, msg}, instance, log(line), now().
  * step() makes one poll (and, when a collection is open, the pickup) and returns {wait} ms before the next one. It never
  * logs, returns or keeps the key beyond the write.
@@ -559,12 +583,23 @@ async function main(argv) {
   const stop = () => { for (const pid of live) killTree(pid); unlock(); process.exit(0); };
   process.on('SIGINT', stop); process.on('SIGTERM', stop);
   const env = wakeEnv();
+  // Startup check: every entry that cannot start says why, on screen and in helper.log. With none left, exit instead of idling.
+  // An entry that collects keeps its collector even when its wake part cannot start: the collection may repair the session key.
+  const checks = new Map(agents.map((a) => [a, startProblem(a)]));
+  for (const [a, c] of checks) {
+    if (a.collect_keys && c.collect) log(`${a.name}: key collection not started: ${c.collect}`);
+    if (a.wake && c.wake) log(`${a.name}: ${a.collect_keys && !c.collect ? 'the wake part is not started (the collection keeps running)' : 'not started'}: ${c.wake}`);
+  }
+  const runs = (a) => { const c = checks.get(a); return (a.collect_keys && !c.collect) || (a.wake && !c.wake); };
+  agents = agents.filter(runs);
+  if (!agents.length) { log('no agent could start; nothing to do, so the wake is ending'); unlock(); process.exit(1); }
   const instance = agents.some((a) => a.collect_keys) ? instanceId(dir) : null;
   const caOf = (p) => readFileSync(p);
   await Promise.all(agents.map(async (a) => {
     // The collector (opt-in per entry) shares nothing with the Codex turn but the keys file and this flag.
     let collector = null;
-    if (a.collect_keys) {
+    const c = checks.get(a);
+    if (a.collect_keys && !c.collect) {
       collector = new Collector(a, {
         readKeys: () => readCollectKeys(a.keys_file), readCa: caOf, post, instance, log, now: Date.now,
         write: (sesVar, secret) => writeKeyFile(a.keys_file, sesVar, secret),
@@ -578,14 +613,14 @@ async function main(argv) {
         }
       })();
     }
-    if (!a.wake) return new Promise(() => {}); // collect-only: runs until stopped
+    if (!a.wake || c.wake) return new Promise(() => {}); // collect-only, or the wake part cannot start: the collector runs until stopped
     const keysNow = () => {
       const k = readKeys(a.keys_file, a.session_var);
       let c = null;
       if (k.ca) c = readFileSync(k.ca);
       return { ...k, ca: c };
     };
-    try { keysNow(); } catch (e) { log(`${a.name}: not started: ${e.message}`); return; }
+    try { keysNow(); } catch (e) { log(`${a.name}: not started: ${e.message}`); return collector ? new Promise(() => {}) : undefined; }
     // The keys are read again at every login, so a key written by the collection is used by the next login.
     const hub = hubClient(keysNow);
     const w = new Waker(a, {

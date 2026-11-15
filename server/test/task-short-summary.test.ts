@@ -12,8 +12,8 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { buildApp, type App } from '../src/app.js';
 import { hubShortSummary, normShortSummary, HUB_SUMMARY_MAX, SHORT_SUMMARY_MAX } from '../src/teams/shortSummary.js';
 
-// The brief of a real task (the live hub's fx-task fixture), trimmed to its first paragraph and list.
-const BRIEF = `Follow-up to Bruno's pick 8 (Feeder 05 shards). Line & Flow found the cause (develop 4e8fe67e, .claude/handoff/carline-realism-1113/feeder05-shards/): SceneDepthClip.tsx:57 sets near = scene-fit distance / 100, about 1.3 m in the car line hall. So robot 05's door tool, and any close view in a big hall, is clipped into shards. Render Engine already proposed this fix on 13 Nov (RigCell ScanCloseUp).
+// A made-up brief shaped like a real task: a long first paragraph with a path, a hash and a line number, then a list.
+const BRIEF = `Follow-up to Ben's pick 8 (Panel 05 flicker). Layout Team found the cause (develop 1a2b3c4d, notes/handoff/panel-flicker/panel05/): DepthClip.tsx:57 sets near = scene distance / 100, about 1.3 m in the large hall. So panel 05's edge, and any close view in a big hall, is clipped. Render Team already proposed this fix on 13 Nov (CloseView).
 Do:
 - make the near plane follow the camera;
 - no z-fighting in far views;
@@ -21,7 +21,7 @@ Do:
 
 describe('the hub\'s summary of a description', () => {
   it('keeps the first two sentences of the first paragraph, without paths, hashes or line numbers', () => {
-    expect(hubShortSummary(BRIEF)).toBe('Follow-up to Bruno\'s pick 8 (Feeder 05 shards). Line & Flow found the cause: SceneDepthClip sets near = scene-fit distance / 100, about 1.3 m in the car line hall.');
+    expect(hubShortSummary(BRIEF)).toBe('Follow-up to Ben\'s pick 8 (Panel 05 flicker). Layout Team found the cause: DepthClip sets near = scene distance / 100, about 1.3 m in the large hall.');
   });
   it('drops Markdown: headings, emphasis, links, inline code and list markers; a list item never joins the paragraph', () => {
     expect(hubShortSummary('## Goal\nThe **ScanCloseUp** view shows the [door tool](docs/door.md) whole.\n\n- check `scene/camera/depthRange.ts`\n- frames')).toBe('The ScanCloseUp view shows the door tool whole.');

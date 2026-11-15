@@ -163,7 +163,7 @@ describe('bp_read: trust per item, q, section order, listed alternatives (F-22, 
     expect(text(await CA('bp_read', { team_id: teamA, kinds: ['requirement'] }))).toMatch(/Unknown kind requirement; kinds are summary, stakeholder, module, fr, nfr/);
     const r = ok(await CA('bp_read', { team_id: teamA }));
     const bad = await CA('bp_write', { team_id: teamA, version: r.project.version, ops: [{ op: 'upsert', kind: 'fr', key: 'FR-FLD-*', parent_key: 'FLD', title: 'x', fields: { owner: 'me' } }] });
-    expect(text(bad)).toMatch(/A fr has no field owner; its fields are priority, stories, unclear, evidence/);
+    expect(text(bad)).toMatch(/A fr has no field owner; its fields are priority, stories, unclear, unclear_ask, evidence/);
   });
   it('an agent proposal applied by the operator keeps the agent as writer, so its trust does not rise to L0', async () => {
     const r = ok(await WA('bp_read', { team_id: teamA }));

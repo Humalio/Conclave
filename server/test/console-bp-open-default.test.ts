@@ -9,7 +9,7 @@ import { join } from 'node:path';
 
 const js = readFileSync(join(process.cwd(), 'public', 'app.js'), 'utf8').replace(/\r\n/g, '\n');
 const line = (head: string) => { const i = js.indexOf(head); expect(i, head).toBeGreaterThan(-1); return js.slice(i, js.indexOf('\n', i)); };
-const bpFilt = new Function(`${line('const bpFilt = ')}\nreturn bpFilt;`)() as (s: string) => { q: string; kind: string; sel: string; at: string };
+const bpFilt = new Function(`${line('const BP_FK = ')}\n${line('const bpFilt = ')}\nreturn bpFilt;`)() as (s: string) => { q: string; kind: string; sel: string; at: string };
 const section = js.slice(js.indexOf('// One row of filters (docs/design-guidelines.md'), js.indexOf('bpFilters = { f, fq, goF'));
 
 describe('console: Blueprint sections open on Open', () => {
@@ -32,7 +32,7 @@ describe('console: Blueprint sections open on Open', () => {
   });
 
   it('Open is a filtered (paged) list, All is the grouped cards, and All asks the hub for no selection', () => {
-    expect(section).toContain("const filtered = !!(status || f.q || f.kind || (f.sel && f.sel !== 'all'));");
+    expect(section).toContain("const filtered = !!(status || f.q || f.kind || (f.sel && f.sel !== 'all') || (la && (laSet || f.g || f.s || f.x)));");
     expect(section).toContain("sel: f.sel === 'all' ? '' : f.sel");
   });
 
@@ -42,14 +42,14 @@ describe('console: Blueprint sections open on Open', () => {
   });
 
   it('with nothing open it says so in one line and offers Show all with the count, without switching silently', () => {
-    expect(section).toContain("f.sel === 'open' && !status && !f.q && !f.kind && lst.counts.all");
+    expect(section).toContain("f.sel === 'open' && !status && !f.q && !f.kind && !laSet && lst.counts.all");
     expect(section).toContain("'Nothing open in this section'");
     expect(section).toContain('Show all (${lst.counts.all})');
     expect(section).toContain("goF({ ...f, sel: 'all', at: '' })");
   });
 
   it('a section with nothing in it at all keeps its own empty state, not "Nothing matches these filters"', () => {
-    expect(section).toContain("f.sel === 'open' && !status && !f.q && !f.kind\n");
+    expect(section).toContain("f.sel === 'open' && !status && !f.q && !f.kind && !laSet\n");
     expect(section).toContain("'Nothing in this section yet'");
   });
 });

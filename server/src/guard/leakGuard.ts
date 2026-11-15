@@ -13,7 +13,7 @@
  * is at most a warning: it cannot unlock anything here.
  */
 
-export type KeyKind = 'app' | 'ses' | 'set' | 'brg' | 'tok';
+export type KeyKind = 'app' | 'ses' | 'set' | 'brg' | 'dsc' | 'tok';
 
 export interface LeakHit {
   field: string;
@@ -29,8 +29,8 @@ export interface LeakGuardOptions {
 
 const SEP = '[\\s_\\-.:|/\\\\]{0,4}';
 /** The full key structure, case-insensitive, with optional separators between the parts. */
-const SHAPE = new RegExp(`ah${SEP}(?:app|ses|set|brg)${SEP}[a-z2-7]{12}${SEP}[a-z2-7]{32}|ah${SEP}tok${SEP}[a-z2-7]{40}`, 'i');
-const PREFIX = /ah(app|ses|set|brg|tok)/g;
+const SHAPE = new RegExp(`ah${SEP}(?:app|ses|set|brg|dsc)${SEP}[a-z2-7]{12}${SEP}[a-z2-7]{32}|ah${SEP}tok${SEP}[a-z2-7]{40}`, 'i');
+const PREFIX = /ah(app|ses|set|brg|dsc|tok)/g;
 const B32_44 = /^[a-z2-7]{44}$/, B32_40 = /^[a-z2-7]{40}$/;
 
 const INVISIBLE = /[​-‏⁠-⁤﻿­]/g;

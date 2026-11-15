@@ -57,7 +57,7 @@ beforeAll(async () => {
   base = `http://127.0.0.1:${(app.fastify.server.address() as { port: number }).port}`;
   admin = (await login('admin', 'correct horse battery')).who!;
   projA = (await call(admin, 'POST', '/projects', { key: 'CNV', name: 'Conclave' })).body.project.id;
-  projB = (await call(admin, 'POST', '/projects', { key: 'BRZ', name: 'Biraz', kind: 'research' })).body.project.id;
+  projB = (await call(admin, 'POST', '/projects', { key: 'BRZ', name: 'Echo', kind: 'research' })).body.project.id;
 });
 afterAll(async () => { await app?.close(); });
 
@@ -395,8 +395,8 @@ describe('grants (§1.2)', () => {
     expect((await put([{ project_id: projA, components: ['topology'] }])).body.message).toMatch(/topology component needs tasks/);
     expect((await put([{ project_id: projA, components: ['vault'] }])).body.message).toMatch(/at least one folder/);
     expect((await put([{ project_id: projA, components: [], vault_folders: ['/Projects/Conclave/'] }])).body.message).toMatch(/need the vault component/);
-    expect((await put([{ project_id: projA, components: ['vault'], vault_folders: ['/Projects/Biraz/'] }])).body.message).toMatch(/outside the project's vault roots \(\/Projects\/Conclave\/\)/);
-    expect((await put([{ project_id: projA, components: ['vault'], vault_folders: ['/Projects/Conclave/../Biraz'] }])).status).toBe(400);
+    expect((await put([{ project_id: projA, components: ['vault'], vault_folders: ['/Projects/Echo/'] }])).body.message).toMatch(/outside the project's vault roots \(\/Projects\/Conclave\/\)/);
+    expect((await put([{ project_id: projA, components: ['vault'], vault_folders: ['/Projects/Conclave/../Echo'] }])).status).toBe(400);
     expect((await put([{ project_id: projA }, { project_id: projA }])).body.message).toMatch(/listed twice/);
     expect((await put([{ project_id: 'prj_nope' }])).status).toBe(404);
     // A restricted folder inside the grant stays hidden unless named; the answer says so.

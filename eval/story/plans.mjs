@@ -83,43 +83,44 @@ export const PLANS = {
   ], milestones: [ms('NC-M1', 'Block A: 200 transmissions at power 0.25', 30), ms('NC-M2', 'Block B: 600 transmissions at power 0.33', 60)] },
 };
 
-/** Plan changes per act: [team, { requirements, milestones, remove }]. Items need only the fields that change. */
+/** Plan changes per act: [team, { requirements, milestones, remove }]. Items need only the fields that change. A requirement
+    with `ask` is marked unclear with that question to the operator; one with `answer` has the operator answer it first. */
 export const MOVES = {
   // Act 2, step 2.24: progress; Signals Lab cannot explain echo 47.
   2: [
     ['fp', { milestones: [{ key: 'SL-M1', status: 'reached', evidence: 'Echo model v2 written at power 0.33 (Imani, Teodor).' }],
-      requirements: [{ key: 'SL-R2', status: 'unclear', evidence: 'Echo 47 is still off the curve; the Timekeepers sent the raw extract.' }] }],
+      requirements: [{ key: 'SL-R2', status: 'unclear', ask: 'Echo 47 still sits off the curve. Can we freeze the echo model with echo 47 logged as unexplained, or must SL-R2 stay open until we find its cause?', evidence: 'Echo 47 is still off the curve; the Timekeepers sent the raw extract.' }] }],
     ['pc', { requirements: [{ key: 'RE-R4', status: 'met', evidence: 'Transmit sequence written and closed after review.' }], milestones: [{ key: 'RE-M1', status: 'in_progress' }] }],
     ['mh', { requirements: [{ key: 'AN-R4', status: 'met', evidence: 'Panel drafts reviewed by Halden and Hollis; version 2 shared.' }], milestones: [{ key: 'AN-M1', status: 'reached', evidence: 'Dish panel drafts approved.' }] }],
-    ['nt', { requirements: [{ key: 'TK-R3', status: 'unclear', evidence: 'Echo-47 recording sent to Signals Lab; no explanation yet.' }] }],
+    ['nt', { requirements: [{ key: 'TK-R3', status: 'unclear', ask: 'Should the echo-47 second timestamp count as a clock fault on our side, or stay logged as a real second arrival until Signals Lab explains it?', evidence: 'Echo-47 recording sent to Signals Lab; no explanation yet.' }] }],
     ['cm', { requirements: [{ key: 'XB-R7', status: 'met', evidence: 'Petra’s echo-hour rule reviewed by the operator.' }] }],
     ['sy', { milestones: [{ key: 'TN-M1', status: 'in_progress', detail: 'Tower survey done; stubs wait for the forgings.' }] }],
   ],
   // Act 3, step 3.11b: CAP-014 heard the echo with no firmware. Firmware 7 falls, M3 is missed, the live listen is at risk.
   3: [
-    ['mh', { requirements: [{ key: 'AN-R1', status: 'unclear', evidence: 'CAP-014: the echo arrived 0.71 s early on 600 of 600 transmissions with no firmware in the loop.' }, { key: 'AN-R6', status: 'unclear', evidence: 'A patch to build 7 cannot fix an echo that arrives without it (B-01).' }],
+    ['mh', { requirements: [{ key: 'AN-R1', status: 'unclear', ask: 'CAP-014 heard the echo 0.71 s early with no firmware in the loop. Does AN-R1 still mean the firmware explanation, or any explanation that holds over 600 transmissions?', evidence: 'CAP-014: the echo arrived 0.71 s early on 600 of 600 transmissions with no firmware in the loop.' }, { key: 'AN-R6', status: 'unclear', ask: 'A patch to build 7 cannot fix an echo that arrives without it. Should we still patch lot B7-L07 for B-01, or drop AN-R6?', evidence: 'A patch to build 7 cannot fix an echo that arrives without it (B-01).' }],
       milestones: [{ key: 'AN-M2', status: 'missed', evidence: 'CAP-014 read out at transmission 800: no firmware, still an echo.' }] }],
-    ['pc', { requirements: [{ key: 'RE-R2', status: 'unclear', evidence: 'Surge protection blocked by B-01.' }],
+    ['pc', { requirements: [{ key: 'RE-R2', status: 'unclear', ask: 'Surge protection is blocked by B-01. Should we build the 12 ms surge detection without the firmware patch, or wait for your call on B-01?', evidence: 'Surge protection blocked by B-01.' }],
       milestones: [{ key: 'RE-M3', status: 'missed', evidence: 'Live listen prep cancelled: the explanation is not qualified.' }] }],
-    ['int', { requirements: [{ key: 'R4', status: 'unclear', evidence: 'CAP-014 heard the echo with firmware removed; Firmware 7 patch or Q-9 waits for the operator.' }],
+    ['int', { requirements: [{ key: 'R4', status: 'unclear', ask: 'CAP-014 heard the echo with the firmware removed. Do we keep the Firmware 7 patch as our explanation, or move R4 to Q-9 and CAP-015 instead?', evidence: 'CAP-014 heard the echo with firmware removed; Firmware 7 patch or Q-9 waits for the operator.' }],
       milestones: [{ key: 'M3', status: 'missed', evidence: 'CAP-014 read out at transmission 800.' }, { key: 'M4', detail: 'At risk: no live listen on an unexplained echo.' }] }],
     ['sy', { milestones: [{ key: 'TN-M2', detail: 'At risk: frame 44 waits for a live listen that is cancelled.' }, { key: 'TN-M3', detail: 'At risk: WP-06 is held to M3, now missed.' }] }],
     ['nt', { milestones: [{ key: 'TK-M2', detail: 'At risk: the live listen it serves is cancelled.' }] }],
   ],
   // Act 4, step 4.9b: the receivers go to Q-9 and the answer is on file.
   4: [
-    ['mh', { requirements: [{ key: 'AN-R1', status: 'open', criteria: 'Case R4, verified by CAP-015 on Q-9 receivers.', evidence: 'Receivers switched to Q-9 (decision of 2 June).' },
-      { key: 'AN-R6', status: 'dropped', evidence: 'Firmware 7 withdrawn; no patch.' },
+    ['mh', { requirements: [{ key: 'AN-R1', status: 'open', answer: 'Any explanation that holds over 600 transmissions. Keep AN-R1, and verify it on the Q-9 receivers with CAP-015.', criteria: 'Case R4, verified by CAP-015 on Q-9 receivers.', evidence: 'Receivers switched to Q-9 (decision of 2 June).' },
+      { key: 'AN-R6', status: 'dropped', answer: 'Drop it. Firmware 7 is withdrawn and the receivers go to Q-9, so there is nothing left to patch.', evidence: 'Firmware 7 withdrawn; no patch.' },
       { key: 'AN-R7', title: 'Q-9 receivers have no front end in the 2.3 GHz ring band', priority: 'must', status: 'met', milestones: ['AN-M2'], evidence: 'Firmware 7 file updated by Vesna.' }],
       milestones: [{ key: 'AN-M2', title: 'Explanation qualified on Q-9 (case M3)', status: 'planned', due: 120, evidence: '' }] }],
-    ['pc', { requirements: [{ key: 'RE-R1', status: 'met', evidence: 'Surge margin 16.7 % at 18 K with Q-9 (Ezra approved).' }, { key: 'RE-R2', status: 'open', evidence: '' }],
+    ['pc', { requirements: [{ key: 'RE-R1', status: 'met', evidence: 'Surge margin 16.7 % at 18 K with Q-9 (Ezra approved).' }, { key: 'RE-R2', status: 'open', answer: 'Build the 12 ms detection now, for the Q-9 receivers. It no longer waits on B-01.', evidence: '' }],
       milestones: [{ key: 'RE-M1', status: 'reached', evidence: 'Dish redesign for Q-9 accepted.' }, { key: 'RE-M3', status: 'planned', due: 160, evidence: '', detail: 'Live listen on Q-9 after CAP-015 block A.' }] }],
-    ['int', { requirements: [{ key: 'R4', status: 'open', evidence: 'Q-9 chosen; CAP-015 runs at the Night Choir.' },
+    ['int', { requirements: [{ key: 'R4', status: 'open', answer: 'Move R4 to Q-9 and CAP-015. The Firmware 7 patch is no longer our explanation.', evidence: 'Q-9 chosen; CAP-015 runs at the Night Choir.' },
       { key: 'R13', title: 'The answer (H-13) held off the receivers before the first deliberate reply', priority: 'must', status: 'open', milestones: ['M4', 'M6'], criteria: 'Disclosure case §9; the live listen shows no 2.3 GHz ring on Q-9.' }],
       milestones: [{ key: 'M3', status: 'planned', due: 120, evidence: '', detail: 'Re-planned on Q-9.' }, { key: 'M4', due: 160, detail: 'After CAP-015 block A.' }] }],
     ['sb', { requirements: [{ key: 'DB-R5', title: 'The answer, hazard H-13, bounded in the disclosure case', priority: 'must', status: 'open', milestones: ['DB-M2'], criteria: 'Disclosure case §9 states cause, controls and the verifying capture.' }] }],
-    ['fp', { requirements: [{ key: 'SL-R2', status: 'met', evidence: 'Explained in Disclosure case §9 (the answer), from the director’s account of echo 47.' }] }],
-    ['nt', { requirements: [{ key: 'TK-R3', status: 'met', evidence: 'Explained in Disclosure case §9: the answer leads the send by 0.71 s.' }], milestones: [{ key: 'TK-M2', due: 160, detail: 'Follows the live listen on Q-9.' }] }],
+    ['fp', { requirements: [{ key: 'SL-R2', status: 'met', answer: 'Echo 47 has its cause now, in Disclosure case §9. Record it there and close SL-R2.', evidence: 'Explained in Disclosure case §9 (the answer), from the director’s account of echo 47.' }] }],
+    ['nt', { requirements: [{ key: 'TK-R3', status: 'met', answer: 'Log it as a real second arrival. Disclosure case §9 explains it: the answer leads the send by 0.71 s.', evidence: 'Explained in Disclosure case §9: the answer leads the send by 0.71 s.' }], milestones: [{ key: 'TK-M2', due: 160, detail: 'Follows the live listen on Q-9.' }] }],
     ['sy', { requirements: [{ key: 'TN-R4', title: 'Q-9 receiver shroud bonded in 24 segments once the explanation is qualified' }], milestones: [{ key: 'TN-M2', due: 167, detail: 'Moved with the live listen.' }, { key: 'TN-M3', due: 185, detail: 'Shroud segments wait for Q-9 qualification.' }] }],
   ],
   // Act 5, step 5.7: disclosure. Conditions recorded where they bind.
@@ -163,7 +164,7 @@ const opt = (o) => Object.fromEntries(Object.entries(o).filter(([, v]) => v !== 
 const nul = (v) => (v === '' ? null : v);
 
 /** Blueprint ops for plan items in the story's shape (only the fields given change). */
-function toOps(team, teamId, { requirements = [], milestones = [] }, t0, fresh) {
+function toOps(team, teamId, { requirements = [], milestones = [] }, t0, fresh, asks = {}) {
   const items = [], links = [], mod = moduleOf(team);
   if (fresh) items.push({ op: 'upsert', kind: 'module', key: mod, title: TEAMS.find((t) => t.key === team)?.name ?? 'Night Choir Capture', team_id: teamId });
   for (const i of milestones) {
@@ -172,7 +173,7 @@ function toOps(team, teamId, { requirements = [], milestones = [] }, t0, fresh) 
   }
   for (const i of requirements) {
     const k = bpKey(i.key);
-    const fields = opt({ priority: i.priority, evidence: nul(i.evidence), unclear: i.status === undefined ? undefined : i.status === 'unclear' ? true : null });
+    const fields = opt({ priority: i.priority, evidence: nul(i.evidence), unclear: i.status === undefined ? undefined : i.status === 'unclear' ? (asks[k] ? true : undefined) : null, unclear_ask: asks[k] });
     items.push(opt({ op: 'upsert', kind: 'fr', key: k, parent_key: fresh || i.title ? mod : undefined, title: i.title, body: i.detail, status: i.status && FR_STATUS[i.status], fields }));
     if (i.criteria) items.push({ op: 'upsert', kind: 'ac', key: `${k}/AC1`, parent_key: k, title: 'Acceptance', fields: { then: i.criteria } });
     for (const m of i.milestones ?? []) links.push({ op: 'link', from: bpKey(m), to: k, rel: 'delivers' });
@@ -187,11 +188,28 @@ function toOps(team, teamId, { requirements = [], milestones = [] }, t0, fresh) 
 export async function writePlan(c, team, seat, plan, { fresh = false, reason } = {}) {
   const teamId = c.T(team), A = c.as(seat);
   c.S.planT0 ??= Date.now();
+  // An unclear mark is one question to the operator that names the requirement, so the requirement is written first, then asked about, then marked.
+  const unclear = (plan.requirements ?? []).filter((r) => r.status === 'unclear');
+  // A mark the plan now settles is cleared the way the operator does it: Clarify answers the team's question, and the hub clears the mark.
+  for (const r of (plan.requirements ?? []).filter((x) => x.answer)) {
+    const id = c.S.unclearAsks?.[bpKey(r.key)];
+    if (!id) throw new Error(`${bpKey(r.key)} has no question to answer`);
+    await c.op.post(`/api/decisions/${id}/answer`, { text: r.answer });
+    delete c.S.unclearAsks[bpKey(r.key)];
+  }
   const ops = toOps(team, teamId, plan, c.S.planT0, fresh);
   let version = (await A.ok('bp_read', { team_id: teamId, kinds: ['module'] })).project.version;
   for (let i = 0; i < ops.length; i += 40) {
     const w = await A.ok('bp_write', { team_id: teamId, version, ops: ops.slice(i, i + 40), ...(reason ? { reason } : {}) });
     version = w.status === 'proposed' ? (await c.op.post(`/api/proposals/${w.proposal_id}/apply`, {})).version : w.version;
+  }
+  if (unclear.length) {
+    const asks = {};
+    for (const r of unclear) asks[bpKey(r.key)] = (await A.ok('team_ask', { team_id: teamId, question: r.ask ?? `What is unclear in ${bpKey(r.key)}?`, ...(r.evidence ? { context: r.evidence } : {}), refs: [bpKey(r.key)] })).decision_id;
+    c.S.unclearAsks = { ...c.S.unclearAsks, ...asks };
+    const marks = toOps(team, teamId, { requirements: unclear.map((r) => ({ key: r.key, status: 'unclear' })) }, c.S.planT0, false, asks);
+    version = (await A.ok('bp_read', { team_id: teamId, kinds: ['module'] })).project.version;
+    await A.ok('bp_write', { team_id: teamId, version, ops: marks });
   }
   return A.ok('bp_read', { team_id: teamId, kinds: ['fr', 'milestone'] });
 }

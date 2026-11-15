@@ -55,7 +55,7 @@ beforeAll(async () => {
   appKey = app.keys.createAppKey({ machineId: pc, appName: 'claude-code', maxLiveSessions: 500 }, sys).secret;
   project = (await api('POST', '/projects', { key: 'GAP', name: 'GAP' })).body.project.id;
   carol = await member('carol', 'Carol'); dave = await member('dave', 'Dave'); erin = await member('erin', 'Erin');
-  coordC = agent('Carol coord'); coordD = agent('Dave coord'); workD = agent('Dave worker'); workB = agent('Bruno worker'); workE = agent('Erin worker');
+  coordC = agent('Carol coord'); coordD = agent('Dave coord'); workD = agent('Dave worker'); workB = agent('Ben worker'); workE = agent('Erin worker');
   const t = app.teams.create({ name: 'Mixed team', goal: 'goal', members: [{ agent_id: coordC.id, role: 'coordinator' }, { agent_id: coordD.id, role: 'coordinator' },
     { agent_id: workD.id, role: 'worker' }, { agent_id: workB.id, role: 'worker' }, { agent_id: workE.id, role: 'worker' }] }, sys);
   app.teams.start(t.id, sys);

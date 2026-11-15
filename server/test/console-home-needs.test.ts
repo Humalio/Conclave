@@ -22,9 +22,9 @@ const nyItem = (id: string, title: string, mins: number) => ({ id, kind: 'access
 
 const ROW = [part('function mdText(', '\n'), ...['ic', 'esc', 'ago', 'plural', 'trunc', 'raw', 'txt', 'safeHref', 'cap', 'none', 'pill'].map(line), part('const overline = ', '\n'), part('const NY_KIND = ', '};\n'),
   line('nyKind'), fn('function nyOpenAttr('), line('nyLaterBtn'), fn('function nyBtns('), fn('function awBtns('), line('nyUntil'), line('nySum'), line('nyMeta'), line('nyLead'), line('nyRow'), line('awRow'), fn('function row('),
-  line('NY_EFFECT_MAX'), part('const nyWho = ', '; };\n'), line('nyTeamOf'), line('nyHeadLine'), line('nyHead'), fn('function nyOpsLine('), line('nyReplyBtn'), line('nyReplyBox'), line('nyOpenBtn'), line('nyActBtn'), fn('function nyBody('),
+  line('NY_EFFECT_MAX'), part('const nyWho = ', '; };\n'), line('nyTeamOf'), line('nyHeadLine'), line('nyHead'), fn('function nyOpsLine('), line('nyReplyBtn'), line('nyReplyBox'), line('nyOpenBtn'), line('nyActBtn'), fn('function nyBody('), line('NY_QDET'), fn('function nyQCard('),
   part('const nyCardBox = ', '</article>`;\n'), fn('function nyCard('), fn('function awCard('), fn('function nyBacklogCard(')];
-const ctx0 = (S: unknown) => ({ S, Date, mdPlain, NAV_NAMES: new Map([['prj_c', 'Conclave']]), BP_KIND: { fr: 'Requirement', decision: 'Decision', release_note: 'Release note' }, dt: () => '14 Nov, 10:00',
+const ctx0 = (S: unknown) => ({ S, Date, mdPlain, mdDoc: (t: string) => `<p>${t}</p>`, NAV_NAMES: new Map([['prj_c', 'Conclave']]), BP_KIND: { fr: 'Requirement', decision: 'Decision', release_note: 'Release note' }, dt: () => '14 Nov, 10:00',
   K: () => undefined, AG: () => undefined, keyName: () => '', bpArg: () => '', bpItemArg: () => '', stOf: () => ['', '', ''] });
 
 /* Home: three Needs you rows (the oldest goes on the card), one For awareness row and one security alert. */
@@ -90,18 +90,35 @@ describe('The Needs you screen: each card leads with its title and is decided fr
   const { cards, backlog: bl, aw } = screen([question(), blocked, proposal, backlog('task_8', 'Write the guide', 30), backlog('task_9', 'Old idea', 90)]);
   const [q, b, p] = cards;
 
-  it('a team question shows its options as buttons, recommended first, with an optional note', () => {
-    expect(q).toContain('<span>Question for you · Coordinator · Conclave Developers · 1h ago</span></p><h3 class="ny-msg">Ship the release &lt;now&gt;?</h3><p class="ny-sum">Two fixes are in.</p>');
-    expect(q).toContain('<p class="meta ny-meta">blocks Release notes · recommends Ship now</p>');
+  it('a team question: what it blocks, the question, then each answer once as a button with its effect, the recommended first and marked', () => {
+    expect(q).toMatch(/^<article class="ny-card ny-q" data-ny-row="question:dec_1"><p class="ny-hd ny-qhd"><svg/);
+    expect(q).toContain('<button type="button" class="pill warn pill-btn ny-blocks" data-task="team_a|task_1" title="Release notes" aria-label="Blocks 1 task: Release notes">Blocks 1 task</button><span>Conclave Developers · Coordinator · 1h ago</span></p><h3 class="ny-msg">Ship the release &lt;now&gt;?</h3><div class="ny-opts" role="group" aria-label="Answers">');
+    // No meta line, no list of effects: the buttons carry them.
+    expect(q).not.toContain('ny-meta');
+    expect(q).not.toContain('recommends');
+    expect(q).not.toContain('ny-fx');
     const a = q.indexOf('data-ny="question:dec_1|42|opt:a"'), w = q.indexOf('data-ny="question:dec_1|42|opt:b"');
     expect(a).toBeGreaterThan(-1);
     expect(a).toBeLessThan(w);
-    expect(q).toMatch(/class="btn pri" data-ny="question:dec_1\|42\|opt:a"/);
-    expect(q).toContain('title="Goes out today"');
+    expect(q).toContain('<button type="button" class="ny-opt rec" data-ny="question:dec_1|42|opt:a" data-ny-inline="note" data-ny-label="Ship now" aria-label="Choose: Ship now (recommended). Goes out today"><span class="ny-opt-l"><b>Ship now</b><span class="pill acc">Recommended</span></span><span class="ny-opt-fx">Goes out today</span></button>');
+    expect(q).toContain('<button type="button" class="ny-opt" data-ny="question:dec_1|42|opt:b" data-ny-inline="note" data-ny-label="Wait a week" aria-label="Choose: Wait a week"><span class="ny-opt-l"><b>Wait a week</b></span></button>');
     expect(q).toContain('data-ny-reply aria-expanded="false">Add a note…<');
     expect(q).toContain('>Answer…<');
     expect(q).toContain('data-ny-note');
     expect(q).not.toContain('data-ny-need');
+  });
+
+  it('a question folds its context and the blocked task under Details', () => {
+    expect(q).toContain('<div class="ny-acts ny-qfoot"><button type="button" class="btn ghost ny-qdet-btn" data-ny-qdet-btn aria-expanded="false">');
+    expect(q).toContain('<div class="ny-qdet" data-ny-qdet hidden><article class="md ny-qdet-md"><p>Two fixes are in.</p></article><p class="ny-qdet-blk"><span class="meta">Blocks</span><button type="button" class="lnk" data-task="team_a|task_1">Release notes</button></p></div>');
+    expect(q).not.toContain('ny-sum');
+  });
+
+  it('Home shows a question on top as the same card, with the "N more" row under it', () => {
+    expect(fn('function urgent() {')).toContain("...(r.kind === 'question' && r.detail?.kind === 'question' ? { card: r } : {})");
+    const r = fn('function renderAlerts(');
+    expect(r).toContain(': (a.card ? nyQCard(a.card) : `<div class="alert');
+    expect(r).toMatch(/<div class="alert-acts">\$\{a\.btns\}<\/div><\/div>`\)\s*\+ \(L\.length > 1/);
   });
 
   it('a question with no options, or an effect too long for a row, goes to Answer', () => {
@@ -148,9 +165,9 @@ describe('The Needs you screen: each card leads with its title and is decided fr
   });
 
   it('any row shows its step and who acts next, and a row back from Later says so', () => {
-    const { cards: [c] } = screen([{ ...backlog('task_7', 'Handout', 5), kind: 'checkout', id: 'checkout:team_a', step: 'Step 3 of 5. The handout waits for your approval.', next: 'Then Biraz Coordinator starts the new sessions.', back_from_later: true }]);
+    const { cards: [c] } = screen([{ ...backlog('task_7', 'Handout', 5), kind: 'checkout', id: 'checkout:team_a', step: 'Step 3 of 5. The handout waits for your approval.', next: 'Then Echo Coordinator starts the new sessions.', back_from_later: true }]);
     expect(c.indexOf('Step 3 of 5.')).toBeGreaterThan(-1);
-    expect(c.indexOf('Step 3 of 5.')).toBeLessThan(c.indexOf('Then Biraz Coordinator'));
+    expect(c.indexOf('Step 3 of 5.')).toBeLessThan(c.indexOf('Then Echo Coordinator'));
     expect(c).toContain('Back from Later');
   });
 

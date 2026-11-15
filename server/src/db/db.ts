@@ -98,6 +98,16 @@ const LEGACY_0X: readonly (readonly [number, string])[] = [
 const LEGACY_LAST = 69;
 
 /**
+ * Migrations 15 and 26 of 0.x had two comments reworded before the repository went public (a project name and a person's
+ * name). A 0.x database recorded the checksum of the old text, a fresh checkout of the 0.x fixtures hashes the new one: both
+ * are accepted for exactly these two versions, so no database needs a hand edit.
+ */
+const LEGACY_0X_REWORDED: ReadonlyMap<number, string> = new Map([
+  [15, '5e3709b440ccaa0898b90d6cc7a2dd200dc4a3f1a35070718d20090bf6331459'],
+  [26, '73f51889c01ceb7ed7a158a45e10a935a292393f9a0dc1c31860ea7097e714fa'],
+]);
+
+/**
  * Bring the database to the current schema. An empty database gets the baseline; one with 100 recorded runs what is
  * pending (0101+); a 0.x database at 69 is recognised (see recognise). Anything else stops the hub with what to do,
  * and nothing is changed.
@@ -217,7 +227,7 @@ function recognise(db: Db, baselineSql: string): void {
     for (const r of rows) {
       const want = legacy.get(r.version);
       if (want === undefined) problems.push(`migration ${r.version} is recorded but is not one of 0.x`);
-      else if (want !== r.checksum) problems.push(`migration ${r.version} is recorded with another checksum than in 0.x`);
+      else if (want !== r.checksum && LEGACY_0X_REWORDED.get(r.version) !== r.checksum) problems.push(`migration ${r.version} is recorded with another checksum than in 0.x`);
     }
     const have = new Set(rows.map((r) => r.version));
     for (const [v] of LEGACY_0X) if (!have.has(v)) problems.push(`migration ${v} of 0.x is not recorded`);

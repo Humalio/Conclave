@@ -1,5 +1,5 @@
 /**
- * The multi-user leak test (docs/multi-user.md §4). Two projects, Conclave (CNV) and Biraz (BRZ), with teams,
+ * The multi-user leak test (docs/multi-user.md §4). Two projects, Conclave (CNV) and Echo (BRZ), with teams,
  * agents, tasks, decisions, team-room and direct messages, vault notes (one restricted), graph entities (one sourced in
  * both) and feed events. Every BRZ string carries the canary "zzBRZ", every CNV string "zzCNV". Ana (member, CNV full
  * project) and Jonas (external, BRZ Blueprint and feed, 2FA) walk every route the hub registers. Each project also has
@@ -67,6 +67,7 @@ async function seedProject(key: 'CNV' | 'BRZ', name: string, folder: string): Pr
   expect((await call(admin, 'POST', `/api/projects/${project}/ops`, { version: ver(), ops: [
     { op: 'upsert', kind: 'module', key: `${key}A`, title: `${canary} module`, team_id: s.teams[0] },
     { op: 'upsert', kind: 'fr', key: `FR-${key}A-01`, parent_key: `${key}A`, title: `${canary} requirement` },
+    { op: 'upsert', kind: 'paper', key: 'PAP-1', title: `${canary} paper` },
   ] })).status).toBe(200);
   const pr = app.blueprint.submit(project, { version: ver(), ops: [{ op: 'upsert', kind: 'fr', key: `FR-${key}A-01`, status: 'agreed' }], reason: `${canary} reason`, team_id: s.teams[0] }, s.agents[0]!);
   expect(pr.status).toBe('proposed');
@@ -87,7 +88,7 @@ beforeAll(async () => {
   base = `http://127.0.0.1:${(app.fastify.server.address() as { port: number }).port}`;
   admin = await login('admin');
   seed.CNV = await seedProject('CNV', 'Conclave', '/Projects/Conclave/');
-  seed.BRZ = await seedProject('BRZ', 'Biraz', '/Projects/Biraz/');
+  seed.BRZ = await seedProject('BRZ', 'Echo', '/Projects/Echo/');
   // A restricted folder inside CNV's root, not named in Ana's grant: its note must stay hidden from her.
   app.db.prepare('INSERT INTO vault_folder_flags(path,restricted,set_at) VALUES (?,1,?)').run('/Projects/Conclave/Restricted/', Date.now());
   await app.store.write(['Projects', 'Conclave', 'Restricted', 'zzRESTRICTED.md'], Buffer.from('zzRESTRICTED secret\n'), 'absent', 'create', { agentId: seed.CNV.agents[0]!, credentialId: null as never });
@@ -230,6 +231,8 @@ describe('the leak test (§4)', () => {
 
   it('the Blueprint: granted projects only, proposals only when routed, export needs may_export', async () => {
     expect((await call(ana, 'GET', '/api/projects')).json.projects.map((p: any) => p.id)).toEqual([seed.CNV.project]);
+    // The member Home's Papers card reads the papers each listed project carries: only the granted project's.
+    expect((await call(ana, 'GET', '/api/projects')).json.projects.flatMap((p: any) => p.papers.map((x: any) => x.title))).toEqual(['zzCNV paper']);
     expect((await call(ana, 'GET', `/api/projects/${seed.CNV.project}/blueprint`)).text).toContain('zzCNV requirement');
     expect((await call(ana, 'GET', `/api/projects/${seed.CNV.project}/items/FR-CNVA-01`)).json.item.key).toBe('FR-CNVA-01');
     expect((await call(ana, 'GET', `/api/projects/${seed.CNV.project}/proposals`)).json).toMatchObject({ proposals: [], total: 0 });

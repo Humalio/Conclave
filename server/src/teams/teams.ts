@@ -68,6 +68,8 @@ export interface MemberRow {
   team_id: string; agent_id: string; credential_id: string; role: string; joined_at: number; last_work_next_at: number | null; removed_at: number | null;
   /** task_progress until: the member's held tasks stay with it until then, whatever its activity (migration 0107). */
   busy_until: number | null;
+  /** A one-agent checkout holds the member away until then (docs/checkout.md §9 F1, migration 0143): sweeps skip it. */
+  away_until?: number | null;
 }
 /** Who a task waits on (docs/proposals/console-systems.md §8.2): queued for task_start, work for task_submit, review for task_review. */
 export type TurnPhase = 'queued' | 'work' | 'review';
@@ -88,7 +90,7 @@ export interface TaskRow {
   id: string; team_id: string | null; room_id: string | null; title: string; description: string | null; status: string; review_rounds: number; claimable: number;
   assignee_agent_id: string | null; reviewer_agent_id: string | null; lease_expires_at: number | null; progress_until: number | null; share_id: string | null; share_version: number | null;
   summary: string | null; review_comments: string | null; blocked_reason: string | null; approval_requested: number; created_by_agent: string | null; version: number; created_at: number; updated_at: number;
-  dismissed_at: number | null; overdue_at: number | null; plan_refs: string; submitted_version: number | null; blocked_from: string | null;
+  dismissed_at: number | null; overdue_at: number | null; plan_refs: string; pending_refs?: string; submitted_version: number | null; blocked_from: string | null;
   /** The question (decision id) whose answer lifts this task's block; null for a block set any other way. */
   blocked_by_decision: string | null;
   /** Who the task lapsed from (release), when, and the status it held; the way back is task_claim within RECLAIM_MS (migration 0131). */
@@ -223,6 +225,12 @@ export class Teams {
   private reached<T>(agentIds: string[], fn: () => T): T { return this.reachGuard ? this.reachGuard(agentIds, fn) : fn(); }
   /** The vault copy (docs/vault.md): told after each task_review verdict, and on every task event (queued, never run inside it). */
   onReviewed?: (teamId: string, taskId: string) => void;
+  /**
+   * Set in app.ts: what the task names (its submitted share, its brief and submission files) that this agent cannot read
+   * under the hub's own rules, by name. A request for changes with reason evidence_unreadable counts no round only when
+   * this is not empty (docs/teams.md, "Review rounds").
+   */
+  unreadableEvidence?: (t: TaskRow, agentId: string) => string[];
   onTaskEvent?: (taskId: string) => void;
   /** The blueprint service: status and plan requests are opened there (docs/blueprint.md §6). */
   blueprint?: Blueprint;
@@ -276,7 +284,7 @@ export class Teams {
       summary: t.summary, review_comments: t.review_comments, blocked_reason: t.blocked_reason, awaiting_approval: !!t.approval_requested,
       created_by: t.created_by_agent ?? null, created_by_label: t.created_by_agent ? this.keys.agent(t.created_by_agent)?.label ?? t.created_by_agent : null,
       share_id: t.share_id, share_version: t.share_version, created_at: t.created_at, updated_at: t.updated_at, dismissed_at: t.dismissed_at ?? null,
-      progress_until: t.progress_until, overdue_at: t.overdue_at ?? null, refs: parseRefs(t.plan_refs), submitted_version: t.submitted_version ?? null,
+      progress_until: t.progress_until, overdue_at: t.overdue_at ?? null, refs: parseRefs(t.plan_refs), pending_refs: parseRefs(t.pending_refs), submitted_version: t.submitted_version ?? null,
       blocked_from: t.status === 'blocked' ? t.blocked_from ?? null : null,
       review: this.effectiveReview(t, policy), review_policy: policy,
       operator_request: t.operator_request_source ? {
@@ -317,6 +325,8 @@ export class Teams {
   }
   /** The plan refs (blueprint keys) a task serves. */
   refsOf(t: TaskRow): string[] { return parseRefs(t.plan_refs); }
+  /** Refs to keys an open proposal of the team writes, waiting for the operator to apply it (docs/blueprint.md §2.3). */
+  pendingRefsOf(t: TaskRow): string[] { return parseRefs(t.pending_refs); }
   /** A task's review as asked for, checked against the policy: `required` always fits; `none` only where the policy is not `required`. */
   private checkReview(teamId: string, review: TaskReview | undefined): TaskReview {
     const policy = this.reviewPolicy(teamId);
@@ -557,7 +567,12 @@ export class Teams {
 
   /** ref ties a task notice to the state it describes; skip leaves out the agent who caused it. */
   private notifyMembers(teamId: string, kind: string, body: string, roles?: string[], ref?: { task: string; state: string }, skip?: string): void {
-    for (const m of this.members(teamId)) if ((!roles || roles.includes(m.role)) && m.agent_id !== skip) this.keys.notify(m.agent_id, kind, body, ref);
+    for (const m of this.members(teamId)) {
+      if ((roles && !roles.includes(m.role)) || m.agent_id === skip) continue;
+      // A delegated agent (contributor mode) is not offered open team work.
+      if (kind === 'task_open' && this.delegatedTo(m.agent_id)) continue;
+      this.keys.notify(m.agent_id, kind, body, ref);
+    }
     this.wake();
   }
   start(id: string, actor: Actor): TeamRow {
@@ -699,7 +714,8 @@ export class Teams {
       this.db.prepare('UPDATE team_members SET removed_at=? WHERE team_id=? AND agent_id=? AND removed_at IS NULL').run(now, teamId, agentId);
       this.db.prepare('UPDATE work_items SET acked_at=? WHERE team_id=? AND agent_id=? AND acked_at IS NULL').run(now, teamId, agentId);
       // A blocked task is freed too: unblocking it must not hand it back to the agent who left. Its question stays open and stops blocking.
-      const freed = this.db.prepare("SELECT id,title,status FROM tasks WHERE team_id=? AND assignee_agent_id=? AND status IN ('assigned','in_progress','changes_requested','in_review','blocked')").all(teamId, agentId) as { id: string; title: string; status: string }[];
+      // Submitted work is not freed: it stays in review with its author, and only a request for changes returns it to open.
+      const freed = this.db.prepare("SELECT id,title,status FROM tasks WHERE team_id=? AND assignee_agent_id=? AND status IN ('assigned','in_progress','changes_requested','blocked')").all(teamId, agentId) as { id: string; title: string; status: string }[];
       for (const f of freed) {
         this.db.prepare("UPDATE tasks SET status='open', assignee_agent_id=NULL, lease_expires_at=NULL, progress_until=NULL, blocked_reason=NULL, blocked_from=NULL, blocked_by_decision=NULL, version=version+1, updated_at=? WHERE id=?").run(now, f.id);
         this.turns.close(f.id, 'released', now);
@@ -707,19 +723,24 @@ export class Teams {
         this.event(f.id, f.status, 'open', { kind: 'system', id: null }, 'member_removed', agentId);
         this.notifyMembers(teamId, 'task_released', `Task "${f.title}" (${f.id}) is open again: its assignee left the team.`, ['coordinator'], { task: f.id, state: 'open' });
       }
+      for (const k of this.db.prepare("SELECT id,title FROM tasks WHERE team_id=? AND assignee_agent_id=? AND status='in_review'").all(teamId, agentId) as { id: string; title: string }[]) {
+        this.event(k.id, 'in_review', 'in_review', this.sys, 'member_removed', agentId);
+        this.notifyMembers(teamId, 'author_left', `Task "${k.title}" (${k.id}) stays in review: its author left the team. If the reviewer asks for changes, it goes back to open for you to reassign.`, ['coordinator'], { task: k.id, state: 'in_review' });
+      }
       // A departed reviewer must not strand an already submitted task. Keep the submission when anyone else may review it, by
       // submit's rule (a reviewer, then a coordinator when coordinators review; never the assignee; an active key); otherwise
-      // return it to the coordinator as open work without silently approving it.
+      // it stays in review with its author and waits for the coordinator to name a reviewer. It is never approved silently
+      // and never reopened unassigned.
       const reviews = this.db.prepare("SELECT * FROM tasks WHERE team_id=? AND reviewer_agent_id=? AND status NOT IN ('approved','done','cancelled','discarded','backlog')").all(teamId, agentId) as unknown as TaskRow[];
       for (const task of reviews) {
         const live = this.members(teamId).filter((m) => m.agent_id !== task.assignee_agent_id && m.agent_id !== agentId
           && this.keys.credential(m.credential_id) && this.keys.effectiveStatus(this.keys.credential(m.credential_id)!) === 'active');
         const replacement = (live.find((m) => m.role === 'reviewer') ?? live.find((m) => m.role === 'coordinator' && !!t.coordinator_reviews))?.agent_id ?? null;
         if (task.status === 'in_review' && !replacement) {
-          this.db.prepare("UPDATE tasks SET status='open', assignee_agent_id=NULL, reviewer_agent_id=NULL, lease_expires_at=NULL, progress_until=NULL, version=version+1, updated_at=? WHERE id=?").run(now, task.id);
+          this.db.prepare('UPDATE tasks SET reviewer_agent_id=NULL, version=version+1, updated_at=? WHERE id=?').run(now, task.id);
           this.turns.close(task.id, 'released', now);
-          this.event(task.id, 'in_review', 'open', this.sys, 'reviewer_removed', agentId);
-          this.notifyMembers(teamId, 'reviewer_missing', `Task "${task.title}" (${task.id}) is open again: nobody else may review it. Add a reviewer before reassigning it.`, ['coordinator'], { task: task.id, state: 'open' });
+          this.event(task.id, 'in_review', 'in_review', this.sys, 'reviewer_removed', 'no reviewer available: waits for one');
+          this.notifyMembers(teamId, 'reviewer_missing', `Task "${task.title}" (${task.id}) waits in review for a reviewer: nobody else may review it. Name one with task_update (reviewer), or add a reviewer to the team first.`, ['coordinator'], { task: task.id, state: 'in_review' });
         } else {
           this.db.prepare('UPDATE tasks SET reviewer_agent_id=?, version=version+1, updated_at=? WHERE id=?').run(replacement, now, task.id);
           this.event(task.id, task.status, task.status, this.sys, 'reviewer_removed', replacement ?? 'no reviewer available');
@@ -740,6 +761,19 @@ export class Teams {
   }
   /** Re-generate the team's links, room membership and team rules from its members' current keys (a checkout moved them). */
   rewire(teamId: string): void { tx(this.db, () => this.wire(teamId)); }
+  /**
+   * Why a direct message between two members of a live team that grants messaging is refused, when the reason is their
+   * roles (docs/specification.md, "Who may message whom in a team"; docs/mcp.md, "Interpret results"): two workers, or two
+   * reviewers, are never linked. Null for anything else, which keeps the generic refusal.
+   */
+  peerRefusal(from: string, to: string): string | null {
+    const rows = this.db.prepare(`SELECT a.role r1, b.role r2 FROM team_members a JOIN team_members b ON b.team_id=a.team_id AND b.agent_id=? AND b.removed_at IS NULL
+      JOIN teams t ON t.id=a.team_id AND t.status NOT IN ('done','stopped') AND t.grant_messaging=1
+      WHERE a.agent_id=? AND a.removed_at IS NULL`).all(to, from) as { r1: string; r2: string }[];
+    if (rows.some((r) => r.r1 === 'worker' && r.r2 === 'worker')) return "Workers don't message one another: post in the team room or message the coordinator.";
+    if (rows.some((r) => r.r1 === 'reviewer' && r.r2 === 'reviewer')) return "Reviewers don't message one another: post in the team room or message the coordinator.";
+    return null;
+  }
   private wire(teamId: string): void {
     const t = this.mustTeam(teamId), ms = this.members(teamId), now = Date.now();
     const by = (r: string) => ms.filter((m) => m.role === r);
@@ -751,6 +785,8 @@ export class Teams {
     for (const w of by('worker')) for (const r of by('reviewer')) pairs.push([w.agent_id, r.agent_id]);
     // The coordinator and each reviewer may message each other, to ask for a review or hand one back.
     for (const c of by('coordinator')) for (const r of by('reviewer')) pairs.push([c.agent_id, r.agent_id]);
+    // The coordinator and each curator, so knowledge work can be asked for and reported on.
+    for (const c of by('coordinator')) for (const k of by('curator')) pairs.push([c.agent_id, k.agent_id]);
     const have = this.teamLinks(teamId), key = (a: string, b: string) => `${a}>${b}`;
     const want = new Set(pairs.map(([a, b]) => key(a, b)));
     for (const l of have) if (!want.has(key(l.from_agent_id, l.to_agent_id))) this.links.remove(l.id, { kind: 'system', id: null });
@@ -867,6 +903,35 @@ export class Teams {
     const b = (this.db.prepare('SELECT busy_until b FROM team_members WHERE team_id=? AND agent_id=? AND removed_at IS NULL').get(team.id, agentId) as { b: number | null } | undefined)?.b ?? 0;
     return this.lease(team, Math.max(now, b));
   }
+  /**
+   * An operator lockdown was lifted (safety/lockdown.ts onLift). The sweep skipped the members it covered, so nobody lost
+   * work to the hold itself; now their leases restart as on a team resume: a polling member's lease from now, its started
+   * tasks renewed; on demand, check-in times and declared busy times move by the time the hold lasted. A member still
+   * under another lockdown stays skipped and restarts when that one lifts.
+   */
+  holdLifted(kind: 'writes' | 'vault' | 'agent' | 'pc' | 'team', id: string | undefined, since: number, now = Date.now()): void {
+    if (kind === 'vault') return;
+    const where = kind === 'writes' ? '1=1' : kind === 'team' ? 'm.team_id=?' : kind === 'agent' ? 'm.agent_id=?'
+      : 'm.credential_id IN (SELECT c.id FROM credentials c WHERE c.bound_machine_id=?)';
+    const rows = this.db.prepare(`SELECT m.team_id, m.agent_id FROM team_members m JOIN teams t ON t.id=m.team_id AND t.status='running'
+      WHERE m.removed_at IS NULL AND ${where}`).all(...(kind === 'writes' ? [] : [id ?? ''])) as { team_id: string; agent_id: string }[];
+    if (!rows.length) return;
+    const shift = Math.max(0, now - since);
+    tx(this.db, () => {
+      for (const r of rows) {
+        const team = this.team(r.team_id)!;
+        if (team.delivery_mode === 'on_demand') {
+          this.db.prepare("UPDATE tasks SET lease_expires_at=lease_expires_at+? WHERE team_id=? AND assignee_agent_id=? AND status='in_progress' AND lease_expires_at IS NOT NULL AND overdue_at IS NULL").run(shift, r.team_id, r.agent_id);
+          this.db.prepare("UPDATE tasks SET progress_until=progress_until+? WHERE team_id=? AND assignee_agent_id=? AND status IN ('assigned','changes_requested','in_progress') AND progress_until IS NOT NULL").run(shift, r.team_id, r.agent_id);
+          this.db.prepare('UPDATE team_members SET busy_until=busy_until+? WHERE team_id=? AND agent_id=? AND removed_at IS NULL AND busy_until IS NOT NULL').run(shift, r.team_id, r.agent_id);
+        } else {
+          this.db.prepare('UPDATE team_members SET last_work_next_at=MAX(COALESCE(last_work_next_at,0), ?) WHERE team_id=? AND agent_id=? AND removed_at IS NULL').run(now, r.team_id, r.agent_id);
+          this.turns.renew(team, r.agent_id, now);
+        }
+        this.turns.mirrorWork({ teamId: r.team_id, holder: r.agent_id });
+      }
+    });
+  }
   /** Restart every live member's poll lease from `now` (resume, switch to polling): it counts as activity
       (last_work_next_at), so busy_until keeps only what members declared with task_progress until. */
   private restartLeases(teamId: string, now: number): void {
@@ -936,14 +1001,15 @@ export class Teams {
     const review = this.checkReview(team.id, a.review);
     if (a.reviewer && review === 'none') throw err('invalid_argument', 'A task with review "none" has no reviewer; leave reviewer out, or ask for review "required".');
     if (a.reviewer) this.checkReviewer(team.id, a.reviewer, null);
-    const refs = this.checkRefs(team.id, a.refs);
+    const refs = this.checkRefs(team.id, a.refs, true);
     this.guard(team, 'tasks');
     const id = newId.task(), now = Date.now();
     tx(this.db, () => {
-      this.db.prepare('INSERT INTO tasks(id,team_id,title,description,short_summary,status,claimable,reviewer_agent_id,created_by_agent,created_at,updated_at,plan_refs,review,operator_request_source,operator_request_by,operator_request_at,tags) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
-        .run(id, team.id, a.title, a.description ?? null, normShortSummary(a.short_summary), status, a.claimable ? 1 : 0, a.reviewer ?? null, w.agentId, now, now, refs, review, source ?? null, source ? w.agentId : null, source ? now : null, JSON.stringify(tags));
+      this.db.prepare('INSERT INTO tasks(id,team_id,title,description,short_summary,status,claimable,reviewer_agent_id,created_by_agent,created_at,updated_at,plan_refs,pending_refs,review,operator_request_source,operator_request_by,operator_request_at,tags) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+        .run(id, team.id, a.title, a.description ?? null, normShortSummary(a.short_summary), status, a.claimable ? 1 : 0, a.reviewer ?? null, w.agentId, now, now, refs.live, refs.pending, review, source ?? null, source ? w.agentId : null, source ? now : null, JSON.stringify(tags));
       // The originating owner: the creating agent's owner, as it is now (an admin's agents and unowned ones record theirs or null).
-      const origin = (this.db.prepare('SELECT owner_user_id o FROM agents WHERE id=?').get(w.agentId) as { o: string | null } | undefined)?.o ?? null;
+      // While delegated, the person it runs for wrote the text (docs/checkout.md §9 F1): the task is labelled with them.
+      const origin = this.delegatedTo(w.agentId) ?? (this.db.prepare('SELECT owner_user_id o FROM agents WHERE id=?').get(w.agentId) as { o: string | null } | undefined)?.o ?? null;
       if (origin) {
         this.db.prepare('UPDATE tasks SET origin_owner_id=? WHERE id=?').run(origin, id);
         this.audit.event(this.ag(w.agentId), 'task.origin_owner', { kind: 'task', id }, { owner: origin, team: team.id });
@@ -975,6 +1041,52 @@ export class Teams {
     });
     if (!assignee) this.notifyMembers(teamId, 'task_open', `A claimable task is open: "${a.title.slice(0, 120)}" (${id}). Workers: use task_claim if you are free.`, ['worker'], { task: id, state: 'open' });
     return this.task(id);
+  }
+  // ───── away members (a one-agent checkout, docs/checkout.md §9 F1) ─────
+  private awayNow(m: MemberRow, now = Date.now()): boolean { return (m.away_until ?? 0) > now; }
+  /**
+   * The collaborator the agent runs for now (docs/checkout.md §9 F1, contributor mode), from the confirm on their PC until
+   * Take back; null when it is not delegated, or delegated back to an admin. Such an agent takes only tasks assigned to it by
+   * name: it does not claim, is not told of open work and is no one's replacement reviewer.
+   */
+  delegatedTo(agentId: string): string | null {
+    const r = this.db.prepare(`SELECT c.delegate_user_id u FROM checkouts c JOIN admin_users u ON u.id=c.delegate_user_id WHERE c.scope='agent' AND c.agent_id=?
+      AND c.released_at IS NULL AND c.status IN ('restoring','restored') AND u.role <> 'admin' ORDER BY c.created_at DESC LIMIT 1`).get(agentId) as { u: string } | undefined;
+    return r?.u ?? null;
+  }
+  /** Whether a live member is away: a one-agent checkout holds it from ready until it resumes on the target. */
+  isAway(teamId: string, agentId: string, now = Date.now()): boolean {
+    const r = this.db.prepare('SELECT away_until FROM team_members WHERE team_id=? AND agent_id=? AND removed_at IS NULL').get(teamId, agentId) as { away_until: number | null } | undefined;
+    return (r?.away_until ?? 0) > now;
+  }
+  /**
+   * Mark the agent away in every team it is a live member of (until > now), or back (null). Away: the lease, stall and
+   * overdue sweeps skip it, new assignments go to others, and the reviews it holds go to a replacement reviewer now by
+   * the "A reviewer leaves" rule (a reviewer, then a coordinator when coordinators review; never the assignee); with
+   * nobody eligible, a review waits for it. Runs inside the caller's transaction.
+   */
+  setAway(agentId: string, until: number | null): void {
+    const now = Date.now();
+    this.db.prepare('UPDATE team_members SET away_until=? WHERE agent_id=? AND removed_at IS NULL').run(until, agentId);
+    if (until === null) {
+      // Back: a started task whose check-in time passed while away gets a fresh one, so it is not flagged overdue at once.
+      this.db.prepare(`UPDATE tasks SET lease_expires_at=? + (SELECT lease_minutes FROM teams WHERE id=tasks.team_id)*60000
+        WHERE assignee_agent_id=? AND status='in_progress' AND lease_expires_at IS NOT NULL AND lease_expires_at<?`).run(now, agentId, now);
+      this.turns.mirrorWork({ holder: agentId });
+      return;
+    }
+    const reviews = this.db.prepare("SELECT * FROM tasks WHERE reviewer_agent_id=? AND status='in_review'").all(agentId) as unknown as TaskRow[];
+    for (const task of reviews) {
+      const t = task.team_id ? this.team(task.team_id) : null;
+      if (!t) continue;
+      const live = this.members(t.id).filter((m) => m.agent_id !== task.assignee_agent_id && m.agent_id !== agentId && !this.awayNow(m, now) && !this.delegatedTo(m.agent_id)
+        && this.keys.credential(m.credential_id) && this.keys.effectiveStatus(this.keys.credential(m.credential_id)!) === 'active');
+      const replacement = (live.find((m) => m.role === 'reviewer') ?? live.find((m) => m.role === 'coordinator' && !!t.coordinator_reviews))?.agent_id ?? null;
+      if (!replacement) { this.event(task.id, 'in_review', 'in_review', this.sys, 'reviewer_away', 'the review waits for the reviewer to come back'); continue; }
+      this.db.prepare('UPDATE tasks SET reviewer_agent_id=?, version=version+1, updated_at=? WHERE id=?').run(replacement, now, task.id);
+      this.event(task.id, 'in_review', 'in_review', this.sys, 'reviewer_away', replacement);
+      this.turns.handOff(task, t, replacement, this.sys, { reason: 'reassigned', now });
+    }
   }
   /** A reviewer member, or a coordinator when the team lets coordinators review. */
   private canReview(team: TeamRow, agentId: string): boolean {
@@ -1018,7 +1130,7 @@ export class Teams {
       return others ? this.update_task(w, { ...a, review: undefined, version: r.version }) : r;
     }
     if (t.review === 'none' && a.reviewer !== undefined && this.effectiveReview(t) === 'none') throw err('invalid_argument', 'This task has review "none"; set review "required" (with a reason) to name a reviewer.');
-    const refs = a.refs === undefined ? t.plan_refs : this.checkRefs(team.id, a.refs);
+    const refs = a.refs === undefined ? { live: t.plan_refs, pending: t.pending_refs ?? '[]' } : this.checkRefs(team.id, a.refs, true);
     // The reviewer can be named or changed at any point before the task ends, also after it started or while it is in review.
     if (a.reviewer !== undefined) {
       if (t.status === 'approved') throw err('invalid_state', 'The task is already approved; its reviewer cannot change.');
@@ -1026,13 +1138,13 @@ export class Teams {
     }
     const reviewer = a.reviewer ?? t.reviewer_agent_id, changed = reviewer !== t.reviewer_agent_id, now = Date.now();
     tx(this.db, () => {
-      const r = this.db.prepare('UPDATE tasks SET title=?, description=?, short_summary=?, plan_refs=?, reviewer_agent_id=?, tags=?, version=version+1, updated_at=? WHERE id=? AND version=?').run(a.title ?? t.title, a.description === undefined ? t.description : a.description,
-        a.short_summary === undefined ? t.short_summary ?? null : normShortSummary(a.short_summary), refs, reviewer, tags ? JSON.stringify(tags) : t.tags ?? '[]', now, t.id, a.version);
+      const r = this.db.prepare('UPDATE tasks SET title=?, description=?, short_summary=?, plan_refs=?, pending_refs=?, reviewer_agent_id=?, tags=?, version=version+1, updated_at=? WHERE id=? AND version=?').run(a.title ?? t.title, a.description === undefined ? t.description : a.description,
+        a.short_summary === undefined ? t.short_summary ?? null : normShortSummary(a.short_summary), refs.live, refs.pending, reviewer, tags ? JSON.stringify(tags) : t.tags ?? '[]', now, t.id, a.version);
       if (r.changes === 0) throw err('conflict', `The task changed (current version ${t.version}). Re-read it with task_list.`);
       // The origin owner is whoever's agent wrote the text now: another owner's agent's edit moves it, and the history keeps the old one.
       const textChanged = (a.title !== undefined && a.title !== t.title) || (a.description !== undefined && a.description !== t.description)
         || (a.short_summary !== undefined && normShortSummary(a.short_summary) !== (t.short_summary ?? null));
-      const editor = textChanged ? (this.db.prepare('SELECT owner_user_id o FROM agents WHERE id=?').get(w.agentId) as { o: string | null } | undefined)?.o ?? null : null;
+      const editor = textChanged ? this.delegatedTo(w.agentId) ?? (this.db.prepare('SELECT owner_user_id o FROM agents WHERE id=?').get(w.agentId) as { o: string | null } | undefined)?.o ?? null : null;
       if (editor && editor !== (t.origin_owner_id ?? null)) {
         this.db.prepare('UPDATE tasks SET origin_owner_id=? WHERE id=?').run(editor, t.id);
         this.event(t.id, t.status, t.status, this.ag(w.agentId), 'task_update', `origin owner ${this.ownerLabel(editor)}${t.origin_owner_id ? `, was ${this.ownerLabel(t.origin_owner_id)}` : ''}`);
@@ -1206,8 +1318,11 @@ export class Teams {
     if (t.status !== 'open') throw err('invalid_state', `Only an open task can be assigned (this one is ${t.status}).`);
     const ar = this.roleOf(team.id, a.agent_id);
     if (ar !== 'worker' && ar !== 'coordinator') throw err('invalid_argument', 'Tasks go to a worker (or the coordinator).');
+    if (this.isAway(team.id, a.agent_id)) throw err('agent_away', `${this.keys.agent(a.agent_id)?.label ?? a.agent_id} is away (delegated to another PC) until it resumes. Assign the task to someone else.`);
     const reviewer = a.reviewer ?? t.reviewer_agent_id;
     if (reviewer) this.checkReviewer(team.id, reviewer, a.agent_id);
+    if (a.reviewer && this.isAway(team.id, a.reviewer)) throw err('agent_away', `${this.keys.agent(a.reviewer)?.label ?? a.reviewer} is away (delegated to another PC) until it resumes. Name another reviewer.`);
+    if (a.reviewer && this.delegatedTo(a.reviewer)) throw err('agent_away', `${this.keys.agent(a.reviewer)?.label ?? a.reviewer} runs for ${this.ownerLabel(this.delegatedTo(a.reviewer)!)} (contributor mode) and reviews nothing while delegated. Name another reviewer.`);
     this.moveAssigned(t, team, a.agent_id, reviewer ?? null, this.ag(w.agentId), 'task_assign');
     return this.task(t.id)!;
   }
@@ -1230,6 +1345,9 @@ export class Teams {
       && (!t.claimable || (this.roleOf(team.id, w.agentId) === 'worker' && Date.now() - (t.lapsed_at ?? 0) <= RECLAIM_MS))) return this.reclaim(w, t, team, a.version);
     if (!t.claimable) throw err('invalid_state', t.lapsed_from && t.status === 'open' ? 'This task lapsed from another worker; only that worker may take it back, or the coordinator assigns it.' : 'This task is not claimable; the coordinator assigns it.');
     if (t.reviewer_agent_id === w.agentId) throw err('invalid_state', 'You are the assigned reviewer of this task.');
+    if (this.isAway(team.id, w.agentId)) throw err('agent_away', 'You are being moved to another PC (a checkout): do not take new work here.');
+    const forWhom = this.delegatedTo(w.agentId);
+    if (forWhom) throw err('denied', `Contributor mode (for ${this.ownerLabel(forWhom)}): a delegated agent takes only tasks assigned to it by name. Ask the coordinator to assign it.`);
     const now = Date.now();
     const status = a.start ? 'in_progress' : 'assigned';
     tx(this.db, () => {
@@ -1342,10 +1460,13 @@ export class Teams {
     }
     // The named reviewer stays in force while eligible; otherwise fall back to a reviewer-role member, then to a coordinator
     // when the team lets coordinators review (never the assignee).
+    // A reviewer that is away (a one-agent checkout, F1) hands over to the next eligible one; with nobody else, the review
+    // waits for it to come back.
     let reviewer = t.reviewer_agent_id;
-    if (!reviewer || reviewer === w.agentId || !this.canReview(team, reviewer)) {
-      const others = this.members(team.id).filter((m) => m.agent_id !== w.agentId);
-      reviewer = others.find((m) => m.role === 'reviewer')?.agent_id ?? others.find((m) => this.canReview(team, m.agent_id))?.agent_id ?? null;
+    const named = reviewer && reviewer !== w.agentId && this.canReview(team, reviewer) ? reviewer : null;
+    if (!named || this.isAway(team.id, named) || this.delegatedTo(named)) {
+      const others = this.members(team.id).filter((m) => m.agent_id !== w.agentId && !this.awayNow(m) && !this.delegatedTo(m.agent_id));
+      reviewer = others.find((m) => m.role === 'reviewer')?.agent_id ?? others.find((m) => this.canReview(team, m.agent_id))?.agent_id ?? named;
     }
     if (!reviewer) throw err('invalid_state', 'No reviewer is available for this task. Ask the coordinator to name one with task_update (reviewer).');
     const now = Date.now();
@@ -1424,7 +1545,7 @@ export class Teams {
     });
     return this.task(t.id)!;
   }
-  review(w: Who, a: { task_id: string; decision: 'approve' | 'request_changes'; comments: string; version: number }): TaskRow {
+  review(w: Who, a: { task_id: string; decision: 'approve' | 'request_changes'; comments: string; version: number; reason?: 'evidence_unreadable' }): TaskRow {
     this.tick();
     const { t, team } = this.mustTask(a.task_id);
     this.act(w, team, 'task.review');
@@ -1466,25 +1587,83 @@ export class Teams {
           this.notifyMembers(team.id, 'task_done', `Task "${t.title}" (${t.id}) was approved and is done.`, ['coordinator'], { task: t.id, state: 'done' }, w.agentId);
         }
       });
+    } else if (!t.assignee_agent_id || !this.roleOf(team.id, t.assignee_agent_id)) {
+      // Its author left the team while it was in review (removeMember_): the changes go back to open, with the comments,
+      // for the coordinator to reassign. It counts as a round like any request for changes.
+      tx(this.db, () => {
+        this.db.prepare("UPDATE tasks SET status='open', assignee_agent_id=NULL, review_rounds=review_rounds+1, review_comments=?, lease_expires_at=NULL, progress_until=NULL, overdue_at=NULL, version=version+1, updated_at=? WHERE id=?").run(a.comments, now, t.id);
+        this.event(t.id, 'in_review', 'open', this.ag(w.agentId), 'task_review', `changes requested; the author left the team. ${a.comments}`.slice(0, 500));
+        this.turns.close(t.id, 'acted', now, this.ag(w.agentId));
+      });
+      this.notifyMembers(team.id, 'task_released', `Task "${t.title}" (${t.id}) is open again: the reviewer asked for changes and its author left the team. Reassign it; the review comments stay.`, ['coordinator'], { task: t.id, state: 'open' });
     } else {
-      const rounds = t.review_rounds + 1;
-      if (rounds >= team.max_review_rounds) {
-        const reason = `Review round limit reached (${rounds} of ${team.max_review_rounds}).`;
-        // Unblocked, it goes back to the assignee with the changes requested (F-34).
+      // Evidence the reviewer cannot open is the hub's fault, not the work's: when the hub confirms it, the round is not
+      // counted and the administrator is alerted, because a reviewer can always read what the task names.
+      const unreadable = a.reason === 'evidence_unreadable' ? this.unreadableEvidence?.(t, w.agentId) ?? [] : [];
+      if (unreadable.length) {
+        this.audit.alert('warning', 'review_evidence_unreadable', t.id, { team: team.name, task: t.title, reviewer: w.agentId, unreadable });
         tx(this.db, () => {
-          this.db.prepare("UPDATE tasks SET status='blocked', blocked_from='changes_requested', review_rounds=?, review_comments=?, blocked_reason=?, lease_expires_at=NULL, version=version+1, updated_at=? WHERE id=?").run(rounds, a.comments, reason, now, t.id);
-          this.event(t.id, 'in_review', 'blocked', this.sys, 'round_limit', reason);
-          this.turns.close(t.id, 'blocked', now, this.ag(w.agentId));
-        });
-        this.audit.alert('warning', 'task_blocked', t.id, { team: team.name, task: t.title, reason });
-        this.notifyMembers(team.id, 'task_blocked', `Task "${t.title}" (${t.id}) is blocked: ${reason} The administrator was alerted.`, ['coordinator'], { task: t.id, state: 'blocked' });
-      } else {
-        tx(this.db, () => {
-          this.db.prepare("UPDATE tasks SET status='changes_requested', review_rounds=?, review_comments=?, lease_expires_at=NULL, overdue_at=NULL, version=version+1, updated_at=? WHERE id=?").run(rounds, a.comments, now, t.id); // queued again: no deadline until task_start
-          this.event(t.id, 'in_review', 'changes_requested', this.ag(w.agentId), 'task_review', a.comments.slice(0, 500));
+          this.db.prepare("UPDATE tasks SET status='changes_requested', review_comments=?, lease_expires_at=NULL, overdue_at=NULL, version=version+1, updated_at=? WHERE id=?").run(a.comments, now, t.id);
+          this.event(t.id, 'in_review', 'changes_requested', this.ag(w.agentId), 'task_review', `Not counted as a round: the reviewer cannot read ${unreadable.join(', ')}. ${a.comments}`.slice(0, 500));
           this.turns.handOff({ ...t, status: 'changes_requested' }, team, t.assignee_agent_id!, this.ag(w.agentId), { now });
         });
+      } else {
+        this.sendBack(t, team, a.comments, 'in_review', this.ag(w.agentId), 'task_review', now);
       }
+    }
+    this.onReviewed?.(team.id, t.id);
+    return this.task(t.id)!;
+  }
+  /**
+   * Changes requested, as a counted round: the reviewer's request, or the coordinator's after a failed merge or release test.
+   * A limit of N allows N rounds: the request that makes the Nth round blocks the task instead of sending it back, and
+   * the administrator is alerted (docs/teams.md, "Review rounds"; the setting reads "Most review rounds per task").
+   */
+  private sendBack(t: TaskRow, team: TeamRow, comments: string, from: string, actor: Actor, tool: string, now: number): void {
+    const rounds = t.review_rounds + 1;
+    if (rounds >= team.max_review_rounds) {
+      const reason = `Review round limit reached (${rounds} of ${team.max_review_rounds}).`;
+      // Unblocked, it goes back to the assignee with the changes requested (F-34).
+      tx(this.db, () => {
+        this.db.prepare("UPDATE tasks SET status='blocked', blocked_from='changes_requested', review_rounds=?, review_comments=?, blocked_reason=?, approval_requested=0, lease_expires_at=NULL, version=version+1, updated_at=? WHERE id=?").run(rounds, comments, reason, now, t.id);
+        this.event(t.id, from, 'blocked', this.sys, 'round_limit', reason);
+        this.turns.close(t.id, 'blocked', now, actor);
+      });
+      this.audit.alert('warning', 'task_blocked', t.id, { team: team.name, task: t.title, reason });
+      this.notifyMembers(team.id, 'task_blocked', `Task "${t.title}" (${t.id}) is blocked: ${reason} The administrator was alerted.`, ['coordinator'], { task: t.id, state: 'blocked' });
+    } else {
+      tx(this.db, () => {
+        this.db.prepare("UPDATE tasks SET status='changes_requested', review_rounds=?, review_comments=?, approval_requested=0, lease_expires_at=NULL, overdue_at=NULL, version=version+1, updated_at=? WHERE id=?").run(rounds, comments, now, t.id); // queued again: no deadline until task_start
+        this.event(t.id, from, 'changes_requested', actor, tool, comments.slice(0, 500));
+        this.turns.handOff({ ...t, status: 'changes_requested' }, team, t.assignee_agent_id!, actor, { now });
+      });
+    }
+  }
+  /**
+   * Coordinator: an approved task that failed its merge or release test goes back to its assignee, changes requested, with
+   * the reason. It counts as a review round and is audited. A done task stays ended: the follow-up is a new task.
+   */
+  reopen(w: Who, a: { task_id: string; reason: string }): TaskRow {
+    this.tick();
+    const { t, team } = this.mustTask(a.task_id);
+    this.act(w, team, 'task.complete', 'send an approved task back');
+    if (t.status === 'done') throw err('invalid_state', 'This task is done and stays ended. Create a new task for the fix, and name this one in its description.');
+    if (t.status !== 'approved') throw err('invalid_state', `Only an approved task can be sent back (this one is ${t.status}).`);
+    const reason = scrub(a.reason.trim());
+    if (!reason) throw err('invalid_argument', 'Say why the task goes back: what failed.');
+    const actor = this.ag(w.agentId);
+    this.audit.event(actor, 'task.reopen', { kind: 'task', id: t.id }, { team: team.name, title: t.title, reason: reason.slice(0, 500), round: t.review_rounds + 1 });
+    const now = Date.now();
+    if (!t.assignee_agent_id || !this.roleOf(team.id, t.assignee_agent_id)) {
+      // Its author left the team (removeMember_ keeps submitted work with its author): the task goes to open with the
+      // reason as its review comments, a counted round, for the coordinator to reassign. Never handed to a non-member.
+      tx(this.db, () => {
+        this.db.prepare("UPDATE tasks SET status='open', assignee_agent_id=NULL, review_rounds=review_rounds+1, review_comments=?, approval_requested=0, lease_expires_at=NULL, progress_until=NULL, overdue_at=NULL, version=version+1, updated_at=? WHERE id=?").run(reason, now, t.id);
+        this.event(t.id, 'approved', 'open', actor, 'task_reopen', `sent back; the author left the team. ${reason}`.slice(0, 500));
+      });
+      this.notifyMembers(team.id, 'task_released', `Task "${t.title}" (${t.id}) is open again: it was sent back and its author left the team. Reassign it; the reason is in its review comments.`, ['coordinator'], { task: t.id, state: 'open' });
+    } else {
+      this.sendBack(t, team, reason, 'approved', actor, 'task_reopen', now);
     }
     this.onReviewed?.(team.id, t.id);
     return this.task(t.id)!;
@@ -1750,7 +1929,7 @@ export class Teams {
     return this.team(team.id)!;
   }
 
-  /** Rewire live teams whose generated coordinator grants lack an action added since, or that lack a coordinator-reviewer link (run once at start). */
+  /** Rewire live teams whose generated coordinator grants lack an action added since, or that lack a coordinator-reviewer or coordinator-curator link (run once at start). */
   refreshGrants(): number {
     let n = 0;
     for (const t of this.teams().filter((x) => x.status !== 'done' && x.status !== 'stopped')) {
@@ -1760,7 +1939,7 @@ export class Teams {
       const authors = this.members(t.id).some((m) => m.role === 'worker' || m.role === 'coordinator');
       const missingTool = tools.size > 0 && (TEAM_TOOLS.some((r) => !tools.has(r)) || (authors && AUTHOR_SHARE_TOOLS.some((r) => !tools.has(r))));
       const linked = new Set(this.teamLinks(t.id).map((l) => `${l.from_agent_id}>${l.to_agent_id}`)), ms = this.members(t.id);
-      const missingPair = ms.some((c) => c.role === 'coordinator' && ms.some((r) => r.role === 'reviewer' && !linked.has(`${c.agent_id}>${r.agent_id}`)));
+      const missingPair = ms.some((c) => c.role === 'coordinator' && ms.some((r) => (r.role === 'reviewer' || r.role === 'curator') && !linked.has(`${c.agent_id}>${r.agent_id}`)));
       if ((rules.length && rules.every((r) => want.some((a) => !r.actions.includes(`"${a}"`)))) || missingTool || missingPair) { this.wire(t.id); n++; }
     }
     return n;
@@ -1823,15 +2002,70 @@ export class Teams {
     return this.team(t.id)!;
   }
   /** checkRefs for other modules (decisions): the plan keys as an array. */
-  checkRefsPublic(teamId: string, refs: string[] | undefined): string[] { return JSON.parse(this.checkRefs(teamId, refs)) as string[]; }
-  /** Refs name any live item of the team's project blueprint (docs/blueprint.md §2.3, §5). */
-  private checkRefs(teamId: string, refs: string[] | undefined): string {
-    if (!refs?.length) return '[]';
-    const asked = [...new Set(refs)];
+  checkRefsPublic(teamId: string, refs: string[] | undefined): string[] { return JSON.parse(this.checkRefs(teamId, refs, false).live) as string[]; }
+  /**
+   * Refs name any live item of the team's project blueprint (docs/blueprint.md §2.3, §5). A task's refs (`pending`) may also
+   * name a key that an open proposal of the same team writes: it is kept apart until the proposal closes (settlePendingRefs).
+   */
+  private checkRefs(teamId: string, refs: string[] | undefined, pending: boolean): { live: string; pending: string } {
+    if (!refs?.length) return { live: '[]', pending: '[]' };
+    const asked = [...new Set(refs)].slice(0, 20);
     const keys = new Set((this.db.prepare(`SELECT i.key FROM bp_items i JOIN teams t ON t.project_id=i.project_id WHERE t.id=? AND i.deleted_at IS NULL AND i.key IN (${asked.map(() => '?').join(',')})`).all(teamId, ...asked) as { key: string }[]).map((r) => r.key));
-    const bad = asked.filter((r) => !keys.has(r));
-    if (bad.length) throw err('invalid_argument', `Not in the project blueprint: ${bad.join(', ')}.`);
-    return JSON.stringify(asked.slice(0, 20));
+    const missing = asked.filter((r) => !keys.has(r));
+    const proposed = pending && missing.length ? this.proposedKeys(teamId) : new Set<string>();
+    const bad = missing.filter((r) => !proposed.has(r));
+    if (bad.length) {
+      throw err('invalid_argument', `Not in the project blueprint${pending ? ' or in an open proposal of your team' : ''}: ${bad.join(', ')}.${pending ? ' Name a key once it is in the Blueprint, or once your team has proposed it with bp_write.' : ''}`);
+    }
+    return { live: JSON.stringify(asked.filter((r) => keys.has(r))), pending: JSON.stringify(missing) };
+  }
+  /** The concrete keys the team's open proposals upsert in its current project (a "*" key has no name until applied). */
+  private proposedKeys(teamId: string): Set<string> {
+    const rows = this.db.prepare("SELECT p.ops FROM bp_proposals p JOIN teams t ON t.id=p.team_id AND t.project_id=p.project_id WHERE p.team_id=? AND p.status='open' AND p.type='ops'").all(teamId) as { ops: string }[];
+    const out = new Set<string>();
+    for (const r of rows) {
+      let ops: unknown;
+      try { ops = JSON.parse(r.ops); } catch { continue; }
+      if (!Array.isArray(ops)) continue;
+      for (const o of ops as { op?: unknown; key?: unknown }[]) if (o?.op === 'upsert' && typeof o.key === 'string' && o.key && !o.key.endsWith('*')) out.add(o.key);
+    }
+    return out;
+  }
+  /**
+   * A Blueprint proposal of the team closed (applied, rejected, withdrawn or stale; docs/blueprint.md §2.3): each pending ref
+   * now in the Blueprint goes live, one that another open proposal still writes stays pending, any other is dropped. The
+   * coordinators get one notice naming the tasks and keys dropped (hub words, ids and keys only, no task text).
+   */
+  settlePendingRefs(teamId: string, proposalId: string, status: string): void {
+    const tasks = this.db.prepare("SELECT id, plan_refs, pending_refs FROM tasks WHERE team_id=? AND pending_refs NOT IN ('[]','') ORDER BY created_at, id").all(teamId) as { id: string; plan_refs: string; pending_refs: string }[];
+    if (!tasks.length) return;
+    const all = [...new Set(tasks.flatMap((k) => parseRefs(k.pending_refs)))];
+    const live = new Set((this.db.prepare('SELECT i.key FROM bp_items i JOIN teams t ON t.project_id=i.project_id WHERE t.id=? AND i.deleted_at IS NULL AND i.key IN (SELECT value FROM json_each(?))').all(teamId, JSON.stringify(all)) as { key: string }[]).map((r) => r.key));
+    const still = this.proposedKeys(teamId), dropped: string[] = [];
+    const put = this.db.prepare('UPDATE tasks SET plan_refs=?, pending_refs=? WHERE id=?');
+    for (const k of tasks) {
+      const was = parseRefs(k.pending_refs), went = was.filter((r) => live.has(r)), kept = was.filter((r) => !live.has(r) && still.has(r)), gone = was.filter((r) => !live.has(r) && !still.has(r));
+      if (!went.length && !gone.length) continue;
+      put.run(JSON.stringify([...new Set([...parseRefs(k.plan_refs), ...went])].slice(0, 20)), JSON.stringify(kept), k.id);
+      if (gone.length) dropped.push(`${k.id} (${gone.join(', ')})`);
+    }
+    if (!dropped.length) return;
+    const how = status === 'withdrawn' ? 'was withdrawn' : status === 'stale' ? 'turned stale' : `was ${status} by the operator`;
+    this.notifyCoordinators(teamId, 'task_refs_dropped', `Blueprint proposal ${proposalId} ${how}, so ${dropped.length === 1 ? 'a task lost its links' : `${dropped.length} tasks lost their links`} to items the proposal would have added: ${dropped.join('; ')}. Link them again with task_update once the items are in the Blueprint or proposed again.`);
+  }
+
+  /**
+   * An applied Blueprint write added these keys (docs/blueprint.md §2.3): every task of the project's teams that named one of
+   * them while it was pending gets it live now. Nothing is dropped here; the proposal settles the rest when it closes.
+   */
+  pendingRefsLive(projectId: string, keys: string[]): void {
+    const tasks = this.db.prepare("SELECT k.id, k.plan_refs, k.pending_refs FROM tasks k JOIN teams t ON t.id=k.team_id WHERE t.project_id=? AND k.pending_refs NOT IN ('[]','') AND EXISTS (SELECT 1 FROM json_each(k.pending_refs) j WHERE j.value IN (SELECT value FROM json_each(?)))")
+      .all(projectId, JSON.stringify(keys)) as { id: string; plan_refs: string; pending_refs: string }[];
+    const added = new Set(keys), put = this.db.prepare('UPDATE tasks SET plan_refs=?, pending_refs=? WHERE id=?');
+    for (const k of tasks) {
+      const was = parseRefs(k.pending_refs);
+      put.run(JSON.stringify([...new Set([...parseRefs(k.plan_refs), ...was.filter((r) => added.has(r))])].slice(0, 20)), JSON.stringify(was.filter((r) => !added.has(r))), k.id);
+    }
   }
 
   // ───── recruiting: a coordinator adds agents within the envelope the administrator set for the team ─────
@@ -2068,7 +2302,7 @@ export class Teams {
   /** Stall warnings switched off for a team: forget which of its members were alerted on (the tick also prunes them). */
   forgetStalls(teamId: string): void { for (const k of this.stallSeen) if (k.startsWith(`${teamId}|`)) this.stallSeen.delete(k); }
   stalled(t: TeamRow, m: MemberRow, now = Date.now()): boolean {
-    if (t.status !== 'running' || m.role === 'stakeholder') return false;
+    if (t.status !== 'running' || m.role === 'stakeholder' || (m.away_until ?? 0) > now) return false;
     // On demand (D-15): only an overdue work turn; a queued task has no deadline, so it never stalls its holder.
     if (t.delivery_mode === 'on_demand') return !!this.db.prepare("SELECT 1 FROM task_turns WHERE team_id=? AND holder_agent_id=? AND phase='work' AND closed_at IS NULL AND overdue_at IS NOT NULL").get(t.id, m.agent_id);
     // Polling: silent past stall_minutes, unless the member declared itself busy until later.

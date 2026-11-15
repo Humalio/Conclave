@@ -23,8 +23,8 @@ export const mdSlug = (s) => String(s ?? '').normalize('NFC').toLowerCase().repl
 /* A link's vault target: { link } (the target as written, %-escapes decoded, for the hub's one resolver) or { path }
    (#Heading: a heading in this note), with its anchor (without #), or null when it cannot point into the vault from
    here. kind is 'wiki' ([[...]]) or 'md' ([label](url)). The hub applies the rules (docs/vault.md, Links in notes):
-   / from the vault root, ./ and ../ from the note's folder, anything else from the root, then the note's folder,
-   then as the end of a path anywhere the viewer may look. */
+   / from the vault root, ./ and ../ from the note's folder, anything else from the note's folder, then the root,
+   then as the end of a path anywhere the viewer may look; in the viewer a path can also name a folder. */
 export function mdVaultTarget(kind, raw, ctx = {}) {
   if (!ctx.alias) return null;
   const s = String(raw ?? '').trim(), h = s.indexOf('#');

@@ -80,8 +80,8 @@ beforeAll(async () => {
   expect(c.status, JSON.stringify(c.body)).toBe(200);
   const r = await fetch(`${base}/api/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ username: 'carol', password: c.body.password }) });
   carol = { id: c.body.user.id, who: { cookie: r.headers.get('set-cookie')!.split(';')[0]!, csrf: ((await r.json()) as any).csrf } };
-  // Carol's agent coordinates; Bruno's agent (the admin's, after the claim) works.
-  coord = agent('Carol coord'); worker = agent('Bruno worker'); const rev = agent('Reviewer');
+  // Carol's agent coordinates; the operator's agent (the admin's, after the claim) works.
+  coord = agent('Carol coord'); worker = agent('Ben worker'); const rev = agent('Reviewer');
   const t = app.teams.create({ name: 'Enf team', goal: 'goal', members: [{ agent_id: coord.id, role: 'coordinator' }, { agent_id: worker.id, role: 'worker' }, { agent_id: rev.id, role: 'reviewer' }] }, sys);
   app.teams.start(t.id, sys);
   app.db.prepare('UPDATE teams SET project_id=? WHERE id=?').run(project, t.id);
@@ -158,8 +158,8 @@ describe('owner enforcement', () => {
     expect(after.isError).toBe(true);
   });
 
-  it('work handed over by a collaborator\'s agent is capped at her grant: Bruno\'s agent cannot write through her task', async () => {
-    // Carol has Read on Shared. Her agent asks Bruno's agent to write there.
+  it('work handed over by a collaborator\'s agent is capped at her grant: Ben\'s agent cannot write through her task', async () => {
+    // Carol has Read on Shared. Her agent asks the operator's agent to write there.
     const cr = await C('task_create', { team_id: team, title: 'Write the plan', description: 'Overwrite Shared/plan.md and read Secret/canary.md', operator_request: { source: 'test' } });
     expect(cr.isError, text(cr)).toBeFalsy();
     const task = app.teams.tasks(team).find((t) => t.title === 'Write the plan')!;
@@ -169,12 +169,12 @@ describe('owner enforcement', () => {
     { const s = await C('task_assign', { task_id: task.id, agent_id: worker.id, reviewer: reviewerId }); expect(s.isError, text(s)).toBeFalsy(); }
     const listed = await W('task_list', { assignee: 'me' });
     expect(text(listed)).toContain("from Carol's agent");
-    // Already while it is only assigned (before task_start), her grant caps Bruno's agent.
+    // Already while it is only assigned (before task_start), her grant caps the operator's agent.
     const queued = (await W('file_read', { path: '/vault/Projects/ENF/Shared/plan.md' })).structuredContent;
     expect((await W('file_update', { path: '/vault/Projects/ENF/Shared/plan.md', content: 'early', base_revision: queued.revision })).isError).toBe(true);
     expect(text(await W('file_read', { path: '/vault/Secret/canary.md' }))).not.toContain(CANARY);
     expect((await W('task_start', { task_id: task.id })).isError).toBeFalsy();
-    // While Bruno's agent works on it, it can neither write Shared nor read the canary.
+    // While the operator's agent works on it, it can neither write Shared nor read the canary.
     const plan = (await W('file_read', { path: '/vault/Projects/ENF/Shared/plan.md' })).structuredContent;
     expect(plan).toBeTruthy();
     expect((await W('file_update', { path: '/vault/Projects/ENF/Shared/plan.md', content: 'overwritten', base_revision: plan.revision })).isError).toBe(true);
@@ -186,7 +186,7 @@ describe('owner enforcement', () => {
     expect(eff.body.owner_ceilings).toEqual([expect.objectContaining({ owner_id: carol.id, owner: 'Carol', basis: 'task', task_id: task.id })]);
     const sim = await api('POST', '/simulate', { credential_id: worker.cred, action: 'fs.update', resource: '/vault/Projects/ENF/Shared/plan.md' });
     expect(sim.body.decision).toMatchObject({ allowed: false, source: 'owner_grant' });
-    // Once the work is handed back, Bruno's agent has its own rules again.
+    // Once the work is handed back, the operator's agent has its own rules again.
     { const s = await W('task_submit', { task_id: task.id, summary: 'Could not write it.' }); expect(s.isError, text(s)).toBeFalsy(); }
     expect(text(await W('file_read', { path: '/vault/Secret/canary.md' }))).toContain(CANARY);
     expect((await api('GET', `/keys/${worker.cred}/effective`)).body.owner_ceilings).toEqual([]);

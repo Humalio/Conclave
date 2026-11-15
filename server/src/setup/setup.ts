@@ -208,9 +208,10 @@ export class Setup {
     if (!pc || pc.status !== 'active') throw new KeyError('suspended', 'PC not active');
     return { keyRowId: row.id, machine: pc };
   }
-  heartbeat(keyRowId: string, machineId: string, version: string | null): void {
+  /** A bridge poll: the bridge key's row (null when the connector polls with the app key) and the PC. */
+  heartbeat(keyRowId: string | null, machineId: string, version: string | null): void {
     const now = Date.now();
-    this.db.prepare('UPDATE bridge_keys SET last_seen_at=? WHERE id=?').run(now, keyRowId);
+    if (keyRowId) this.db.prepare('UPDATE bridge_keys SET last_seen_at=? WHERE id=?').run(now, keyRowId);
     this.db.prepare('UPDATE machines SET bridge_last_seen_at=?, bridge_version=COALESCE(?, bridge_version) WHERE id=?').run(now, version, machineId);
   }
   bridgeInfo(machineId: string) {

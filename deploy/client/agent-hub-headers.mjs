@@ -111,7 +111,9 @@ const appKey = keys[cfg.app_var || 'AGENT_HUB_APP_KEY'], sesKey = keys[sesVar];
 if (!appKey || !sesKey) fail(`the keys file lacks the app key or ${sesVar}`);
 let ca;
 if (keys.AGENT_HUB_CA) { try { ca = readFileSync(resolve(expand(keys.AGENT_HUB_CA))); } catch (e) { fail(`cannot read AGENT_HUB_CA ${keys.AGENT_HUB_CA}: ${e.code || e.message}`); } }
-const auth = { Authorization: `Bearer ${appKey}` };
+// The folder and the variable name (never a key) go with the helper's own calls, so an alert about a refused key can say
+// which folder to fix.
+const auth = { Authorization: `Bearer ${appKey}`, 'X-Agent-Hub-Folder': encodeURIComponent(dir), 'X-Agent-Hub-Session-Var': sesVar };
 const cacheDir = join(CONF, 'tokens');
 const cache = join(cacheDir, `${sesVar}.tok`);
 let token = null;

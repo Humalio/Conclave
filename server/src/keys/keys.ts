@@ -36,6 +36,8 @@ export interface Credential {
 export interface Agent {
   id: string; label: string; project: string | null; model_label: string | null; role: string | null; role_detail: string | null;
   role_source: 'agent' | 'admin' | null; role_note: string | null; status_text: string | null; status: string; created_at: number; last_seen_at: number | null; archived_at?: number | null;
+  /** The agent's first and latest call other than the helper's session_login and session_whoami (migration 0144). */
+  connected_at?: number | null; last_active_at?: number | null;
   recruited_team_id?: string | null; recruited_by?: string | null;
   /** The console user who owns the agent (docs/authorization.md#agent-owners); null: unowned. */
   owner_user_id?: string | null;
@@ -265,6 +267,28 @@ export class Keys {
   }
   machine(id: string): Machine | null { return (this.db.prepare('SELECT * FROM machines WHERE id=?').get(id) as unknown as Machine) ?? null; }
   machines(): Machine[] { return this.db.prepare('SELECT * FROM machines ORDER BY name').all() as unknown as Machine[]; }
+  /**
+   * Retire a PC (Take back of a delegation, docs/checkout.md §9 F1): its app keys are revoked with their tokens, so the
+   * PC can no longer file requests or log agents in, and it is marked retired. Refused while a live session key of an
+   * agent is still bound to it.
+   */
+  retireMachine(id: string, reason: string, actor: Actor): void {
+    const pc = this.machine(id);
+    if (!pc) throw new KeyError('not_found', 'PC not found');
+    if (pc.status === 'retired') return;
+    const bound = this.credentialsWhere("kind='session_key' AND bound_machine_id=? AND status<>'revoked'", id);
+    if (bound.length) throw new KeyError('invalid_state', `${pc.name} still holds ${bound.length} agent key(s); it cannot be retired.`, { keys: bound.map((k) => k.id) });
+    tx(this.db, () => {
+      let revoked = 0;
+      for (const c of this.credentialsWhere("machine_id=? AND status<>'revoked'", id)) {
+        this.db.prepare("UPDATE credentials SET status='revoked', status_reason=?, revoked_at=? WHERE id=?").run(reason.slice(0, 200), Date.now(), c.id);
+        this.revokeTokensFor(c.id, 'pc_retired');
+        revoked++;
+      }
+      this.db.prepare("UPDATE machines SET status='retired' WHERE id=?").run(id);
+      this.audit.event(actor, 'pc.retire', { kind: 'pc', id }, { reason, app_keys_revoked: revoked });
+    });
+  }
   setMachineStatus(id: string, status: 'active' | 'suspended', actor: Actor): void {
     if (!this.machine(id)) throw new KeyError('not_found', 'PC not found');
     tx(this.db, () => {
@@ -342,8 +366,12 @@ export class Keys {
    * Leak guard: is this a key or token the hub issued, whatever its status? An exact verifier check, so text that
    * merely looks like a key never counts. For 'tok', keyId is '' and secret is the part after ah_tok_.
    */
-  isIssued(kind: 'app' | 'ses' | 'set' | 'brg' | 'tok', keyId: string, secret: string): boolean {
+  isIssued(kind: 'app' | 'ses' | 'set' | 'brg' | 'dsc' | 'tok', keyId: string, secret: string): boolean {
     if (kind === 'tok') return !!this.db.prepare('SELECT 1 FROM session_tokens WHERE token_hash=?').get(sha256Hex(`ah_tok_${secret}`));
+    if (kind === 'dsc') { // a disconnect receipt (docs/connector.md); a retired one has no verifier left
+      const r = this.db.prepare('SELECT receipt_verifier v FROM pc_actions WHERE receipt_key_id=?').get(keyId) as { v: string | null } | undefined;
+      return !!r?.v && safeEqualHex(r.v, this.verifier(secret));
+    }
     const table = kind === 'set' ? 'setup_keys' : kind === 'brg' ? 'bridge_keys' : 'credentials';
     const row = this.db.prepare(`SELECT verifier FROM ${table} WHERE key_id=?`).get(keyId) as { verifier: string } | undefined;
     return !!row && safeEqualHex(row.verifier, this.verifier(secret));

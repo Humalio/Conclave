@@ -243,6 +243,8 @@ export class CheckoutKeys implements CheckoutLink {
       const c = this.co.mustCheckout(id);
       if (c.status !== 'ready' && c.status !== 'rendered') throw err('invalid_state', `The checkout is ${c.status}; render needs it ready (every handout written, or the operator went on without them).`, { status: c.status });
       const t = this.teams.mustTeam(c.team_id);
+      // A one-agent checkout (a delegation) goes to another PC: the agent must not run twice on the source.
+      if (c.scope === 'agent' && target !== 'other_pc') throw err('invalid_argument', 'A delegated agent moves to another PC: choose other_pc with an enrolled PC or a new PC name.');
       const fs = this.facts(c);
       const agents = this.agentChoices(fs, input.agents);
       const noRemote = TARGETS[target].needs_remote ? this.noRemote(fs) : [];
@@ -313,6 +315,7 @@ export class CheckoutKeys implements CheckoutLink {
   private requestBody(c: CheckoutRow, team: string, project: string | null): CheckoutBodyIn {
     const roles = new Map<string, { name: string; team_role: 'coordinator' | 'worker' | 'reviewer' | 'stakeholder'; count: number; job: string }>();
     for (const m of this.teams.members(c.team_id)) {
+      if (c.scope === 'agent' && m.agent_id !== c.agent_id) continue; // one agent: its role only
       const a = this.keys.agent(m.agent_id), name = a?.role ?? m.role;
       const r = roles.get(name) ?? { name, team_role: teamRole(m.role), count: 0, job: a?.role_detail ?? '' };
       r.count++; roles.set(name, r);
@@ -359,6 +362,12 @@ export class CheckoutKeys implements CheckoutLink {
       if (!ch?.new_pc || !c.request_id || !ch.app_key_id) throw err('invalid_state', 'This render targets no new PC; nothing to approve.');
       const e = this.ob.keyEnrolment(ch.app_key_id);
       if (!e || (e.status !== 'issued' && e.status !== 'confirmed')) throw err('invalid_state', 'The new PC has not enrolled yet. Approve it once it shows its name and address.');
+      // A delegation: the delegate says this PC is theirs before the operator may approve it (an intercepted prompt could
+      // enrol a stranger's PC first).
+      if (c.scope === 'agent' && this.delegateIsMember(c)) {
+        if (c.pc_refused_at) throw err('pc_not_confirmed', `${this.co.personLabel(c.delegate_user_id)} said this PC is not theirs. Cancel the delegation, or let them open the prompt again for a fresh code.`);
+        if (!c.pc_confirmed_at) throw err('pc_not_confirmed', `Wait until ${this.co.personLabel(c.delegate_user_id)} confirms in their console that this PC is theirs.`);
+      }
       this.ob.approveCheckoutRequest(c.request_id, actor);
       const pc = this.keys.machine(ch.machine_id);
       this.audit.event(actor, 'checkout.pc_approved', { kind: 'checkout', id: c.id }, { pc: pc?.name ?? ch.machine_id, enrolled_from: e.enrolled_from, request: c.request_id });
@@ -366,6 +375,11 @@ export class CheckoutKeys implements CheckoutLink {
     return this.co.view(id);
   }
 
+  /** Whether a one-agent checkout's delegate is a console member (an admin delegate needs no PC confirmation). */
+  delegateIsMember(c: CheckoutRow): boolean {
+    if (!c.delegate_user_id) return false;
+    return (this.db.prepare('SELECT role FROM admin_users WHERE id=?').get(c.delegate_user_id) as { role: string } | undefined)?.role === 'member';
+  }
   /** What the console shows next to the checkout: the target with its enrolment and approval, and the push list. */
   details(id: string) {
     const c = this.co.mustCheckout(id), ch = parse<Choices | null>(c.choices, null);
@@ -400,6 +414,8 @@ export class CheckoutKeys implements CheckoutLink {
     const slots = this.ob.slots(r.id), hs = new Map(this.co.handouts(c.id).map((h) => [h.agent_id, h]));
     return {
       id: c.id, status: c.status, target: ch?.target ?? null, rotate_agent_keys: ch?.rotate_agent_keys ?? null, team: this.teams.team(c.team_id)?.name ?? null,
+      // One agent of the team (a delegation) or the whole team: setup.mjs restore words its result by it.
+      scope: c.scope ?? 'team', delegate: c.scope === 'agent' && c.delegate_user_id ? this.co.personLabel(c.delegate_user_id) : null,
       agents: slots.filter((s) => s.status !== 'closed').map((s) => {
         const h = hs.get(s.agent_id), ac = ch?.agents[s.agent_id];
         return { agent_id: s.agent_id, label: s.label, role: s.role, team_role: s.team_role, folder: s.folder, session_var: s.session_var,

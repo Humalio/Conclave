@@ -167,7 +167,7 @@ describe('fix 4: one checkout branch per member', () => {
     expect(b2).not.toBe(st.checkout.checkout_branch);
     ok(await w2.call('checkout_progress', { status: 'checkpointing' }));
     ok(await w2.call('checkout_progress', { status: 'merged', ...clean, checkout_branch: b2, checkout_head: 'd'.repeat(40) }));
-    // The lead's report is stored the old way: checkout_head and no checkout_branch (as on BIRAZ and TwinArk).
+    // The lead's report is stored the old way: checkout_head and no checkout_branch (as on ECHO and TwinArk).
     app.checkouts.checkpointing(t.lead.id);
     app.checkouts.merged(t.lead.id, clean);
     const lh = app.checkouts.handouts(c.id).find((x) => x.agent_id === t.lead.id)!;

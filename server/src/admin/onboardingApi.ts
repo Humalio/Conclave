@@ -6,8 +6,10 @@ import type { Keys } from '../keys/keys.js';
 import type { Config } from '../config.js';
 import type { Onboarding, ApproveIn } from '../onboarding/onboarding.js';
 import { renderPrompt, type ClientFiles } from '../onboarding/http.js';
+import type { Connector } from '../connector/connector.js';
+import { PAIRING_MS, caCheck, connectorPrompt } from '../connector/identity.js';
 
-export interface OnboardingApiDeps { keys: Keys; onboarding: Onboarding; files: ClientFiles; config: Config }
+export interface OnboardingApiDeps { keys: Keys; onboarding: Onboarding; files: ClientFiles; config: Config; connector?: Connector }
 
 const folder = z.object({ path: z.string(), access: z.enum(['read', 'write']) });
 const role = z.object({ name: z.string(), team_role: z.enum(['coordinator', 'worker', 'reviewer', 'stakeholder']), count: z.number().int(), job: z.string(), reviews: z.array(z.string()).optional(), folders: z.array(folder).optional() });
@@ -25,16 +27,26 @@ export function registerOnboardingApi(api: FastifyInstance, d: OnboardingApiDeps
   const idOf = (req: FastifyRequest) => (req.params as { id: string }).id;
   const body = <T extends z.ZodType>(s: T, req: FastifyRequest): z.infer<T> => s.parse(req.body ?? {});
   const prompt = (code: string, pc: string) => renderPrompt(files, { hubUrl: config.publicUrl, lanUrl: config.lanUrl, code, pc });
+  // The connector's pairing block (docs/connector.md, "Pairing"): the same code, its 30 minutes, the hub check the PC's user
+  // types, and the prompt with no code. Null when nothing can be pinned (no CA served, or no HTTPS origin).
+  const pairing = (code: string, pc: string) => {
+    const ca = files.ca(), hub = ob.hubInfo();
+    if (!ca || !hub.origin) return { pairing: null, connector_prompt: null };
+    return { pairing: { code, code_expires_at: Date.now() + PAIRING_MS, ca_check: caCheck(ca.sha256), hub_origin: hub.origin }, connector_prompt: connectorPrompt({ pc, hubUrl: hub.origin }) };
+  };
 
   // Add PC: the code appears only in this response (and in Re-enrol's).
   api.post('/api/pcs/add', async (req) => {
     const b = body(z.object({ name: z.string(), description: z.string().max(500).nullable().optional() }), req);
     const r = ob.addPc(b.name, b.description ?? null, actor(req));
-    return { pc: r.pc, key: { id: r.key.id, label: r.key.label, onboarding_enabled_at: r.key.onboarding_enabled_at }, code: r.code, prompt: prompt(r.code, r.pc.name) };
+    // The connector download (null until set) and the pairing block (docs/connector.md, "Add PC").
+    return { pc: r.pc, key: { id: r.key.id, label: r.key.label, onboarding_enabled_at: r.key.onboarding_enabled_at }, code: r.code, prompt: prompt(r.code, r.pc.name),
+      download_url: config.connectorReleaseUrl ?? null, ...pairing(r.code, r.pc.name) };
   });
   api.post('/api/pcs/:id/re-enrol', async (req) => {
     const r = ob.reEnrol(idOf(req), actor(req));
-    return { pc: r.pc, key: { id: r.key.id, label: r.key.label }, code: r.code, prompt: prompt(r.code, r.pc.name), reopened: r.reopened };
+    d.connector?.endDisconnect(idOf(req), actor(req)); // Re-enrol PC ends a disconnect (docs/connector.md)
+    return { pc: r.pc, key: { id: r.key.id, label: r.key.label }, code: r.code, prompt: prompt(r.code, r.pc.name), reopened: r.reopened, ...pairing(r.code, r.pc.name) };
   });
   api.get('/api/onboarding/pcs', async () => ({ pcs: ob.pcStates() }));
   api.get('/api/pcs/:id/enrolment', async (req) => ({ enrolment: ob.enrolment(idOf(req)) }));

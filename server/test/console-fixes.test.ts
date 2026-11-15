@@ -147,7 +147,7 @@ describe('console source', () => {
   });
 
   it('keeps long text inside its card: a card wraps words that do not fit, and its tags and the blocked reason wrap too', () => {
-    // Bruno saw a team page card overflow: a recruit request's long label and role pushed the phone page wider.
+    // the operator saw a team page card overflow: a recruit request's long label and role pushed the phone page wider.
     expect(css).toMatch(/\n\.sec\{min-width:0;overflow-wrap:break-word\}/);
     expect(css).toMatch(/\n\.sec \.tag\{max-width:100%;white-space:normal;overflow-wrap:anywhere\}/);
     expect(css).toMatch(/\n\.tk-block\{[^}]*overflow-wrap:anywhere\}/);

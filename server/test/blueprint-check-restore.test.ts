@@ -391,7 +391,7 @@ describe('authorship from the pre-reset backup, a retry, and the check plan (§4
   const restore2 = (pid: string, a: Record<string, unknown>) => hub2.blueprint.restore(pid, { text: text2, ...a } as any, opr2) as any;
 
   beforeAll(async () => {
-    // Bruno's vision, written by the operator, and a requirement coord-a wrote; then the backup and the export.
+    // the operator's vision, written by the operator, and a requirement coord-a wrote; then the backup and the export.
     put([{ op: 'upsert', kind: 'summary', key: 'SUM', title: 'Signals Lab', fields: { vision: 'Every field folds safely, on request.' } }]);
     ok(await CA('bp_write', { version: v(), ops: [{ op: 'upsert', kind: 'fr', key: 'FR-FLD-03', parent_key: 'FLD', title: 'Log every fold' }] }));
     expect(item('FR-FLD-03').created_by_kind).toBe('agent');
@@ -437,7 +437,7 @@ describe('authorship from the pre-reset backup, a retry, and the check plan (§4
     expect(hub2.blueprint.item(P2, 'SUM')).toBeFalsy();
   });
 
-  it('a restore into an empty hub with the backup keeps Bruno\'s vision at L0, and a mapped agent\'s text as that agent\'s', () => {
+  it('a restore into an empty hub with the backup keeps Ben\'s vision at L0, and a mapped agent\'s text as that agent\'s', () => {
     const r = restore2(P2, { backup: 'pre-reset.db', team_map: { [teamA]: team2 }, authors: { [coordA]: agent2 }, version: hub2.blueprint.project(P2)!.version });
     expect(r.status).toBe('applied');
     const it = trustOf(hub2, P2, team2, ['SUM', 'FR-FLD-01', 'FR-FLD-03', 'FLD']);

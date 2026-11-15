@@ -110,26 +110,24 @@ describe('authenticated multi-agent workflow regressions', () => {
     expect((await f.coord.call('task_review', { task_id: f.task.id, decision: 'approve', comments: 'Checked', version: 1000 })).data.task.status).toBe('approved');
   });
 
-  it('reopens when the only coordinator who could review is the task\'s own assignee', async () => {
+  it('waits in review when the only coordinator who could review is the task\'s own assignee', async () => {
     // A coordinator holds work only as a hub-raised task (a knowledge flag goes to its owner); it may not review its own submission.
     const f = await fixture(false);
     app.teams.update(f.team.id, { coordinator_reviews: true }, sys);
     await submitted(f);
     app.db.prepare('UPDATE tasks SET assignee_agent_id=? WHERE id=?').run(f.coord.id, f.task.id);
     app.teams.removeMember(f.team.id, f.reviewer.id, sys);
-    expect(app.teams.task(f.task.id)).toMatchObject({ status: 'open', assignee_agent_id: null, reviewer_agent_id: null });
+    expect(app.teams.task(f.task.id)).toMatchObject({ status: 'in_review', assignee_agent_id: f.coord.id, reviewer_agent_id: null });
   });
 
-  it('reopens when the only reviewer leaves and recovers after a reviewer joins', async () => {
+  it('waits in review with its author when the only reviewer leaves, and goes on once the coordinator names a new one', async () => {
     const f = await fixture(false); await submitted(f);
+    const before = app.teams.task(f.task.id)!;
     app.teams.removeMember(f.team.id, f.reviewer.id, sys);
-    expect(app.teams.task(f.task.id)).toMatchObject({ status: 'open', assignee_agent_id: null, reviewer_agent_id: null });
+    expect(app.teams.task(f.task.id)).toMatchObject({ status: 'in_review', assignee_agent_id: f.worker.id, reviewer_agent_id: null, summary: before.summary, submitted_version: before.submitted_version });
     app.teams.addMember(f.team.id, { agent_id: f.backup.id, role: 'reviewer' }, sys);
-    const current = app.teams.task(f.task.id)!;
-    await f.worker.call('task_claim', { task_id: f.task.id, version: current.version, start: true });
-    const re = await f.worker.call('task_submit', { task_id: f.task.id, summary: 'Resubmission' });
-    expect(re.data.task.reviewer).toBe(f.backup.id);
-    expect(re.data.handoff).toMatchObject({ to: f.backup.id, phase: 'review', on_demand: false });
+    const named = await f.coord.call('task_update', { task_id: f.task.id, version: app.teams.task(f.task.id)!.version, reviewer: f.backup.id });
+    expect(named.error).toBeFalsy();
     expect((await f.backup.call('task_review', { task_id: f.task.id, decision: 'approve', comments: 'Checked', version: 1000 })).data.task.status).toBe('approved');
   });
 

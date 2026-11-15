@@ -23,6 +23,11 @@ export interface RightCtx {
   sole?: boolean;
   /** The rules that are on for the caller's team in this project (bp_rules, not paused); only its coordinator uses them. */
   rules?: ReadonlySet<BpRule>;
+  /**
+   * The caller is delegated to a collaborator (docs/authorization.md, delegation): contributor mode narrows every verdict.
+   * `since` is when the delegation started: items the agent created after it are its own.
+   */
+  contributor?: { agentId: string; since: number; delegate: string } | null;
 }
 /** `decided`: applied only because the operator lets this coordinator agree requirements (audited, in the operator's digest). */
 export interface OpRight { verdict: Verdict; why: string; decided?: boolean; rule?: BpRule }
@@ -44,6 +49,52 @@ export function batchVerdict(rights: OpRight[]): Verdict { return worst(...right
 const ours = (team: string | null | undefined, c: RightCtx): boolean => team === c.teamId || (!!c.sole && (team ?? null) === null);
 
 export function opRight(op: Op, c: RightCtx): OpRight {
+  const base = baseRight(op, c);
+  return c.contributor ? contributorRight(op, c, c.contributor, base) : base;
+}
+
+/** The kinds a contributor may create (§4, Contributor column): what it found, argues, asks or fears, under an item it reads. */
+const CONTRIB_CREATE = new Set(['finding', 'claim', 'question', 'risk']);
+/** The statuses in which a contributor still edits an item it created; a claim follows its paper (planned or drafting). */
+const CONTRIB_OPEN = new Set(['draft', 'untested', 'open']);
+
+/**
+ * Contributor mode (blueprint.md §4, Contributor column): it reads, creates findings, claims, questions and risks, and
+ * edits what it created during this delegation while that is still open; every other change is a proposal, and status
+ * moves, deleting, ownership and project-level items are refused. It is a limit on top of the role's row: it can only
+ * turn an apply into a propose or a deny, never the reverse.
+ */
+function contributorRight(op: Op, c: RightCtx, k: NonNullable<RightCtx['contributor']>, base: OpRight): OpRight {
+  if (base.verdict === D) return base;
+  const deny = (why: string): OpRight => ({ verdict: D, why: `contributor mode (for ${k.delegate}): ${why}` });
+  const propose = (why: string): OpRight => base.verdict === P ? base : { verdict: P, why: `contributor mode (for ${k.delegate}): ${why}; it goes to the operator as a proposal` };
+  // An item in this write (no author yet) is the agent's own; an existing one only if it created it during this delegation.
+  const mine = (r: ItemRow | undefined) => !!r && (r.created_by_kind === undefined || (r.created_by_kind === 'agent' && r.created_by_id === k.agentId && r.created_at >= k.since));
+  const open = (r: ItemRow) => r.kind === 'claim' ? r.status === 'draft' && PAPER_OPEN.includes(c.row(r.parent_key ?? '')?.status ?? '') : r.status === null || CONTRIB_OPEN.has(r.status);
+  if (op.op === 'remove') return deny(`deleting ${op.key} is not a contributor's`);
+  if (op.op === 'link' || op.op === 'unlink') {
+    const from = c.row(op.from);
+    return from && mine(from) && open(from) ? base : propose(`${op.op} from ${op.from}, which it did not create during this delegation`);
+  }
+  return itemContributorRight(op as Extract<Op, { op: 'upsert' | 'move' }>, c, mine, open, deny, propose, base);
+}
+
+function itemContributorRight(op: Extract<Op, { op: 'upsert' | 'move' }>, c: RightCtx, mine: (r: ItemRow | undefined) => boolean, open: (r: ItemRow) => boolean,
+  deny: (why: string) => OpRight, propose: (why: string) => OpRight, base: OpRight): OpRight {
+  const cur = c.row(op.key);
+  const kind = op.op === 'move' ? cur?.kind : op.kind;
+  const parentKey = op.parent_key === undefined ? (cur?.parent_key ?? null) : op.parent_key;
+  const parent = parentKey ? c.row(parentKey) : undefined;
+  const team = parent ? parent.team_id : (op.op === 'upsert' && op.team_id !== undefined ? op.team_id : (cur?.team_id ?? null));
+  if ((team ?? null) === null && !c.sole) return deny(`${op.key} is project-level, in no team's part`);
+  if (op.op === 'upsert' && cur && op.team_id !== undefined && op.team_id !== cur.team_id) return deny(`moving ${op.key} to another team is the operator's`);
+  const was = cur ? cur.status : (KINDS[kind ?? '']?.statuses?.[0] ?? null);
+  if (op.op === 'upsert' && op.status !== undefined && op.status !== was) return deny(`moving ${op.key} to ${op.status} is not a contributor's`);
+  if (!cur) return CONTRIB_CREATE.has(kind ?? '') ? base : propose(`a new ${kind} is not a contributor's`);
+  return mine(cur) && open(cur) ? base : propose(`${op.key} was not created by this agent during the delegation, or is no longer open`);
+}
+
+function baseRight(op: Op, c: RightCtx): OpRight {
   if (c.replan && c.role === 'coordinator' && replanAllows(op, c, c.replan)) return { verdict: A, why: '' };
   const member = c.role === 'member';
   if (op.op === 'remove' && c.row(op.key)?.kind === 'report') return { verdict: D, why: REPORT_WHY };

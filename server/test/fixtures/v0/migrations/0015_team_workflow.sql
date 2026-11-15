@@ -1,4 +1,4 @@
--- Workflow options from the BIRAZ trial (all off by default, so existing teams behave as before).
+-- Workflow options from the ECHO trial (all off by default, so existing teams behave as before).
 --   close_on_approve     an approving review closes the task (or hands it to the operator checkpoint) in the same call
 --   coordinator_reviews  a coordinator explicitly named as a task's reviewer may review it (never their own work)
 --   delivery_mode        'poll': members loop on work_next; leases release silent tasks.

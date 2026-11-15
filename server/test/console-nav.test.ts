@@ -220,6 +220,18 @@ describe('navTrail', () => {
     expect(n.backLabel()).toBe('Leonor');
   });
 
+  it('a Blueprint section opened from the team page card has the project\'s own trail, and Back returns to the team page', () => {
+    const n = nav();
+    n.navName('prj_c', 'Conclave'); n.navHere('team', 'team_cd', { label: 'Conclave Developers' });
+    const fromProject = n.navTrail('blueprint', 'prj_c|2').crumbs.map((c: any) => `${c.type}/${c.arg}`);
+    n.go('home'); n.open('team', 'team_cd'); n.open('blueprint', 'prj_c|2');
+    const tr = n.navTrail('blueprint', 'prj_c|2');
+    // Same crumbs as from the project; only Back differs: the team page the section was opened from.
+    expect(tr.crumbs.map((c: any) => `${c.type}/${c.arg}`)).toEqual(fromProject);
+    expect(tr.back).toMatchObject({ type: 'team', arg: 'team_cd', origin: true });
+    expect(n.backLabel()).toBe('Conclave Developers');
+  });
+
   it('sends Back from an onboarding request with no history to Home (4.A6)', () => {
     expect(nav().navTrail('ob', 'ob_1').back).toMatchObject({ type: 'home', arg: 'o=az' });
   });

@@ -1,24 +1,38 @@
-/** Bridge HTTP endpoints (not MCP): pair, poll (jobs), and the channel byte streams (state, chunk up/down, done). */
+/**
+ * Bridge HTTP endpoints (not MCP): pair, poll (jobs), and the channel byte streams (state, chunk up/down, done).
+ * They take the PC's bridge key or, for the connector's service (docs/transfers.md), the PC's app key; pairing is the
+ * stand-alone bridge's only.
+ */
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import type { Setup } from '../setup/setup.js';
+import type { Keys } from '../keys/keys.js';
 import { KeyError } from '../keys/keys.js';
 import type { RateLimit } from '../db/rateLimit.js';
 import type { Channels, BridgeReply } from '../channels/channels.js';
 
 export const MAX_POLL_S = 25;
 
-export function registerBridge(f: FastifyInstance, setup: Setup, pairLimit: RateLimit, channels: Channels): { releaseAll: () => void } {
+export function registerBridge(f: FastifyInstance, setup: Setup, pairLimit: RateLimit, channels: Channels, keys?: Keys): { releaseAll: () => void } {
   const waiters = new Set<() => void>();
   const unauthorized = (reply: FastifyReply) => reply.code(401).header('www-authenticate', 'Bearer').send({ error: 'unauthorized', message: 'Invalid bridge key or PC suspended.' });
 
   f.addContentTypeParser('application/octet-stream', { parseAs: 'buffer', bodyLimit: 1024 * 1024 + 1024 }, (_r, body, done) => done(null, body));
   const bearer = (req: { headers: { authorization?: string } }) => { const m = /^Bearer\s+(\S+)$/i.exec(req.headers.authorization ?? ''); return m ? m[1]! : null; };
-  const authBridge = (req: { headers: { authorization?: string } }) => {
-    const k = bearer(req);
+  /** The PC behind a bridge key or an app key (the connector's service), or null. A suspended PC's keys are refused. */
+  const authKey = (k: string | null): { keyRowId: string | null; machine: { id: string } } | null => {
     if (!k) return null;
-    try { return setup.verifyBridgeKey(k); } catch (e) { if (e instanceof KeyError) return null; throw e; }
+    try {
+      if (k.startsWith('ah_app_')) {
+        if (!keys) return null;
+        const c = keys.verifyKey(k, 'app_key');
+        const pc = c.machine_id ? keys.machine(c.machine_id) : null;
+        return pc ? { keyRowId: null, machine: pc } : null;
+      }
+      return setup.verifyBridgeKey(k);
+    } catch (e) { if (e instanceof KeyError) return null; throw e; }
   };
+  const authBridge = (req: { headers: { authorization?: string } }) => authKey(bearer(req));
   const send = (reply: FastifyReply, r: BridgeReply) => {
     if (r.status === 499) return reply.code(499).send();
     if (r.status === 204) return reply.code(204).send();
@@ -82,11 +96,9 @@ export function registerBridge(f: FastifyInstance, setup: Setup, pairLimit: Rate
   });
 
   f.post('/bridge/poll', async (req, reply) => {
-    const h = req.headers.authorization;
-    const m = typeof h === 'string' ? /^Bearer\s+(\S+)$/i.exec(h) : null;
-    if (!m) return unauthorized(reply);
-    let auth;
-    try { auth = setup.verifyBridgeKey(m[1]!); } catch (e) { if (e instanceof KeyError) return unauthorized(reply); throw e; }
+    const presented = bearer(req);
+    const auth = authKey(presented);
+    if (!auth) return unauthorized(reply);
     const parsed = z.object({ version: z.string().max(40).optional(), wait_s: z.number().min(0).max(MAX_POLL_S).optional(), home: z.string().max(500).optional(), os: z.string().max(20).optional(), running: z.array(z.string().max(100)).max(50).optional() }).safeParse(req.body ?? {});
     if (!parsed.success) return reply.code(400).send({ error: 'invalid_request' });
     const b = parsed.data;
@@ -104,7 +116,7 @@ export function registerBridge(f: FastifyInstance, setup: Setup, pairLimit: Rate
         req.socket.once('close', done);
       });
       if (req.socket.destroyed) return reply;
-      try { setup.verifyBridgeKey(m[1]!); } catch { return unauthorized(reply); }
+      if (!authKey(presented)) return unauthorized(reply);
       setup.heartbeat(auth.keyRowId, auth.machine.id, b.version ?? null);
     }
     return { jobs: channels.jobsFor(auth.machine.id, running), allowed_folders: setup.approvedFolders(auth.machine.id), poll_after_ms: 0 };

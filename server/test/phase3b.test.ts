@@ -587,7 +587,7 @@ describe('admin API', () => {
   });
 });
 
-describe('workflow options from the BIRAZ trial', () => {
+describe('workflow options from the ECHO trial', () => {
   const kinds = async (call: Call) => ((await call('session_whoami')).structuredContent.notices as { kind: string }[]).map((x) => x.kind);
   const runToReview = async (X: T, reviewer: string) => {
     const t = await mkTask(X, { reviewer });
@@ -904,12 +904,14 @@ describe('team plan: requirements and milestones', () => {
     expect((await X.W1('bp_write', { team_id: X.tid, version: v(), ops: [{ op: 'upsert', kind: 'fr', key: 'FR-PRF-01', parent_key: 'PRF', title: 'x' }] })).structuredContent.status).toBe('proposed');
     const drafts = [
       { op: 'upsert', kind: 'fr', key: 'FR-PRF-01', parent_key: 'PRF', title: 'Certified bound', fields: { priority: 'must' } },
-      { op: 'upsert', kind: 'fr', key: 'FR-PRF-02', parent_key: 'PRF', title: 'Open question', fields: { unclear: true } }];
+      { op: 'upsert', kind: 'fr', key: 'FR-PRF-02', parent_key: 'PRF', title: 'Open question' }];
     // what a milestone delivers is scope, the operator's, even for a requirement written in the same write (§4)
     const scoped = (await X.C('bp_write', { team_id: X.tid, version: v(), ops: [...drafts, { op: 'link', from: 'M1', to: 'FR-PRF-01', rel: 'delivers' }] })).structuredContent;
     expect(scoped.status).toBe('proposed');
     expect(scoped.why.join()).toContain('M1 delivers FR-PRF-01: scope needs the operator');
     expect((await X.C('bp_write', { team_id: X.tid, version: v(), ops: drafts })).structuredContent.status).toBe('applied');
+    const ask = (await X.C('team_ask', { team_id: X.tid, question: 'What is open in FR-PRF-02?', refs: ['FR-PRF-02'] })).structuredContent.decision_id;
+    expect((await X.C('bp_write', { team_id: X.tid, version: v(), ops: [{ op: 'upsert', kind: 'fr', key: 'FR-PRF-02', fields: { unclear: true, unclear_ask: ask } }] })).structuredContent.status).toBe('applied');
     app.blueprint.write(p.id, { version: v(), ops: [{ op: 'link', from: 'M1', to: 'FR-PRF-01', rel: 'delivers' }] }, { kind: 'operator', id: null });
     // a stale version on an item that changed is refused
     expect((await X.C('bp_write', { team_id: X.tid, version: 0, ops: [{ op: 'upsert', kind: 'fr', key: 'FR-PRF-01', title: 'y' }] })).structuredContent.error).toBe('conflict');

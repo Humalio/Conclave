@@ -169,7 +169,7 @@ export default [
     c.expect(k.directive.reviewed_at && k.directive.category === 'sources' && k.directive.version === r.directive.version, 'Keep as is leaves the adopted directive as it is');
   }, { rows: ['directives-categories'] }),
 
-  s('2.14', 'Vesna submits, Halden asks for changes, then approves; Hesper closes', async (c) => {
+  s('2.14', 'Vesna submits, Halden asks for changes, then approves; a test fails, Hesper sends it back, then closes', async (c) => {
     const J = c.as('Vesna'), N = c.as('Halden'), id = c.S.t.alloy.id;
     await J.ok('task_start', { task_id: id });
     await J.ok('task_progress', { task_id: id, note: 'Layout drafted, sharing for review.', until: Date.now() + 2 * 3600_000 });
@@ -179,6 +179,12 @@ export default [
     await J.ok('task_start', { task_id: id });
     const v2 = (await J.ok('task_submit', { task_id: id, summary: 'Version 2: titanium brackets, ±0.3 mm wall.', attachments: [{ path: 'plates.md', content: '# Plate layout v2\n\nTitanium brackets, wall 44 mm ±0.3 mm.\n' }] })).task.version;
     await N.ok('task_review', { task_id: id, decision: 'approve', comments: 'Both points answered.', version: v2 });
+    // The fit test fails after approval: Hesper sends the approved task back, a counted round with her reason.
+    const back = (await c.as('Hesper').ok('task_reopen', { task_id: id, reason: 'The fit test failed: the brackets foul panel 7.' })).task;
+    c.expect(back.status === 'changes_requested' && back.review_rounds === 2, 'a sent-back task is changes requested and counts as a round');
+    await J.ok('task_start', { task_id: id });
+    const v3 = (await J.ok('task_submit', { task_id: id, summary: 'Version 3: panel 7 bracket moved 6 mm.', attachments: [{ path: 'plates.md', content: '# Plate layout v3\n\nTitanium brackets, wall 44 mm ±0.3 mm, panel 7 bracket moved 6 mm.\n' }] })).task.version;
+    await N.ok('task_review', { task_id: id, decision: 'approve', comments: 'Fit test passes now.', version: v3 });
     await c.as('Hesper').ok('task_complete', { task_id: id, summary: 'Plate layout accepted.' });
   }, { beat: 2500, rows: ['teams'] }),
 
@@ -293,7 +299,7 @@ export default [
   }, { rows: ['transfers'] }),
 
   s('2.24', 'Plans move; Orla reports to her stakeholders', async (c) => {
-    await writePlan(c, 'int', 'Saoirse', { requirements: [{ key: 'R2', status: 'unclear', evidence: 'Echo model v2 drafted; echo 47 unexplained.' }] });
+    await writePlan(c, 'int', 'Saoirse', { requirements: [{ key: 'R2', status: 'unclear', ask: 'Echo model v2 is drafted but echo 47 is unexplained. Should we freeze and validate v2 now, or hold R2 until echo 47 has a cause?', evidence: 'Echo model v2 drafted; echo 47 unexplained.' }] });
     await movePlans(c, 2); // every team's plan moves with Act 2 (plans.mjs)
     await c.as('Orla').ok('bp_report', { team_id: c.T('fp'), health: 'at_risk', done: ['Echo model v2 drafted at P 0.33 operating power'], next: ['Explain echo 47 with the Timekeepers'], blockers: ['Echo 47 is still off the curve'], refs: ['FR-SL-02'] });
   }),

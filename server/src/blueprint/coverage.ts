@@ -37,30 +37,52 @@ function taskRefs(db: Db, projectId: string, seen: Exclude<TasksSeen, null>): Se
   return new Set(rows.map((r) => String(r.k)));
 }
 
+/** What the gap rules read, built once per project: requirements with a criterion, those a live milestone delivers, decisions that govern something, and the keys a task the viewer may see names (null without task access). */
+export interface CoverageSets { withAc: Set<string>; delivered: Set<string>; governs: Set<string>; refs: Set<string> | null }
+type CovItem = Pick<Item, 'key' | 'kind' | 'status' | 'fields' | 'created_at'> & { parent_key: string | null };
+export function coverageSets(db: Db, projectId: string, all: readonly CovItem[], links: readonly Pick<LinkRow, 'from_key' | 'to_key' | 'rel'>[], seen: TasksSeen): CoverageSets {
+  const live = new Map(all.map((i) => [i.key, i]));
+  return {
+    withAc: new Set(all.filter((i) => i.kind === 'ac' && i.parent_key).map((i) => i.parent_key!)),
+    delivered: new Set(links.filter((l) => l.rel === 'delivers' && live.get(l.from_key)?.kind === 'milestone' && live.get(l.from_key)?.status !== 'dropped').map((l) => l.to_key)),
+    governs: new Set(links.filter((l) => l.rel === 'governs').map((l) => l.from_key)),
+    refs: seen ? taskRefs(db, projectId, seen) : null,
+  };
+}
+const hasEvidence = (i: Pick<Item, 'fields'>) => String(i.fields['evidence'] ?? '').trim() !== '';
+/**
+ * Each Coverage list's rule, one function per meaning: Coverage below and browse's gaps (facets.ts, docs/blueprint.md
+ * §6.1) both read these, so a gap's count and its Coverage list cannot disagree. No task is false for every item when the
+ * viewer may not see tasks; callers leave that list out instead.
+ */
+export const COVERAGE_TESTS: Readonly<Record<(typeof GAP_LISTS)[number], (i: CovItem, s: CoverageSets, now: number) => boolean>> = {
+  no_ac: (i, s) => REQ.has(i.kind) && i.status !== 'dropped' && !s.withAc.has(i.key),
+  no_milestone: (i, s) => REQ.has(i.kind) && (i.status === 'agreed' || i.status === 'built') && !s.delivered.has(i.key),
+  no_task: (i, s) => !!s.refs && REQ.has(i.kind) && i.status === 'agreed' && !s.refs.has(i.key),
+  passing_no_evidence: (i) => i.kind === 'ac' && i.status === 'passing' && !hasEvidence(i),
+  decisions_govern_nothing: (i, s) => i.kind === 'decision' && i.status === 'accepted' && !s.governs.has(i.key),
+  old_questions: (i, _s, now) => i.kind === 'question' && i.status === 'open' && now - questionSince(i) > 14 * DAY,
+};
+
 /**
  * The gaps of `items` (a team's part or the whole project). `all` is every live item of the project and `links` every
  * link of it, so a project-level milestone that delivers a part's requirement counts.
  */
 export function coverage(db: Db, projectId: string, items: Item[], all: Item[], links: LinkRow[], seen: TasksSeen, now = Date.now()): Coverage {
-  const live = new Map(all.map((i) => [i.key, i]));
   const gap = (list: Item[], since?: (i: Item) => number): Gap => ({
     count: list.length,
     items: list.slice(0, MAX).map((i) => ({ key: i.key, kind: i.kind, title: i.title, status: i.status, ...(since ? { since: since(i) } : {}) })),
   });
-  const reqs = items.filter((i) => REQ.has(i.kind) && i.status !== 'dropped');
-  const withAc = new Set(all.filter((i) => i.kind === 'ac' && i.parent_key).map((i) => i.parent_key!));
-  const delivered = new Set(links.filter((l) => l.rel === 'delivers' && live.get(l.from_key)?.kind === 'milestone' && live.get(l.from_key)?.status !== 'dropped').map((l) => l.to_key));
-  const governs = new Set(links.filter((l) => l.rel === 'governs').map((l) => l.from_key));
-  const refs = seen ? taskRefs(db, projectId, seen) : null;
-  const evidence = (i: Item) => String(i.fields['evidence'] ?? '').trim() !== '';
+  const s = coverageSets(db, projectId, all, links, seen);
+  const of = (id: (typeof GAP_LISTS)[number]) => items.filter((i) => COVERAGE_TESTS[id](i, s, now));
   return {
-    no_ac: gap(reqs.filter((i) => !withAc.has(i.key))),
-    no_milestone: gap(reqs.filter((i) => (i.status === 'agreed' || i.status === 'built') && !delivered.has(i.key))),
+    no_ac: gap(of('no_ac')),
+    no_milestone: gap(of('no_milestone')),
     // A viewer who may not see tasks gets no list at all, so the answer never says that hidden tasks exist (SPEC-BLUEPRINT-05).
-    no_task: refs ? gap(reqs.filter((i) => i.status === 'agreed' && !refs.has(i.key))) : null,
-    passing_no_evidence: gap(items.filter((i) => i.kind === 'ac' && i.status === 'passing' && !evidence(i))),
-    decisions_govern_nothing: gap(items.filter((i) => i.kind === 'decision' && i.status === 'accepted' && !governs.has(i.key))),
-    old_questions: gap(items.filter((i) => i.kind === 'question' && i.status === 'open' && now - questionSince(i) > 14 * DAY).sort((a, b) => questionSince(a) - questionSince(b) || a.key.localeCompare(b.key)), questionSince),
+    no_task: s.refs ? gap(of('no_task')) : null,
+    passing_no_evidence: gap(of('passing_no_evidence')),
+    decisions_govern_nothing: gap(of('decisions_govern_nothing')),
+    old_questions: gap(of('old_questions').sort((a, b) => questionSince(a) - questionSince(b) || a.key.localeCompare(b.key)), questionSince),
   };
 }
 

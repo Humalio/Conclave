@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url';
 const home = mkdtempSync(join(tmpdir(), 'ahs-'));
 process.env.HOME = home;
 process.env.USERPROFILE = home;
-const { shellQuote, helperCommand, loadState, verifyHandouts, repoPlan, prepareRepo, scanFolder, startLine, markOwn, claudeCodeFolder } = await import('./setup.mjs');
+const { keyIdOf, keyIdProblem, shellQuote, helperCommand, loadState, verifyHandouts, repoPlan, prepareRepo, scanFolder, startLine, markOwn, claudeCodeFolder } = await import('./setup.mjs');
 const { createHash } = await import('node:crypto');
 const OB = join(home, '.config', 'conclave', 'onboarding');
 
@@ -22,6 +22,18 @@ test('shellQuote keeps $, backticks, double quotes and single quotes literal for
   const cmd = helperCommand('/h/agent-hub-headers.mjs', dir, false);
   const r = spawnSync('sh', ['-c', `printf '%s\n' ${cmd}`], { encoding: 'utf8' });
   assert.equal(r.stdout, `node\n/h/agent-hub-headers.mjs\n${dir}\n`);
+});
+
+test('setup checks compare session keys by key id only', () => {
+  assert.equal(keyIdOf('ah_ses_abcdefghijk2_secretpart'), 'abcdefghijk2');
+  assert.equal(keyIdOf('not a key'), null);
+  assert.equal(keyIdOf(undefined), null);
+  assert.equal(keyIdProblem('X_SESSION_KEY', 'abcdefghijk2', 'abcdefghijk2'), null);
+  assert.equal(keyIdProblem('X_SESSION_KEY', null, 'abcdefghijk2'), null); // missing: reported on its own
+  assert.equal(keyIdProblem('X_SESSION_KEY', 'abcdefghijk2', undefined), null); // written before ids were kept
+  const p = keyIdProblem('X_SESSION_KEY', 'zwonwcoalsz7', 'abcdefghijk2');
+  assert.match(p, /X_SESSION_KEY in keys\.env has key id zwonwcoalsz7, but setup wrote abcdefghijk2/);
+  assert.ok(!p.includes('secretpart'));
 });
 
 test('shellQuote on Windows uses double quotes and forward slashes', () => {

@@ -194,6 +194,9 @@ a.lrow:hover .chev,button.lrow:hover .chev,.lrow.act:hover .chev{color:var(--tex
 .kv-k{font:var(--t-meta);color:var(--muted);white-space:nowrap}
 .kv-v{min-width:0;font:var(--t-title);font-variant-numeric:tabular-nums;text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .kv-v.id{font:var(--t-id)}
+/* The setup details sheet reads the source and the next step in full: its values wrap, never cut (a returned setup's next step is a sentence). */
+.ob-setup-d .kv{height:auto;min-height:var(--h-touch);padding:var(--s2) 0;align-items:baseline}
+.ob-setup-d .kv-v{white-space:normal;overflow-wrap:anywhere}
 /* stat grid: every row shares one set of column tracks */
 .stats{display:grid;grid-template-columns:repeat(var(--cols,3),minmax(0,1fr));gap:var(--s3) var(--s2)}
 .stats>.overline{grid-column:1 / -1;margin:var(--s2) 0 0}
@@ -296,6 +299,7 @@ button.info.end .info-tip{left:auto;right:0}
 .pill-btn:hover{text-decoration:underline}
 .pill.ok,.p-live{background:var(--ok-soft);color:var(--ok-t)}
 .pill.warn{background:var(--warn-soft);color:var(--warn-t)}
+.mu-late{color:var(--warn-t)}
 .pill.bad{background:var(--bad-soft);color:var(--bad-t)}
 .pill.info{background:var(--info-soft);color:var(--info)}
 .pill.idle{background:var(--panel-3);color:var(--muted)}
@@ -329,6 +333,8 @@ button.info.end .info-tip{left:auto;right:0}
 #workspaceView>.workspace-bar+.dh{min-height:0;padding-top:var(--s3)}
 /* Tabs are never cut off: a button beside them (Agent access) wraps under them before they scroll. */
 #workspaceView>.workspace-bar>.ws-row{flex-wrap:wrap}
+/* Security's row takes the card's whole width, so its New button sits at the right end, over the right edge of the filters below. */
+#workspaceView>#securityBar>.ws-row{flex:1 1 100%}
 /* A title that only repeats the selected tab (tabTitle): with nothing else in the header the line collapses, kept for screen readers
    and focus, and the bar takes its divider so the content starts right under the toolbar. */
 #workspaceView>.dh.bare{position:absolute;width:1px;height:1px;min-height:0;padding:0;border:0;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
@@ -699,6 +705,9 @@ select.inp{width:auto;padding-right:var(--s8)}
 .ref .info-tip span{font:var(--t-meta);color:var(--muted)}
 .ref .info-tip b+span,.ref .info-tip span+span{display:block}
 .ref.more{color:var(--muted);font-weight:600}
+/* a ref to an item still in a pending proposal: dashed, never a link (blueprint.md §2.3) */
+.ref.pend{text-decoration:underline dashed var(--faint);text-underline-offset:var(--s1)}
+.tk-pend{display:block;margin-top:var(--s1)}
 /* a status pill with its project meaning (docs/blueprint.md §9): the .ref pattern around a pill that stays a pill */
 .bp-stm{position:relative;display:inline-flex;border-radius:var(--r-full);cursor:help}
 .bp-stm .info-tip b{font:var(--t-label);color:var(--text)}
@@ -727,7 +736,12 @@ select.inp{width:auto;padding-right:var(--s8)}
 .task-brief[open] summary svg{transform:rotate(90deg)}
 .task-brief .task-md{margin-top:var(--s2)}
 .tk-block{display:flex;gap:var(--s2);align-items:flex-start;margin:0 0 var(--s2);color:var(--bad-t);font:var(--t-meta);overflow-wrap:anywhere} /* the reason is a bare flex item: a long URL breaks anywhere */
-.tk-block svg{width:14px;height:14px;margin-top:0}
+.tk-block svg{width:14px;height:14px;margin-top:0;flex:none}
+.tk-bwhy{min-width:0}
+.tk-bwhy>p{margin:0 0 var(--s1)}
+.tk-bwhy>p:last-child{margin-bottom:0}
+.tk-brec{margin-top:var(--s1);color:var(--muted)}
+.tk-brec>summary{cursor:pointer}
 .team-goal{margin:0;font:var(--t-body)}
 /* team progress: percentage and a segmented bar, no counts */
 .tprog{display:flex;align-items:center;gap:var(--s3);margin:0}
@@ -1415,6 +1429,7 @@ rect[class^=ser-]{fill:var(--ser)}i[class^=ser-]{background:var(--ser)}
 @media (max-width:767.98px){.only-d{display:none!important}}
 .btn.on{border-color:var(--accent);color:var(--accent)}
 .sheet-list{display:flex;flex-direction:column}
+.sheet-list .sheet-sep{border:0;border-top:1px solid var(--line);margin:var(--s1) 0}
 .sheet-list .sheet-group{margin-top:var(--s2);padding:var(--s3) var(--s2) var(--s1);border-top:1px solid var(--line)} /* "Hub" actions after a screen's own actions */
 .sheet-form{display:flex;flex-direction:column;gap:var(--s3)}
 .sheet-item.armed{background:var(--bad-soft);color:var(--bad-t)}
@@ -2040,7 +2055,7 @@ b,strong{font-weight:600}
 .tk-tlr .lrow.aud .lrow-title{font:var(--t-body)}
 /* agent feedback (Work → Feedback): reports are agent text, shown as plain text */
 .fb-text{margin:0;font:var(--t-body);white-space:pre-wrap;overflow-wrap:anywhere}
-/* Feedback report (#fbr): the queue beside the report and the report as main | side (250 px) from 1024 px; one column below */
+/* Feedback report (#fbr): the queue beside the report from 1024 px, the report as main | side (250 px) only from 1440 px; below that the details come after the agent's account */
 .fbx{display:block}
 .fb-queue{display:none}
 .fb-rep{display:flex;flex-direction:column;gap:var(--s3);min-width:0}
@@ -2064,7 +2079,10 @@ b,strong{font-weight:600}
 .fb-gedit{display:flex;flex-direction:column;gap:var(--s2)}
 .fb-gedit .row{display:flex;gap:var(--s2);justify-content:flex-end}
 .fb-guide .overline~.overline{margin-top:var(--s4)}
-.fb-acct{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:var(--s3)}
+/* the account card is its own container: two cells side by side only when each gets about 260 px (2 x 260 + the 12 px gap) */
+.fb-accts{container:fbacct/inline-size}
+.fb-acct{display:grid;grid-template-columns:minmax(0,1fr);gap:var(--s3)}
+@container fbacct (min-width:532px){.fb-acct{grid-template-columns:repeat(2,minmax(0,1fr))}}
 .fb-cell{min-width:0;padding:var(--s3);background:var(--panel-2);border:1px solid var(--line);border-radius:var(--r-md)}
 .fb-cell .overline{margin:0 0 var(--s1)}
 .fb-mine .rq-who{color:var(--accent)}
@@ -2076,22 +2094,23 @@ b,strong{font-weight:600}
 .fbq-row:hover{background:var(--panel-2)}
 .fbq-row.on{background:var(--accent-soft)}
 .fbq-hd+.fbq-row{border-top:0}
-@media (max-width:1023.98px){
-  /* one column: the details come after the agent's account, before the timeline */
+@media (max-width:1439.98px){
+  /* one report column: the details come after the agent's account, before the timeline */
   .fb-main{display:contents}
   .fb-side{order:1}
   .fb-tl,.fb-tl~.fb-sec{order:2}
 }
 @media (max-width:767.98px){
-  .fb-acct{grid-template-columns:minmax(0,1fr)}
   .fb-note .btn,.fb-step.only-m .btn{height:var(--h-touch);min-width:var(--h-touch)}
 }
 @media (min-width:1024px){
   #workspaceView[data-view=fbr] .db{overflow:visible}
   .fbx{display:grid;grid-template-columns:248px minmax(0,1fr);gap:var(--s5);align-items:start}
   .fb-queue{display:block;position:sticky;top:calc(var(--h-bar) + var(--s3));max-height:calc(100dvh - var(--h-bar) - var(--s6));overflow:auto;scrollbar-gutter:stable;padding-right:var(--s3);border-right:1px solid var(--line)}
-  .fb-cols{display:grid;grid-template-columns:minmax(0,1fr) 250px;gap:var(--s6);align-items:start}
-  .fb-main,.fb-side{gap:var(--s6)}
+  .fb-cols,.fb-main,.fb-side{gap:var(--s6)}
+}
+@media (min-width:1440px){
+  .fb-cols{display:grid;grid-template-columns:minmax(0,1fr) 250px;align-items:start}
 }
 /* Decisions (Work → team → Decisions; docs/decisions.md): the question screen and the choice list.
    The question is the screen's subject, so it is set in --t-head inside its card (see Exceptions). */
@@ -2179,6 +2198,10 @@ b,strong{font-weight:600}
 .fb-asg-wake{display:flex;flex-direction:column;gap:var(--s2);margin-top:var(--s2)}
 .fb-asg-wake .vnote{margin:0}
 .fb-asg-acts{display:flex;gap:var(--s2);flex-wrap:wrap;margin-top:var(--s2)}
+/* an empty card with one button (Nobody yet | Assign to…, No task yet | Link a task…): the text left, the button right on one row */
+.pcard:has(> .fb-asg-none + .fb-asg-acts){display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;column-gap:var(--s3)}
+.pcard:has(> .fb-asg-none + .fb-asg-acts) > :not(.fb-asg-none,.fb-asg-acts){grid-column:1/-1}
+.pcard > .fb-asg-none:has(+ .fb-asg-acts),.pcard > .fb-asg-none + .fb-asg-acts{margin-top:0}
 
 /* Demo mode (docs/showcase.md#demo-mode): the Replay bar above every page */
 .demobar{margin:0 calc(var(--gutter) * -1);padding:var(--s2) var(--gutter);background:color-mix(in srgb,var(--accent) 10%,var(--bg));border-bottom:1px solid color-mix(in srgb,var(--accent) 35%,var(--line))}
@@ -2474,7 +2497,8 @@ a.bp-xref svg.i{width:12px;height:12px;flex:none}
 .bp-grid{display:flex;flex-direction:column;gap:var(--s3)}
 .bp-col{display:flex;flex-direction:column;gap:var(--s3);min-width:0}
 @media (min-width:1180px){.bp-grid{display:grid;grid-template-columns:minmax(0,7fr) minmax(0,5fr);align-items:start}}
-#workspaceView .bp-sec{background:var(--panel);border:1px solid var(--line);border-radius:var(--r-lg);padding:var(--card-pad);min-width:0}
+/* The item screen's cards, on the operator's screen and on a collaborator's item page (#m/p/<id>/item/<key>). */
+#workspaceView .bp-sec,#muBody .bp-sec{background:var(--panel);border:1px solid var(--line);border-radius:var(--r-lg);padding:var(--card-pad);min-width:0}
 .bp-ih{display:flex;align-items:flex-start;justify-content:space-between;gap:var(--s2);flex-wrap:wrap;margin-bottom:var(--s2)}
 .bp-ih-t{margin:0;font:var(--t-title);min-width:0;overflow-wrap:anywhere}
 .bp-ih-p{display:flex;gap:var(--s1);flex-wrap:wrap}
@@ -2755,6 +2779,7 @@ a.btn{text-decoration:none}
 .co-gap{margin-top:var(--s2)}
 .co-ab .hint{margin-right:auto}
 .co-more{display:flex;justify-content:flex-end;margin-top:var(--s3)}
+.co-wait-t{margin:0 0 var(--s2);font:var(--t-body);color:var(--text)}
 .co-prog{margin:var(--s1) 0 var(--s2)}
 .co-prog b{font:var(--t-title);min-width:0}
 .co-acts{display:flex;gap:var(--s2);flex:none}
@@ -3159,8 +3184,6 @@ body.view-busy #app{cursor:progress}
 .ny-sum{margin:0;font:var(--t-body);color:var(--muted);white-space:pre-wrap;overflow-wrap:anywhere;display:-webkit-box;-webkit-line-clamp:3;line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
 .ny-msg{margin:0;font:var(--t-lead);color:var(--text);white-space:pre-wrap;overflow-wrap:anywhere}
 .ny-card .meta{margin:0;white-space:normal;overflow-wrap:anywhere}
-.ny-fx{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:var(--s1);font:var(--t-meta);color:var(--muted);overflow-wrap:anywhere}
-.ny-fx b{color:var(--text);font-weight:600}
 .ny-ctx{margin:0;font:var(--t-body);color:var(--muted);white-space:pre-wrap;overflow-wrap:anywhere}
 .ny-reply{display:flex;flex-direction:column;gap:var(--s2);margin-top:var(--s1);padding-top:var(--s3);border-top:1px solid var(--line)}
 .ny-card:has(>.ny-reply:not([hidden]))>.ny-acts{display:none}
@@ -3169,6 +3192,27 @@ body.view-busy #app{cursor:progress}
 .ny-acts{display:flex;flex-wrap:wrap;gap:var(--s2);align-items:center;margin-top:var(--s1)}
 .ny-more{margin-inline-start:auto;padding-inline:var(--s2)}
 .ny-foot{display:flex;flex-wrap:wrap;gap:var(--s2);margin-top:var(--s3);padding-top:var(--s2);border-top:1px solid var(--line)}
+/* A question card (nyQCard; docs/dashboard-ux.md, Needs you: a question): the Blocks chip in the top line, each answer once as a
+   full-width button (label, Recommended tag, effect), then Details, Add a note… and ⋯; Details folds the context and the task. */
+.ny-qhd{align-items:center;flex-wrap:wrap}
+.ny-qhd svg{margin-top:0}
+.ny-qhd .ny-blocks{flex:none;height:20px;min-height:0;padding-block:0;font:var(--t-cap)}
+.ny-opts{display:flex;flex-direction:column;gap:var(--s2);margin-top:var(--s1)}
+.ny-opt{display:flex;flex-direction:column;align-items:flex-start;gap:2px;width:100%;min-height:var(--h-touch);padding:var(--s2) var(--s3);text-align:left;background:transparent;border:1px solid var(--line-2);border-radius:var(--r-chip);color:var(--text);font:var(--t-body);cursor:pointer}
+.ny-opt:hover{background:var(--panel-3)}
+.ny-opt.rec{border-color:var(--accent)}
+.ny-opt:disabled{opacity:.6;cursor:default}
+.ny-opt-l{display:flex;flex-wrap:wrap;align-items:center;gap:var(--s2)}
+.ny-opt-l b{font-weight:600}
+.ny-opt-fx{font:var(--t-meta);color:var(--muted);overflow-wrap:anywhere}
+.ny-card:has(>.ny-reply:not([hidden]))>.ny-opts{display:none}
+.ny-qdet-btn svg{transition:transform .15s}
+.ny-qdet-btn[aria-expanded="true"] svg{transform:rotate(90deg)}
+.ny-qdet{display:flex;flex-direction:column;gap:var(--s2);padding-top:var(--s3);border-top:1px solid var(--line)}
+.ny-qdet[hidden]{display:none}
+.ny-qdet-md{font:var(--t-body);color:var(--text)}
+.ny-qdet-blk{display:flex;flex-wrap:wrap;align-items:baseline;gap:var(--s2);margin:0}
+.ny-qdet-blk .meta{margin:0}
 @media (max-width:767.98px){
   .ny-team{max-width:none;margin-inline-start:0;width:100%}
   .ny-acts .btn{height:var(--h-touch);flex:1 1 100%;justify-content:center}
@@ -3201,7 +3245,7 @@ body.view-busy #app{cursor:progress}
   .bp-qg .btn{min-height:var(--h-touch)}
 }
 
-/* ---------- Vault access for people (docs/mockups/vault-access.html): the Shared folders table, the folder picker, a folder's People ---------- */
+/* ---------- Vault access for people: the Shared folders table, the folder picker, a folder's People ---------- */
 .gt{width:100%;border-collapse:collapse}
 .gt th{font:var(--t-cap);letter-spacing:.06em;text-transform:uppercase;color:var(--faint);text-align:left;padding:0 var(--s3) var(--s2) 0;white-space:nowrap}
 .gt td{border-top:1px solid var(--line);height:56px;padding:var(--s2) var(--s3) var(--s2) 0;vertical-align:middle;min-width:0}
@@ -3349,3 +3393,145 @@ button.bp-sk-c:hover .stat-l{color:var(--text)}
 .bp-lsel .chev{transform:rotate(90deg)}
 .bp-br{display:none}
 @media (max-width:767.98px){.bp-qtb .bp-br{display:block;flex:0 0 100%;height:0}.bp-qtb .bp-lsel{height:var(--h-touch)}}
+/* Clarify (docs/dashboard-ux.md): the team's question as inert text, the requirement as context, then the answer. */
+.cl-meta{margin:0}
+.cl-q,.cl-done{display:flex;flex-direction:column;gap:var(--s1);padding:var(--s3);border-radius:var(--r-md);background:var(--warn-soft)}
+.cl-done{background:var(--panel-3);margin:var(--s2) 0}
+.cl-done .meta{margin:0}
+.cl-qt{margin:0;white-space:pre-wrap;overflow-wrap:anywhere}
+.cl-ctx{display:flex;flex-direction:column;gap:var(--s1)}
+.cl-ev summary{cursor:pointer;font:var(--t-meta);color:var(--muted)}
+.cl-edit{display:flex;flex-direction:column;gap:var(--s2)}
+.cl-acts{flex-wrap:wrap}
+/* Delegate one agent (docs/dashboard-ux.md "Delegate an agent"): the sheet's form and its progress body. */
+.dlg{display:flex;flex-direction:column;gap:var(--s3)}
+.dlg-p{margin:0;font:var(--t-body);color:var(--text)}
+.dlg-pc{border:0;margin:0;padding:0;display:flex;flex-direction:column;gap:var(--s2);min-width:0}
+.dlg-pc legend{padding:0;margin-bottom:var(--s2)}
+.dlg-pc .seg button:disabled{opacity:.5;cursor:not-allowed}
+.dlg-run{display:flex;flex-direction:column;gap:var(--s2)}
+.dlg-row{display:grid;grid-template-columns:1fr 1fr;gap:var(--s3)}
+.dlg-step{display:flex;flex-direction:column;gap:var(--s1);padding:var(--s3);border-radius:var(--r-md);background:var(--panel-2);border:1px solid var(--line)}
+.dlg-step.ok{background:var(--ok-soft)}.dlg-step.warn{background:var(--warn-soft)}.dlg-step.info,.dlg-step.acc{background:var(--accent-soft)}
+.dlg-step b{font:var(--t-label)}.dlg-step p{margin:0;font:var(--t-body);color:var(--text-2,var(--text))}
+.dlg-bar{height:4px;border-radius:2px;overflow:hidden;background:var(--line);position:relative}
+.dlg-bar i{position:absolute;inset:0 auto 0 0;width:35%;background:var(--accent);border-radius:2px;animation:dlgbar 1.4s ease-in-out infinite}
+@keyframes dlgbar{0%{left:-35%}100%{left:100%}}
+@media (prefers-reduced-motion:reduce){.dlg-bar i{animation:none;width:100%;opacity:.4}}
+.dlg-note{margin:var(--s2) 0 0;white-space:normal;overflow-wrap:anywhere}
+.kv .pill{white-space:normal;text-align:right}
+.bad-t{color:var(--bad-t,var(--bad))}
+.dlg-sheet .co-prompt .code{max-height:40vh;overflow:auto;padding-right:56px}
+@media (max-width:767.98px){.dlg-row{grid-template-columns:1fr}.dlg-sheet .sheet-acts{flex-wrap:wrap}.dlg-sheet .sheet-acts .btn{flex:1 1 100%}}
+/* Delegate, v2: the member's Home row, the take-back choice and the "loses" list. */
+.dlg-mu{margin-bottom:var(--s4);display:flex;flex-direction:column;gap:var(--s2)}
+.dlg-mu.warn{background:var(--warn-bg,var(--surface-2))}.dlg-mu.ok{background:var(--ok-bg,var(--surface-2))}
+.dlg-mu .hint,.dlg-mu .co-warn{margin:0}
+.dlg-mu .co-prompt .code{max-height:40vh;overflow:auto;overflow-wrap:anywhere}
+.dlg-mu-acts{display:flex;gap:var(--s2);flex-wrap:wrap}
+@media (max-width:767.98px){.dlg-mu-acts .btn{flex:1 1 100%;min-height:var(--h-touch)}}
+.dlg-chk{display:flex;gap:var(--s2);align-items:center;min-height:var(--h-touch)}
+.dlg-loses ul{margin:var(--s1) 0 0;padding-left:var(--s5);color:var(--text-2)}
+
+/* Blueprint list analysis (docs/dashboard-ux.md, List analysis): Where you are with its chips, the count table (a list on phones)
+   and the grouped list. Chips and cells have the 3 px chip corner; every colour is a theme token. */
+.bp-where{display:flex;align-items:center;flex-wrap:wrap;gap:var(--s2);margin-top:var(--s3)}
+/* Saved views: a row opens the view, its actions sit beside it, each 40 px. */
+.bpv{display:flex;align-items:center;gap:var(--s1)}
+.bpv .lrow{flex:1;min-width:0}
+.bpv-acts{display:flex;flex:none}
+.bpv .ibtn.on{color:var(--accent)}
+.bpv-none{padding:var(--s3) 0}
+.bp-show{font:var(--t-label);color:var(--muted);margin-right:var(--s1)}
+.bp-show b{color:var(--text);font-weight:600;font-variant-numeric:tabular-nums}
+.bp-chip{display:inline-flex;align-items:center;gap:var(--s1);min-height:28px;padding:0 var(--s2);border-radius:var(--r-chip);border:1px solid var(--line);background:var(--panel);color:var(--text);font:var(--t-cap)}
+.bp-chip svg{width:12px;height:12px}
+.bp-chip.on{background:var(--accent-soft);color:var(--accent);border-color:transparent}
+.bp-chip.gap{background:var(--warn-soft);color:var(--warn-t)}
+.bp-la-note{margin:var(--s1) 0 0}
+.bp-xcard{margin-top:var(--stack)}
+/* Below 1180 px the count table is a card above the list, spaced like the cards around it. */
+.bp-la{display:flex;flex-direction:column;gap:var(--s3);min-width:0}
+.bp-la-main{min-width:0}
+.bp-xh,.bp-lh{display:flex;align-items:center;flex-wrap:wrap;gap:var(--s2) var(--s3)}
+/* The card's header is the count, with Hide table (a quiet icon button) at its right end; the selects are the second line. */
+.bp-xh .bp-show{flex:1 1 auto;margin:0;font:var(--t-title);color:var(--muted)}
+.bp-xh .bp-xhide{margin:calc(-1 * var(--s2)) calc(-1 * var(--s2)) calc(-1 * var(--s2)) 0;color:var(--muted)}
+.bp-xcard>.bp-xsel{display:flex;margin-top:var(--s2)}
+.bp-xswap{color:var(--muted)}
+.bp-lh{margin-bottom:var(--s2)}
+.bp-lh .overline{flex:1 1 auto;margin:0}
+.bp-xsel{display:inline-flex;align-items:center;gap:var(--s2);flex-wrap:wrap}
+.bp-xsel .bp-fl{display:inline-flex;align-items:center;gap:var(--s2)}
+/* No scroll inside the count table, ever: bpXFit places, turns or folds it until it fits (Other's popover is not a scroll). */
+.bp-xw{margin-top:var(--s3)}
+.bp-xt{border-collapse:separate;border-spacing:3px;font:var(--t-body);font-variant-numeric:tabular-nums}
+.bp-xt th{font:var(--t-cap);color:var(--muted);text-align:left;padding:0 var(--s2);white-space:nowrap;max-width:220px;overflow:hidden;text-overflow:ellipsis}
+/* Column headers and row names wrap to two lines before they are cut (the full name is the tooltip); a cell never shrinks below its number. */
+.bp-xt thead th{text-align:center;vertical-align:bottom;white-space:normal;min-width:44px;max-width:120px}
+.bp-xt thead th>span,.bp-xt tbody th>span{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden;overflow-wrap:break-word}
+.bp-xt tbody th{white-space:normal;min-width:96px;max-width:180px}
+.bp-xt td{padding:0;text-align:center}
+.bp-xc{min-width:44px;width:100%;height:32px;border-radius:var(--r-chip);background:var(--panel-2);color:var(--text);font:var(--t-label);font-variant-numeric:tabular-nums}
+.bp-xc:hover{background:var(--accent-soft)}
+.bp-xc.zero{color:var(--faint);background:transparent}
+.bp-xc.gap{background:color-mix(in srgb,var(--warn) 22%,transparent);color:var(--warn-t)}
+.bp-xc.on{outline:2px solid var(--accent);outline-offset:-2px}
+.bp-xtot{color:var(--muted);font:var(--t-label);padding:0 var(--s2)}
+.bp-xt td.bp-xtot,.bp-xt thead th.bp-xtot{text-align:right}
+.bp-xm{margin-top:var(--s2)}
+.bp-xmr>summary{list-style:none;cursor:pointer}
+.bp-xmr>summary::-webkit-details-marker{display:none}
+.bp-xmr[open]>summary .chev{transform:rotate(90deg)}
+.bp-xmc{padding-left:var(--s5)}
+.bp-xmc.on{background:var(--accent-soft)}
+.bp-xt thead th.bp-xo{font-style:italic}
+.bp-xturn{font:var(--t-cap);color:var(--muted)}
+.bp-xop{display:flex;flex-direction:column;padding:var(--s1) 0}
+.bp-xop .bp-xmc{padding-left:var(--s4)}
+.bp-grp{margin-top:var(--s3)}
+.bp-grp:first-of-type{margin-top:0}
+.bp-ff{border:0;padding:0;margin:0;display:flex;flex-direction:column;gap:var(--s1)}
+.bp-ff legend{margin-bottom:var(--s1)}
+/* From 1180 px the list (7 of 12) and the count table (5 of 12) side by side when the table fits there (else .full: a card above
+   the list, as below 1180 px); sticky under the app bar only when the whole card fits in the window (.pin), never scrolling itself. */
+@media (min-width:1180px){
+  #workspaceView:has(.bp-la) .db{overflow:visible}
+  .bp-la:not(.full){display:grid;grid-template-columns:minmax(0,7fr) minmax(0,5fr);grid-template-areas:"list x";gap:var(--s3);align-items:start;margin-top:var(--stack)}
+  .bp-la:not(.full)>.bp-la-main{grid-area:list}
+  .bp-la:not(.full)>.bp-xcard{grid-area:x;margin-top:0}
+  .bp-la:not(.full)>.bp-xcard.pin{position:sticky;top:calc(var(--h-bar) + var(--s3))}
+}
+@media (max-width:767.98px){.bp-xsel{width:100%}.bp-xsel .bp-fl{flex:1 1 0}.bp-xsel .sel{flex:1 1 auto;min-width:0}.bp-chip{min-height:var(--h-ctl)}}
+
+/* The connector on the PC page (docs/dashboard-ux.md "PC page"): the setup timeline, version approval, check results,
+   Disconnect's lists and the Add PC download line. */
+.cn-tl{list-style:none;margin:0;padding:0;display:flex;flex-direction:column}
+.cn-step{display:flex;gap:var(--s2);padding:8px 0;border-top:1px solid var(--line)}
+.cn-step:first-child{border-top:0}
+.cn-dot{flex:none;display:grid;place-items:center;width:22px;height:22px;border-radius:var(--r-full);background:var(--panel-3);color:var(--faint)}
+.cn-dot .i{width:14px;height:14px}
+.cn-step.done .cn-dot{background:var(--ok-soft);color:var(--ok-t)}
+.cn-step.waiting .cn-dot{background:var(--warn-soft);color:var(--warn-t)}
+.cn-step.failed .cn-dot{background:var(--bad-soft);color:var(--bad-t)}
+.cn-step.not_yet .cn-step-t{color:var(--muted)}
+.cn-step-b{display:flex;flex-direction:column;gap:2px;min-width:0}
+.cn-step-t{font:var(--t-label);color:var(--text)}
+.cn-next{font:var(--t-meta);color:var(--text)}
+.cn-ver{display:flex;flex-wrap:wrap;align-items:center;gap:var(--s2);margin-top:var(--s2);padding:8px 10px;border-radius:var(--r-md);background:var(--warn-soft);font:var(--t-body);color:var(--text)}
+.cn-ver>.i{color:var(--warn-t)}
+.cn-ver>span:first-of-type{flex:1 1 200px;min-width:0}
+.cn-ver-a{display:flex;gap:6px}
+.cn-checks,.cn-list{list-style:none;margin:4px 0 0;padding:0;display:flex;flex-direction:column;gap:4px;font:var(--t-body);color:var(--text)}
+.cn-checks li{display:flex;gap:6px;align-items:flex-start;min-width:0;overflow-wrap:anywhere}
+.cn-checks li.ok>.i{color:var(--ok-t)}
+.cn-checks li.bad>.i{color:var(--bad-t)}
+.cn-list li{padding-left:12px;position:relative;overflow-wrap:anywhere}
+.cn-list li::before{content:"";position:absolute;left:2px;top:9px;width:4px;height:4px;border-radius:var(--r-full);background:var(--faint)}
+.cn-lists{display:grid;grid-template-columns:1fr 1fr;gap:var(--s3)}
+@media (max-width:560px){.cn-lists{grid-template-columns:1fr}}
+.jn-dl{display:flex;gap:8px;align-items:flex-start;padding:8px 10px;border-radius:var(--r-md);background:var(--panel-2);font:var(--t-body);color:var(--text)}
+.jn-dl a{color:var(--accent)}
+.ag-ms .lrow-meta{white-space:normal}
+
+.mdl{margin-top:var(--s1)}

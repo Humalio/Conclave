@@ -1,7 +1,7 @@
 /**
  * Vault links in rendered Markdown (docs/vault.md, Links in notes): one resolver for the operator and console members.
  * The console sends each link's target as written (md.js) and asks here which file it opens for this viewer, with the
- * shared rules of vault/links.ts. A target that is missing, hidden, refused by the path rules or outside a member's
+ * shared rules of vault/links.ts. A link to a folder (`[x](Drafts/Paper)`) opens that folder: its answer ends with `/`. A target that is missing, hidden, refused by the path rules or outside a member's
  * grant gets the same answer (no match), so the answer never tells a member that a hidden file exists.
  */
 import { promises as fs } from 'node:fs';
@@ -39,6 +39,14 @@ export function registerVaultLinksApi(api: FastifyInstance, d: VaultLinksDeps): 
     try { return (await fs.stat(await vault.resolve(n))).isFile() ? n : null; } catch { return null; }
   };
 
+  /** The same for a folder: a member sees a folder their grant opens, as the vault tree shows it. */
+  const visibleDir = async (rel: string[], m?: MemberScope): Promise<string[] | null> => {
+    let n: string[];
+    try { n = vault.normalise(vault.virtual(rel)).rel; } catch { return null; }
+    if (!n.length || (m && !m.canSee(n.join('/'), true))) return null;
+    try { return (await fs.stat(await vault.resolve(n))).isDirectory() ? n : null; } catch { return null; }
+  };
+
   /** Where to look for a shortest-path link: the whole vault for the operator, each granted folder once for a member. */
   const roots = (m?: MemberScope): string[][] => {
     if (!m) return [[]];
@@ -68,12 +76,13 @@ export function registerVaultLinksApi(api: FastifyInstance, d: VaultLinksDeps): 
     const b = Body.parse(req.body ?? {});
     const m = req.member;
     const from = fromRel(b.from);
-    const look: LinkLookup = { file: (rel) => visible(rel, m), tails: (w) => tails(w, m) };
+    const look: LinkLookup = { file: (rel) => visible(rel, m), tails: (w) => tails(w, m), folder: (rel) => visibleDir(rel, m) };
 
     const links: Record<string, string[]> = {};
     if (b.links.length) {
       const r = await resolveLinks(b.links, { alias: vault.alias, from, look });
-      for (const [t, L] of r) links[t] = L.slice(0, MATCH_MAX).map((rel) => vault.virtual(rel));
+      // A folder comes back with an empty last segment (links.ts) and goes out as its virtual path with a trailing slash.
+      for (const [t, L] of r) links[t] = L.slice(0, MATCH_MAX).map((rel) => (rel.at(-1) === '' ? vault.virtual(rel.slice(0, -1)) + '/' : vault.virtual(rel)));
     }
 
     // The earlier protocol: a path md.js worked out (exact, with or without .md), and a wiki name matched anywhere.

@@ -15,7 +15,7 @@ export type Actor = { kind: 'admin' | 'agent' | 'system'; id: string | null; rol
 export const isAdmin = (a: Actor): boolean => a.kind === 'admin' && a.role !== 'member';
 
 /** Conclave key and token shapes (exported for the vault copy's page filter, mirror.ts). */
-export const SECRET = /ah[_\W]{0,4}(?:app|ses|tok|brg|set)[_\W]{0,4}[a-z2-7_]{6,}/gi;
+export const SECRET = /ah[_\W]{0,4}(?:app|ses|tok|brg|set|dsc)[_\W]{0,4}[a-z2-7_]{6,}/gi;
 /** A fresh copy of SECRET for other modules (a shared /g regex keeps lastIndex between .test() calls). */
 export const secretPattern = (): RegExp => new RegExp(SECRET.source, SECRET.flags);
 

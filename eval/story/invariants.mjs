@@ -70,6 +70,10 @@ export default {
     const all = await plans(c);
     c.expect((all['Night Choir Capture']?.plan?.requirements ?? []).length >= 4, 'the lab has its plan');
     c.eq(item(all['The Annex'].plan, 'AN-R6')?.status, 'dropped', 'the Firmware 7 patch is dropped for Q-9');
+    // Clarify answered the act 2 and 3 questions as each mark was settled: only R2's question still waits, as one unclear row.
+    c.eq(Object.keys(c.S.unclearAsks ?? {}).join(), 'FR-CC-02', 'every unclear question but R2 is answered');
+    const un = ((await c.op.get('/api/needs-you?limit=200')).items ?? []).filter((r) => r.kind === 'unclear');
+    c.eq(un.map((r) => `${r.item?.key}:${r.ask ? 'ask' : 'no ask'}`).join(), 'FR-CC-02:ask', 'Needs you holds one unclear row, R2 with its question');
     c.expect(!all['The Annex'].plan?.requested_at, 'the re-plan answered the operator’s request');
     c.expect(item(all['Case Command'].plan, 'R13') && item(all['Disclosure Board'].plan, 'DB-R5'), 'the answer is a requirement after the reveal');
   },

@@ -234,7 +234,8 @@ heroSec=heroSec.split('fill="#3f9c98"').join('fill="#a8ded4"');
 const c0=hero.indexOf('<polygon points="162.3,471.3'),c1=hero.indexOf('</g><g><line x1="411" y1="51"');
 const chairSvg=`<svg viewBox="100 436 290 200" stroke-linejoin="round" stroke-linecap="round" role="img" aria-label="Armchair with footstool and a sleeping cat"><ellipse cx="202.5" cy="524" rx="94.9" ry="54.8" fill="#e8b25a" stroke="#3d2b1f" stroke-width="1.5"/><ellipse cx="202.5" cy="524" rx="79.7" ry="46" fill="none" stroke="#c4503a" stroke-width="1.4"/>${hero.slice(c0,c1)}</svg>`;
 const fav='data:image/svg+xml,'+encodeURIComponent(logoSvg);
-const U={docs:'https://github.com/humalio/Conclave/tree/main/docs',gh:'https://github.com/humalio/Conclave',start:'https://github.com/humalio/Conclave/blob/main/docs/getting-started.md'};
+const {OWNER,REPO}=require('./repo.js');const GH='https://github.com/'+OWNER+'/'+REPO;
+const U={docs:GH+'/tree/main/docs',gh:GH,start:GH+'/blob/main/docs/getting-started.md'};
 heroSec=heroSec.replace(/<div class="eyebrow">[^<]*<\/div>/,''); // DROP_EYEBROW
 heroSec=heroSec.replace('href="#"','href="'+U.start+'"');
 const css=`

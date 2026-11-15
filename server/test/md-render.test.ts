@@ -1,5 +1,5 @@
 /* The console's Markdown renderer (public/md.js): what agents write in Blueprint bodies, task text, reports and feedback.
-   Inputs follow the live BIRAZ Blueprint section 5 and a real task (bold labels, nested lists, intervals, Greek and maths signs). */
+   Inputs follow the live ECHO Blueprint section 5 and a real task (bold labels, nested lists, intervals, Greek and maths signs). */
 import { mkdirSync, mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { createRequire } from 'node:module';
@@ -16,10 +16,10 @@ const flat = (s: string): string => r(s).replace(/\n/g, '');
 
 describe('md.js block structure', () => {
   it('renders a status report: bold labels, paragraphs and bullet lists stay apart', () => {
-    const body = '**Lead handover (11 Nov ~09:xx):** new Lead (session "BIRAZ · Lead") replaces the pilot Lead.\n\n**Doing:**\n- CAD Flex: propose the next step (task_5hsjwqi6pq4hn4ml).\n- CAD Tex: demo chain ready to run.\n\n**Blocked on Bruno:**\n- CAD Flex v0.3 fold to master ("Not yet").';
-    expect(flat(body)).toBe('<p><strong>Lead handover (11 Nov ~09:xx):</strong> new Lead (session &quot;BIRAZ · Lead&quot;) replaces the pilot Lead.</p>'
-      + '<p><strong>Doing:</strong></p><ul><li>CAD Flex: propose the next step (task_5hsjwqi6pq4hn4ml).</li><li>CAD Tex: demo chain ready to run.</li></ul>'
-      + '<p><strong>Blocked on Bruno:</strong></p><ul><li>CAD Flex v0.3 fold to master (&quot;Not yet&quot;).</li></ul>');
+    const body = '**Lead handover (11 Nov ~09:xx):** new Lead (session "ECHO · Lead") replaces the pilot Lead.\n\n**Doing:**\n- Project A: propose the next step (task_5hsjwqi6pq4hn4ml).\n- Project B: demo chain ready to run.\n\n**Blocked on Ben:**\n- Project A v0.3 fold to master ("Not yet").';
+    expect(flat(body)).toBe('<p><strong>Lead handover (11 Nov ~09:xx):</strong> new Lead (session &quot;ECHO · Lead&quot;) replaces the pilot Lead.</p>'
+      + '<p><strong>Doing:</strong></p><ul><li>Project A: propose the next step (task_5hsjwqi6pq4hn4ml).</li><li>Project B: demo chain ready to run.</li></ul>'
+      + '<p><strong>Blocked on Ben:</strong></p><ul><li>Project A v0.3 fold to master (&quot;Not yet&quot;).</li></ul>');
   });
 
   it('keeps single newlines as line breaks and ends a list at an unindented line', () => {

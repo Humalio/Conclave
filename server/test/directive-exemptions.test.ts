@@ -356,7 +356,7 @@ describe('keep off and apply again: exempt, unexempt and the notices that settle
     const W = world();
     const hub = dir('Hub off a project', { kind: 'hub' });
     // A console user adds it, so the directive screen can say who.
-    app.db.prepare('INSERT OR IGNORE INTO admin_users(id,username,password_hash,created_at,display_name) VALUES (?,?,?,?,?)').run('adm_named', 'named', 'x', Date.now(), 'Bruno');
+    app.db.prepare('INSERT OR IGNORE INTO admin_users(id,username,password_hash,created_at,display_name) VALUES (?,?,?,?,?)').run('adm_named', 'named', 'x', Date.now(), 'Ben');
     const named = { kind: 'admin' as const, id: 'adm_named' };
     app.directives.exempt(hub.id, { kind: 'project', ref: W.project, note: 'apps have their own' }, named);
     const d = app.directives.detail(hub.id);
@@ -365,7 +365,7 @@ describe('keep off and apply again: exempt, unexempt and the notices that settle
     expect(d).toMatchObject({ exempt_count: 1, exemptions_removed: [], directive: { reach_label: `All agents except project ${W.projectName}`, except_label: `Except project ${W.projectName}` } });
     expect(d.exemptions).toEqual([expect.objectContaining({ target_kind: 'project', target_ref: W.project, label: `project ${W.projectName}`, note: 'apps have their own', created_by: named.id })]);
     // The directive screen: who added it (the console user's display name) and how many agents the scope covers but it is kept off.
-    expect(d.exemptions[0]).toMatchObject({ created_by_label: 'Bruno', removed_by_label: null });
+    expect(d.exemptions[0]).toMatchObject({ created_by_label: 'Ben', removed_by_label: null });
     expect(d.kept_off).toBe(1);
     expect(app.directives.list('active').find((x) => x.id === hub.id)).toMatchObject({ reach_label: `All agents except project ${W.projectName}`, except_label: `Except project ${W.projectName}`, exempt_count: 1, scope_label: 'all agents' });
     // An actor with no console user row reads as no label.
@@ -373,7 +373,7 @@ describe('keep off and apply again: exempt, unexempt and the notices that settle
     expect(app.directives.detail(hub.id).exemptions.find((e) => e.id === anon.id)).toMatchObject({ created_by_label: null });
     // Applying it again names who lifted it, under exemptions_removed.
     app.directives.unexempt(hub.id, anon.id, named);
-    expect(app.directives.detail(hub.id).exemptions_removed).toEqual([expect.objectContaining({ id: anon.id, created_by_label: null, removed_by: named.id, removed_by_label: 'Bruno' })]);
+    expect(app.directives.detail(hub.id).exemptions_removed).toEqual([expect.objectContaining({ id: anon.id, created_by_label: null, removed_by: named.id, removed_by_label: 'Ben' })]);
     // Two targets read as a list; without exemptions it is the scope.
     app.directives.exempt(hub.id, { kind: 'team', ref: W.team }, admin);
     expect(app.directives.detail(hub.id).directive).toMatchObject({ reach_label: `All agents except project ${W.projectName} and team ${W.teamName}`, except_label: `Except project ${W.projectName} and team ${W.teamName}` });

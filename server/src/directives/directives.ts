@@ -520,16 +520,16 @@ export class Directives {
     };
     return rows.map((r) => ({ ...r, label: this.targetLabel(r.target_kind, r.target_ref), created_by_label: who(r.created_by), removed_by_label: who(r.removed_by) }));
   }
-  /** "team BIRAZ Research", "agent scribe", "project APPS": how an exemption target reads. */
+  /** "team ECHO Research", "agent scribe", "project APPS": how an exemption target reads. */
   targetLabel(kind: ExemptionKind, ref: string): string {
     return kind === 'team' ? `team ${this.teams.team(ref)?.name ?? ref}` : kind === 'agent' ? `agent ${this.keys.agent(ref)?.label ?? ref}` : `project ${this.projectName(ref)}`;
   }
-  /** Who a directive is for, in words: its scope minus its active exemptions ("All agents except team BIRAZ Research"). */
+  /** Who a directive is for, in words: its scope minus its active exemptions ("All agents except team ECHO Research"). */
   reachLabel(d: { scope_kind: ScopeKind; scope_ref: string | null }, exemptions: { label: string }[]): string {
     const s = this.scopeLabel(d), ex = this.exceptLabel(exemptions);
     return s.charAt(0).toUpperCase() + s.slice(1) + (ex ? ` e${ex.slice(1)}` : '');
   }
-  /** What the exemptions add to the scope on their own: "Except team BIRAZ Research", or '' when nothing is kept off. */
+  /** What the exemptions add to the scope on their own: "Except team ECHO Research", or '' when nothing is kept off. */
   exceptLabel(exemptions: { label: string }[]): string {
     const L = exemptions.map((x) => x.label);
     return L.length ? `Except ${L.length > 1 ? `${L.slice(0, -1).join(', ')} and ${L[L.length - 1]}` : L[0]}` : '';

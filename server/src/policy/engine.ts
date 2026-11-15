@@ -35,7 +35,8 @@ export type DecisionSource = 'session_key' | 'app_key_cap' | 'owner_grant' | 'de
  * origin (the owner of the agent that created it), the reviewer's owner or the assignee's owner.
  */
 export interface OwnerLayer {
-  owner: string | null; label: string; basis: 'owner' | 'task'; task?: string; via?: 'origin' | 'reviewer' | 'assignee';
+  /** basis delegate: the collaborator a delegated agent runs for (docs/checkout.md §9 F1), with that checkout. */
+  owner: string | null; label: string; basis: 'owner' | 'task' | 'delegate'; task?: string; via?: 'origin' | 'reviewer' | 'assignee'; checkout?: string;
   rules: Rule[]; paths?: (path: string) => boolean;
 }
 /**

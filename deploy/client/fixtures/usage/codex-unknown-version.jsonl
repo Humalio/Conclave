@@ -1,0 +1,2 @@
+{"type":"session_meta","payload":{"id":"thr-3","session_id":"thr-3","cwd":"C:/synthetic/agent-one","cli_version":"9.9.9-future","originator":"codex_exec","source":"exec","model_provider":"synthetic","timestamp":"2026-01-01T00:00:00Z"}}
+{"type":"event_msg","payload":{"type":"token_count","info":{"usage_v2":{"in":1,"out":2}}}}

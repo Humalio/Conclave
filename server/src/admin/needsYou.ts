@@ -44,6 +44,12 @@ export type NeedsDetail =
   | { kind: 'proposal'; ops: { op: string; kind: string | null }[] };
 /** Where the row opens: the source record, by kind and id. */
 export interface NeedsOpen { kind: string; id: string; team_id?: string | null; project_id?: string | null }
+/** An unclear requirement as its row carries it: what the answerer needs to read, and the revision they saw (for item_rev). */
+type Un = { project_id: string; key: string; title: string; body: string | null; rev: number; fields: string; unclear_ask: string | null };
+const itemOf = (x: Un) => {
+  const f = JSON.parse(x.fields) as Record<string, unknown>;
+  return { project_id: x.project_id, key: x.key, title: x.title, priority: typeof f['priority'] === 'string' ? f['priority'] : null, statement: x.body, evidence: typeof f['evidence'] === 'string' ? f['evidence'] : null, rev: x.rev };
+};
 export interface NeedsRow {
   id: string; kind: string; source: { kind: string; id: string; version: string };
   scope: { project_id: string | null; team_id: string | null };
@@ -59,6 +65,9 @@ export interface NeedsRow {
   /** Who sent it, by label (an agent, the operator), and the item's own text for its card: a task's In short, a question's
    *  context, a block's reason. Null when it has none; a kind that leaves them out shows its reason instead. */
   by?: string | null; summary?: string | null;
+  /** An unclear requirement's row: the team's open question (Clarify answers it) and the requirement it names. A legacy row has the item only. */
+  ask?: { id: string; question: string; team_id: string; team_label: string; asked_at: number; version: string };
+  item?: ReturnType<typeof itemOf>;
 }
 /** A row this viewer set aside: when it ends (at most LATER_MAX_MS after it was set), and whether it was "until it changes". */
 export interface LaterRow extends NeedsRow { later: { until: number; changes: boolean; at: number } }
@@ -86,6 +95,8 @@ export const NEEDS_PAGE_MAX = 200;
 
 const enc = (s: string) => encodeURIComponent(s);
 /** A task's In short: the coordinator's summary, else the hub's cut of the brief (teams.taskView's rule). */
+/* A block's reason is Markdown with an optional "## Records" part for hashes and paths; a row shows only what comes before it. */
+const beforeRecords = (s: string) => s.split(/\n#{2,3}[ \t]*Records[ \t]*(?:\n|$)/i)[0]!.trim();
 const inShort = (k: { short_summary: string | null; description: string | null }) => k.short_summary || hubShortSummary(k.description);
 const CO_STEP: Record<string, string> = {
   leftovers: 'Leftovers to review', handouts_missing: 'Handouts missing', handouts_complete: 'Choose the target and keys',
@@ -162,9 +173,25 @@ export class NeedsYou {
     // reply (needs_info) is the agent's, not the viewer's.
     type Q = { id: string; team_id: string; agent_id: string; question: string; status: string; relay_state: string | null; escalated_at: number | null; created_at: number; updated_at: number; relayed_at: number | null;
       context: string | null; options: string; recommended: string | null; task_id: string | null; task_title: string | null };
+    // A requirement marked unclear is one team question (docs/blueprint.md §2.7): the ask's row is the item's, and answering it clears the mark.
+    const unclearOf = new Map<string, Un & { unclear_ask: string }>();
+    for (const x of this.db.prepare("SELECT project_id, key, title, body, rev, fields, json_extract(fields,'$.unclear_ask') AS unclear_ask FROM bp_items WHERE kind IN ('fr','nfr') AND deleted_at IS NULL AND json_extract(fields,'$.unclear')=1 AND json_extract(fields,'$.unclear_ask') IS NOT NULL").all() as (Un & { unclear_ask: string })[]) unclearOf.set(x.unclear_ask, x);
     if (want('question')) for (const q of this.db.prepare("SELECT d.id, d.team_id, d.agent_id, d.question, d.status, d.relay_state, d.escalated_at, d.created_at, d.updated_at, d.relayed_at, d.context, d.options, d.recommended, d.task_id, k.title AS task_title FROM decisions d LEFT JOIN tasks k ON k.id=d.task_id WHERE d.status='open' OR d.relay_state='pending'").all() as Q[]) {
       if (!(routedHere(q.team_id) || (v.isAdmin && q.escalated_at !== null))) continue;
       const relay = q.relay_state === 'pending';
+      const un = !relay ? unclearOf.get(q.id) : undefined;
+      if (un) {
+        out.push({
+          id: `question:${q.id}`, kind: 'unclear', source: { kind: 'decision', id: q.id, version: String(q.updated_at) }, scope: { project_id: un.project_id, team_id: q.team_id },
+          title: `${un.key} · ${un.title}`, reason: `${this.agentName(q.agent_id)} asks what is unclear${this.teamName(q.team_id) === 'A team' ? '' : ` for ${this.teamName(q.team_id)}`}`,
+          open: { kind: 'item', id: un.key, project_id: un.project_id, team_id: q.team_id },
+          actions: [{ id: 'clarify', label: 'Clarify', path: `/api/decisions/${enc(q.id)}/answer`, input: true }],
+          at: q.created_at, by: this.agentName(q.agent_id), summary: q.question,
+          ask: { id: q.id, question: q.question, team_id: q.team_id, team_label: this.teamName(q.team_id), asked_at: q.created_at, version: String(q.updated_at) },
+          item: itemOf(un),
+        });
+        continue;
+      }
       out.push({
         id: `question:${q.id}`, kind: relay ? 'relayed_answer' : 'question', source: { kind: 'decision', id: q.id, version: String(q.updated_at) }, scope: scope(q.team_id),
         title: q.question, reason: relay ? `${this.agentName(q.agent_id)} relayed an answer · confirm or overturn it` : `${this.agentName(q.agent_id)} asks ${this.teamName(q.team_id) === 'A team' ? '' : `for ${this.teamName(q.team_id)}`}`.trim(),
@@ -198,12 +225,12 @@ export class NeedsYou {
       const bd = blocked ? this.blockDetail(k.id, k.blocked_reason, k.assignee_agent_id) : null;
       out.push({
         id: `task:${k.id}`, kind: blocked ? 'unblock' : 'checkpoint', source: { kind: 'task', id: k.id, version: String(k.version) }, scope: scope(k.team_id),
-        title: k.title, reason: blocked ? `Blocked${k.blocked_reason ? ': ' + k.blocked_reason : ''}` : this.checkpointReason(k.id),
+        title: k.title, reason: blocked ? `Blocked${k.blocked_reason ? ': ' + beforeRecords(k.blocked_reason) : ''}` : this.checkpointReason(k.id),
         open: { kind: 'task', id: k.id, team_id: k.team_id },
         actions: blocked ? [{ id: 'unblock', label: 'Unblock', path: `${base}/unblock` }] : [{ id: 'approve', label: 'Approve', path: `${base}/approve`, tone: 'ok' }], at: k.updated_at,
         ...(bd ? { detail: bd } : {}),
         by: bd ? (bd as { blocked_by: string | null }).blocked_by : k.assignee_agent_id ? this.agentName(k.assignee_agent_id) : null,
-        summary: (blocked && k.blocked_reason) || inShort(k),
+        summary: (blocked && k.blocked_reason && beforeRecords(k.blocked_reason)) || inShort(k),
       });
     }
 
@@ -265,6 +292,16 @@ export class NeedsYou {
         open: { kind: 'team', id: x.team.id, team_id: x.team.id },
         actions: [{ id: 'raise', label: 'Raise the limit', path: `/api/teams/${enc(x.team.id)}`, input: true }], at: Date.now() });
     }
+    // A team's setup whose next step is the operator's (docs/onboarding.md#setup-progress): Source not asked, Waiting for
+    // you, or Returned to the operator. A proposal in review is already the proposal's row. The version is the setup's
+    // state, so the row leaves by itself when the state changes; opening it opens the setup details on the team page.
+    if (want('setup') && this.d.onboarding) for (const t of this.db.prepare("SELECT id, name FROM teams WHERE status<>'stopped'").all() as { id: string; name: string }[]) {
+      const s = this.d.onboarding.setupOfTeam(t.id);
+      if (!s || !(s.state === 'not_asked' || s.state === 'operator_supplies' || (s.state === 'returned' && s.responsible === 'operator'))) continue;
+      const at = (this.db.prepare('SELECT COALESCE(decided_at, updated_at) AS at FROM onboarding_requests WHERE id=?').get(s.request_id) as { at: number } | undefined)?.at ?? 0;
+      out.push({ id: `setup:${t.id}`, kind: 'setup', source: { kind: 'onboarding_request', id: s.request_id, version: `${s.state}:${s.proposal?.id ?? ''}` }, scope: scope(t.id),
+        title: `Setup: ${s.next.replace(/\.$/, '')}`, reason: `${t.name} · the setup waits for you`, open: { kind: 'setup', id: s.request_id, team_id: t.id }, summary: null, actions: [], at });
+    }
     type Dr = { id: string; title: string; version: number; created_at: number };
     if (want('directive')) for (const x of this.db.prepare("SELECT id, title, version, created_at FROM directives WHERE status='active' AND reviewed_at IS NULL").all() as Dr[]) {
       out.push({ id: `directive:${x.id}`, kind: 'directive', source: { kind: 'directive', id: x.id, version: String(x.version) }, scope: { project_id: null, team_id: null },
@@ -289,12 +326,16 @@ export class NeedsYou {
         title: x.path ?? 'A vault file', reason: 'Choose the version to keep', open: { kind: 'conflict', id: x.id }, summary: null,
         actions: [{ id: 'resolve', label: 'Choose', path: `/api/vault/conflicts/${enc(x.id)}/resolve`, input: true }], at: x.created_at });
     }
-    // An unclear requirement qualifies because Clarify saves the clarification and clears the flag (an admin ops write).
-    type U = { project_id: string; key: string; title: string; team_id: string | null; rev: number; updated_at: number };
-    if (want('unclear')) for (const x of this.db.prepare("SELECT project_id, key, title, team_id, rev, updated_at FROM bp_items WHERE kind IN ('fr','nfr') AND deleted_at IS NULL AND archived=0 AND COALESCE(status,'') <> 'dropped' AND json_extract(fields,'$.unclear')=1").all() as U[]) {
+    // A legacy unclear requirement (marked with no question): the admin asks the team, or edits or drops it with the usual admin writes.
+    type U = { project_id: string; key: string; title: string; body: string | null; fields: string; team_id: string | null; rev: number; updated_at: number; unclear_ask: string | null };
+    // An ask still waiting (open, needs more information, or answered by a relay the operator has not settled) keeps the item's row; once settled it is answered, or declined.
+    const openAsk = this.db.prepare("SELECT 1 FROM decisions WHERE id=? AND (status IN ('open','needs_info') OR relay_state='pending')");
+    const declined = this.db.prepare("SELECT 1 FROM decisions WHERE id=? AND status='declined'");
+    if (want('unclear')) for (const x of this.db.prepare("SELECT project_id, key, title, body, fields, team_id, rev, updated_at, json_extract(fields,'$.unclear_ask') AS unclear_ask FROM bp_items WHERE kind IN ('fr','nfr') AND deleted_at IS NULL AND archived=0 AND COALESCE(status,'') <> 'dropped' AND json_extract(fields,'$.unclear')=1").all() as U[]) {
+      if (x.unclear_ask && openAsk.get(x.unclear_ask)) continue; // its ask's row stands for it (above)
       out.push({ id: `unclear:${x.project_id}:${x.key}`, kind: 'unclear', source: { kind: 'bp_item', id: `${x.project_id}:${x.key}`, version: String(x.rev) }, scope: { project_id: x.project_id, team_id: x.team_id },
-        title: `${x.key} · ${x.title}`, reason: 'Marked unclear · clarify it', open: { kind: 'item', id: x.key, project_id: x.project_id, team_id: x.team_id }, summary: null,
-        actions: [{ id: 'clarify', label: 'Clarify', path: `/api/projects/${enc(x.project_id)}/ops`, input: true }], at: x.updated_at });
+        title: `${x.key} · ${x.title}`, reason: x.unclear_ask && declined.get(x.unclear_ask) ? 'Marked unclear · its question was declined' : 'Marked unclear · no question was asked', open: { kind: 'item', id: x.key, project_id: x.project_id, team_id: x.team_id }, summary: null,
+        actions: [{ id: 'ask_team', label: "Ask the team what's unclear", path: `/api/projects/${enc(x.project_id)}/items/${enc(x.key)}/ask-unclear` }], at: x.updated_at, item: itemOf(x) });
     }
   }
 

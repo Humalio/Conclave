@@ -58,7 +58,7 @@ beforeAll(async () => {
   const c = await api('POST', '/users', { username: 'dana', display_name: 'Dana', role: 'member' });
   const r = await fetch(`${base}/api/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ username: 'dana', password: c.body.password }) });
   dana = { id: c.body.user.id, who: { cookie: r.headers.get('set-cookie')!.split(';')[0]!, csrf: ((await r.json()) as any).csrf } };
-  coord = agent('Dana coord'); worker = agent('Bruno worker'); const rev = agent('Reviewer'); reviewer = rev.id;
+  coord = agent('Dana coord'); worker = agent('Ben worker'); const rev = agent('Reviewer'); reviewer = rev.id;
   const t = app.teams.create({ name: 'Dlg team', goal: 'goal', members: [{ agent_id: coord.id, role: 'coordinator' }, { agent_id: worker.id, role: 'worker' }, { agent_id: rev.id, role: 'reviewer' }] }, sys);
   app.teams.start(t.id, sys);
   app.db.prepare('UPDATE teams SET project_id=? WHERE id=?').run(project, t.id);

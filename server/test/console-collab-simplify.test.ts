@@ -35,8 +35,8 @@ describe('collaborator Home and project cards', () => {
 
   it('a project card starts with the project name and the chevron: no overline, key or team count', () => {
     const ctx = { ...stubs };
-    const card = new Function(...Object.keys(ctx), 'p', `${fn('function muProjCard(')}\nreturn muProjCard(p, null);`)(...Object.values(ctx), { id: 'prj_a', name: 'BIRAZ', key: 'BIRAZ', kind: 'research', teams: [{}], health: 'ok' }) as string;
-    expect(card).toMatch(/^<div class="card kd-card mu-pc">\s*<button type="button" class="mu-pc-h"[^>]*><b>BIRAZ<\/b><span class="grow"><\/span><\/button>|<b>BIRAZ<\/b><span class="grow"><\/span>$/m);
+    const card = new Function(...Object.keys(ctx), 'p', `${fn('function muProjCard(')}\nreturn muProjCard(p, null);`)(...Object.values(ctx), { id: 'prj_a', name: 'ECHO', key: 'ECHO', kind: 'research', teams: [{}], health: 'ok' }) as string;
+    expect(card).toMatch(/^<div class="card kd-card mu-pc">\s*<button type="button" class="mu-pc-h"[^>]*><b>ECHO<\/b><span class="grow"><\/span><\/button>|<b>ECHO<\/b><span class="grow"><\/span>$/m);
     expect(card).not.toContain('<ov>');
     expect(card).not.toContain('<k>');
     expect(card).not.toMatch(/team/i);

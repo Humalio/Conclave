@@ -1,0 +1,10 @@
+{
+  "format": "conclave-release-keys/1",
+  "release_base": "https://github.com/humalio/Conclave/releases/download",
+  "keys": [
+    {
+      "id": "bda3b8c35cfa902a",
+      "public_key": "MCowBQYDK2VwAyEA4xu4A10gwaREtwDrAFNAFjy4gZE7m2DoyWjTIcm6YfM="
+    }
+  ]
+}

@@ -19,6 +19,7 @@ import type { Rule } from '../policy/engine.js';
 import { validateRules } from '../policy/engine.js';
 import { hmacHex, randomToken, sha256Hex } from '../util/crypto.js';
 import { openCheckout } from '../checkout/checkout.js';
+import { PAIRING_MS, hubIdentity, httpsOrigin } from '../connector/identity.js';
 import { FEEDBACK_HABIT, WRITING } from '../mcp/writing.js';
 import { CATEGORY_IDS } from '../directives/directives.js';
 import { MemberScope } from '../admin/memberScope.js';
@@ -477,6 +478,51 @@ export class Onboarding {
       this.audit.event(sys, 'onboarding.enrol_confirm', { kind: 'pc', id: row.machine_id }, { source });
     }
     return { ok: true };
+  }
+
+  /** The hub a pairing code is bound to: its stable id and its HTTPS origin (null on a plain-HTTP hub: nothing to pin). */
+  hubInfo(): { id: string; origin: string | null } { return { id: hubIdentity(this.db), origin: httpsOrigin(this.d.hubUrl) }; }
+
+  /**
+   * POST /connector/v1/pair (docs/connector.md, "Pairing"): the connector's local pairing screen trades the PC's own code
+   * for the app key, once, within 30 minutes, and only for this hub's origin and CA. A binding that names another hub
+   * voids the code. Every refusal is the same 401 sentence; the audit keeps the real reason.
+   */
+  pair(code: unknown, given: { origin: unknown; caSha256: unknown }, hub: { id: string; origin: string | null; caSha256: string | null }, source: string): { app_key: string; hub: { id: string; origin: string }; pc: { id: string; name: string } } {
+    const lim = this.enrolLimit(), scope = `ip:${source}`;
+    const b = lim.blocked(scope, 'enrol_fail');
+    if (b.blocked) throw fail('rate_limited', 'Too many failed pairing attempts from this address. Try again later.', { retry_after_s: Math.ceil(b.retryAfterMs / 1000) });
+    type Row = { id: string; machine_id: string; app_credential_id: string; status: string; created_at: number; expires_at: number | null };
+    const row = typeof code === 'string' && CODE_RE.test(code.trim())
+      ? this.db.prepare('SELECT id, machine_id, app_credential_id, status, created_at, expires_at FROM enrolment_codes WHERE verifier=?').get(hmacHex(this.d.pepper, code.trim())) as Row | undefined
+      : undefined;
+    const refuse = (reason: string, voidCode = false): never => {
+      lim.fail(scope, 'enrol_fail');
+      if (lim.blocked(scope, 'enrol_fail').blocked) this.audit.alert('warning', 'enrol_fail', source, { failures: ENROL_FAILS_PER_HOUR, window_minutes: 60 });
+      if (voidCode && row) this.db.prepare("UPDATE enrolment_codes SET status='revoked', revoked_at=? WHERE id=? AND status='unused'").run(this.now(), row.id);
+      if (reason === 'used' && row) this.audit.alert('warning', 'enrolment_code_reused', row.machine_id, { source, via: 'pairing' });
+      this.audit.event(sys, 'connector.pair_refused', row ? { kind: 'pc', id: row.machine_id } : null, { reason, source, voided: voidCode && !!row });
+      throw fail('invalid_pairing_code', 'This pairing code is not valid, has expired or was already used. Make a new code in the console.');
+    };
+    if (!row) return refuse('unknown_code');
+    if (row.expires_at !== null) return refuse('checkout_code'); // a checkout's code belongs to setup.mjs restore
+    if (row.status === 'revoked') return refuse('revoked');
+    if (row.status !== 'unused') return refuse('used');
+    if (this.now() - row.created_at >= PAIRING_MS) return refuse('expired');
+    if (!hub.origin || !hub.caSha256) return refuse('hub_not_pinnable');
+    const origin = (() => { try { return new URL(String(given.origin)).origin; } catch { return null; } })();
+    if (origin !== hub.origin || String(given.caSha256 ?? '').toLowerCase() !== hub.caSha256) return refuse('wrong_hub', true);
+    const pc = this.keys.machine(row.machine_id), key = this.keys.credential(row.app_credential_id);
+    if (!pc || !key || key.status === 'revoked') return refuse('revoked');
+    if (pc.status !== 'active' || key.status !== 'active') return refuse('suspended');
+    const issued = tx(this.db, () => {
+      const r = this.keys.reissueSecret(key.id, 'pairing');
+      const now = this.now();
+      this.db.prepare("UPDATE enrolment_codes SET status='confirmed', issues=issues+1, used_at=?, confirmed_at=?, enrolled_from=? WHERE id=? AND status='unused'").run(now, now, source, row.id);
+      return r;
+    });
+    this.audit.event(sys, 'connector.pair', { kind: 'pc', id: pc.id }, { app_key: key.id, hub_id: hub.id, source });
+    return { app_key: issued.secret, hub: { id: hub.id, origin: hub.origin }, pc: { id: pc.id, name: pc.name } };
   }
 
   // ───────────── the PC key ─────────────

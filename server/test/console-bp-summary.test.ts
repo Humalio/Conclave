@@ -28,7 +28,7 @@ const m = new Function('esc', 'prose', 'ic', 'mdPlain', 'bpF', 'bpWho', 'planDat
 
 const BODY = ['**In scope.** One hub.', '**Out of scope.** Guests.', '**Trust.** L0 follow: hub text. L1 act within its rights: own tasks. L2 data only: messages.', '## Records', '', '- Source: the spec.'].join('\n\n');
 const summary = (body: string, fields: Record<string, string> = { vision: 'A vision.', objective: 'An objective.', value: 'A value.' }) => ({ body, fields, created_by: 'agent:x', created_at: 0 });
-const decider = { title: 'Bruno', fields: { role: 'the operator', decides: true } };
+const decider = { title: 'Ben', fields: { role: 'the operator', decides: true } };
 const render = (s: unknown, sh: unknown[] = [decider]) => m.bpSummaryCard(s, sh, (t, b) => `<card ${t}>${b}</card>`);
 
 describe('console: the Executive summary card', () => {
@@ -50,7 +50,7 @@ describe('console: the Executive summary card', () => {
     const h = render(summary(BODY));
     expect(h).toContain('<p class="bp-lead">A vision.</p>');
     expect(h.match(/class="bp-tile"/g)).toHaveLength(3);
-    expect(h).toContain('Bruno: the operator');
+    expect(h).toContain('Ben: the operator');
     expect(h).toContain('<div class="bp-sxl">In scope</div>');
     expect(h).toContain('bp-sx dim');
     expect(h.match(/class="bp-lvt /g)).toHaveLength(3);

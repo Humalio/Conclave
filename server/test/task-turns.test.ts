@@ -211,7 +211,7 @@ describe('a turn per transition', () => {
     expect(turns(b).at(-2)).toMatchObject({ holder_agent_id: Y.r.id, close_reason: 'reassigned' });
     expect(only(b)).toMatchObject({ phase: 'review', holder_agent_id: Y.r2.id, opened_by_kind: 'system', seen_at: null });
     app.teams.removeMember(Y.id, Y.r2.id, sys);
-    expect(app.teams.task(b)!.status).toBe('open');
+    expect(app.teams.task(b)).toMatchObject({ status: 'in_review', reviewer_agent_id: null }); // waits for a reviewer, never open
     expect(open(b)).toHaveLength(0);
     expect(turns(b).at(-1)).toMatchObject({ close_reason: 'released' });
   });

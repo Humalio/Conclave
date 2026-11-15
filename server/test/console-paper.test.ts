@@ -28,7 +28,8 @@ const helpers = ['const esc = ', 'const plural = ', 'const pill = ', 'const cap 
   'const overline = ', 'const REQ_ST = ', 'const MS_ST = ', 'const PRI = ', 'const BP_ST = ', 'const bpSt = ', 'const bpLabel = ', 'const bpK = ', 'const bpT = ', 'const bpUn = ',
   'const bpTM = ', 'const bpItemArg = ', 'const BP_KIND = ', 'const BP_REL = ', 'const bpReady = ', 'const BP_PARTS = ', 'function bpBody(', 'const bpRec = ', 'const bpStand = ',
   'function bpCheck(', 'const bpPh = ', 'function bpSources(', 'function refChips(', 'const trunc = ', 'function mdText('].map(decl).join('\n');
-const view = block('VIEWS.bp = async (arg) => {', '\n};');
+// The item screen both consoles share (bpItemScreen) and the admin's frame around it (VIEWS.bp).
+const view = block('async function bpItemScreen(', '\n}\n') + block('VIEWS.bp = async (arg) => {', '\n};');
 
 /* Every name the screen uses that is not one of the helpers above is a stub that renders nothing, except these few. */
 const STUBS: Record<string, unknown> = {
@@ -68,18 +69,21 @@ const mainCol = (b: string) => [between(b, '<div class="bp-col">', '</div><div c
 
 describe('paper screen', () => {
   it('opens with one summary card (head, readiness, summary), then Claims by part, Sources and Records', async () => {
-    const [main] = mainCol(await render(paper()));
-    const at = ['aria-label="Paper summary"', 'class="bp-ph"', 'class="bp-rd"', 'class="bp-psum"', 'id="bpOutline"', '<h4>Sources · 1</h4>', 'Records</summary>'].map((x) => main.indexOf(x));
+    const b = await render(paper()), [main] = mainCol(b);
+    const at = ['aria-label="Paper summary"', 'class="bp-ph"', 'class="bp-rd"', 'class="bp-psum"', 'id="bpOutline"', '<h4>Sources · 1</h4>'].map((x) => main.indexOf(x));
     at.forEach((x) => expect(x).toBeGreaterThan(-1));
     expect([...at].sort((a, b) => a - b)).toEqual(at);
-    // Readiness is a card like every other: no accent border or inset bar (Bruno, 18 Nov 2026); the state reads in its words and pills.
+    // Readiness is a card like every other: no accent border or inset bar (the operator, 18 Nov 2026); the state reads in its words and pills.
     expect(main).toContain('<section class="sec bp-sec bp-pcard" aria-label="Paper summary">');
     expect(main).not.toContain('bp-acc');
     expect(readFileSync(join(process.cwd(), 'public', 'style.css'), 'utf8')).not.toContain('bp-acc');
     // The standing line sits in the summary card, under readiness, and Records longer than 600 characters start folded.
     expect(between(main, 'aria-label="Paper summary"', '</section>')).toContain('Not ready: C3 is contradicted.');
     expect(main).not.toContain('<h4>Summary</h4>');
-    expect(main).toMatch(/<details class="task-brief bp-rec">/);
+    // Records come last, in their own column: under the left one on desktop, after the side cards on a phone.
+    expect(b).toContain('<div class="bp-grid bp-g3">');
+    expect(between(b, '<div class="bp-col bp-tail">', '')).toMatch(/<details class="task-brief bp-rec">/);
+    expect(main).not.toContain('Records</summary>');
   });
 
   it('lists at most 5 claims holding it back, worst first, then "and 2 more"; the outline lists all 12 once', async () => {
@@ -196,7 +200,7 @@ describe('Blueprint rows: title first', () => {
   it('changes every two-line bpT row and keeps the one-line rows', () => {
     expect(js.match(/bpTM\(/g)?.length).toBeGreaterThanOrEqual(17); // the declaration and 16 rows
     const left = [...js.matchAll(/row\(\{[^\n]*?bpT\([^\n]*?\}\)/g)].map((m) => m[0]);
-    expect(left).toHaveLength(2);
+    expect(left).toHaveLength(1); // the member's item sheet held the other; the item page replaced it
     left.forEach((x) => expect(x).toContain('one: true'));
   });
 });
@@ -218,8 +222,13 @@ describe('requirement chips', () => {
     const h = load({}).refChips(k, t, { task: 'team_1|k_1' });
     expect(h).not.toContain('<button'); expect(h).not.toContain('tabindex'); expect(h).not.toContain('data-ref-bp');
     expect(h.match(/<span class="ref" data-task="team_1\|k_1">/g)).toHaveLength(3);
+    // A pending ref on a board card is a tip-only chip too, and it opens the task like the others.
+    const p = load({}).refChips({ ...k, pending_refs: ['R20'] }, t, { task: 'team_1|k_1' });
+    expect(p).not.toContain('<button');
+    expect(p).toContain('<span class="ref pend" data-task="team_1|k_1">R20');
     expect(js).toContain("refChips(k, t, { task: `${id}|${k.id}` })");
-    expect(js).toContain("kv('Requirement', refChips(k, t, { open: true }))");
+    // The task screen shows the Requirement row for refs or pending refs, with a line saying what waits for the operator.
+    expect(js).toContain("refs || pend ? kv('Requirement', refChips(k, t, { open: true }) + (pend ? ");
   });
 
   it('a task-screen chip opens the item on click or Enter, and a sheet with Open on touch', () => {

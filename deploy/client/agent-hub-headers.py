@@ -8,7 +8,7 @@ calls session_login and neither the key nor the token appears in its transcript.
 Configuration, all outside the model:
   .agent-hub.json in the agent's folder, no secrets. Pass the folder as the first argument
   (agent-hub-headers.py /path/to/agent); without it the working folder is used. Contents:
-      {"url": "http://127.0.0.1:8080/mcp", "session_var": "BIRAZ_LEAD_SESSION_KEY"}
+      {"url": "http://127.0.0.1:8080/mcp", "session_var": "ECHO_LEAD_SESSION_KEY"}
       optional "keys_file" (default ~/.config/conclave/keys.env) and "app_var" (default AGENT_HUB_APP_KEY)
   keys file (mode 600): AGENT_HUB_APP_KEY=ah_app_… and the session key variable named above.
       Optional AGENT_HUB_URL=… pins the hub: it wins over the folder's "url", which must then match or be left out,
@@ -112,7 +112,9 @@ def main() -> None:
     app_key, ses_key = keys.get(cfg.get('app_var', 'AGENT_HUB_APP_KEY')), keys.get(var)
     if not app_key or not ses_key:
         fail(f'the keys file lacks the app key or {var}')
-    auth = {'Authorization': f'Bearer {app_key}'}
+    # The folder and the variable name (never a key) go with the helper's own calls, so an alert about a refused key
+    # can say which folder to fix.
+    auth = {'Authorization': f'Bearer {app_key}', 'X-Agent-Hub-Folder': urllib.parse.quote(folder, safe=''), 'X-Agent-Hub-Session-Var': var}
     cache_dir = f'{HOME}/.config/conclave/tokens'
     cache = f'{cache_dir}/{var}.tok'
     token = None

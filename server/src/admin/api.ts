@@ -52,7 +52,10 @@ import { registerGraphAdmin } from './graphApi.js';
 import type { Graph } from '../graph/graph.js';
 import type { Phase5Deps } from './phase5.js';
 import { registerOnboardingApi } from './onboardingApi.js';
+import { registerConnectorApi } from './connectorApi.js';
+import type { Connector } from '../connector/connector.js';
 import { registerCheckoutApi } from './checkoutApi.js';
+import type { Delegations } from '../checkout/delegate.js';
 import { registerMirrorApi } from './mirrorApi.js';
 import type { Mirror } from '../mirror/mirror.js';
 import type { Checkouts } from '../checkout/checkout.js';
@@ -72,7 +75,7 @@ import { ownedAgents } from './accountView.js';
 const COOKIE = 'ah_admin';
 const SESSION_MS = 12 * 60 * 60 * 1000;
 
-export interface AdminDeps { users: Users; routing: Routing; demo?: DemoController; db: Db; keys: Keys; audit: Audit; vault: Vault; store: VaultStore; config: Config; loginLimit: RateLimit; setup: Setup; links: Links; messaging: Messaging; teams: Teams; phase5: Omit<Phase5Deps, 'db' | 'keys' | 'audit'>; graph: Graph; feedback: Feedback; hardware: Hardware; decisions: Decisions; directives: Directives; onboarding: Onboarding; clientFiles: ClientFiles; blueprint: Blueprint; checkouts?: Checkouts; checkoutKeys?: CheckoutKeys; mirror?: Mirror; ownerScope?: OwnerScope; keyCollections?: KeyCollections; taskAttachments?: TaskAttachments }
+export interface AdminDeps { users: Users; routing: Routing; demo?: DemoController; db: Db; keys: Keys; audit: Audit; vault: Vault; store: VaultStore; config: Config; loginLimit: RateLimit; setup: Setup; links: Links; messaging: Messaging; teams: Teams; phase5: Omit<Phase5Deps, 'db' | 'keys' | 'audit'>; graph: Graph; feedback: Feedback; hardware: Hardware; decisions: Decisions; directives: Directives; onboarding: Onboarding; clientFiles: ClientFiles; blueprint: Blueprint; checkouts?: Checkouts; checkoutKeys?: CheckoutKeys; delegations?: Delegations; mirror?: Mirror; ownerScope?: OwnerScope; keyCollections?: KeyCollections; taskAttachments?: TaskAttachments; connector?: Connector }
 interface AdminCtx { id: string; username: string; csrf: string; totp: boolean; role: 'admin' | 'member'; user: UserRow }
 declare module 'fastify' { interface FastifyRequest { admin?: AdminCtx; member?: MemberScope } }
 
@@ -103,6 +106,13 @@ const checkRules = (rules: unknown): Omit<Rule, 'id'>[] => {
   try { validateRules(rules); return rules; } catch (e) { throw new KeyError('invalid_argument', (e as Error).message); }
 };
 const withSlash = (r: string) => (r.startsWith('/') ? `path:${r}` : r);
+
+/** Routes whose refusals are audited, with the action written and the kind of the :id target. */
+const REFUSED_AUDIT: Record<string, { name: string; target: string }> = {
+  'PATCH /api/teams/:id': { name: 'team.update_refused', target: 'team' },
+  'POST /api/teams/:id/checkout': { name: 'checkout.start_refused', target: 'team' },
+  'POST /api/agents/:id/delegate': { name: 'checkout.start_refused', target: 'agent' },
+};
 
 /** Registers the admin API; returns the /api routes it registered ("METHOD /pattern"), which the scope registry must cover. */
 export function registerAdminApi(f: FastifyInstance, d: AdminDeps): string[] {
@@ -142,6 +152,23 @@ export function registerAdminApi(f: FastifyInstance, d: AdminDeps): string[] {
       let out = payload;
       for (const { id } of db.prepare('SELECT id FROM admin_users').all() as { id: string }[]) if (out.includes(id)) out = out.split(`operator:${id}`).join('operator').split(id).join('operator');
       return out;
+    });
+    // A refused team change or checkout start leaves a record (who, what, why), so "it never happened" can be read from
+    // the audit trail (docs/checkout.md, "Refused starts"). Only a refusal by the route itself counts: one by the auth hook
+    // (no session, CSRF, a member outside the route's scope) writes nothing, so no caller can fill the trail.
+    const reached = new WeakSet<FastifyRequest>();
+    api.addHook('preHandler', async (req) => { if (req.admin) reached.add(req); });
+    api.addHook('onSend', async (req, reply, payload) => {
+      const action = REFUSED_AUDIT[`${req.method} ${req.routeOptions.url ?? ''}`];
+      if (!action || reply.statusCode < 400 || !req.admin || !reached.has(req)) return payload;
+      let e: { error?: unknown; message?: unknown } = {};
+      try { e = typeof payload === 'string' ? JSON.parse(payload) : {}; } catch { /* not JSON */ }
+      const b = req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? Object.keys(req.body as object).slice(0, 30) : [];
+      try {
+        audit.event({ kind: 'admin', id: req.admin.id, role: req.admin.role }, action.name, { kind: action.target, id: String((req.params as { id?: string }).id ?? '') },
+          { status: reply.statusCode, error: typeof e.error === 'string' ? e.error : null, message: typeof e.message === 'string' ? e.message.slice(0, 500) : null, ...(b.length ? { fields: b } : {}) });
+      } catch (err) { console.error('refused-action audit failed', err); }
+      return payload;
     });
     const actor = (req: FastifyRequest): Actor => ({ kind: 'admin', id: req.admin!.id, role: req.admin!.role });
     const body = <T extends z.ZodType>(s: T, req: FastifyRequest): z.infer<T> => s.parse(req.body ?? {});
@@ -350,7 +377,11 @@ export function registerAdminApi(f: FastifyInstance, d: AdminDeps): string[] {
       return { pc: keys.renameMachine(idOf(req), b.name, actor(req)) };
     });
     api.post('/api/pcs/:id/suspend', async (req) => { keys.setMachineStatus(idOf(req), 'suspended', actor(req)); return { pc: keys.machine(idOf(req)) }; });
-    api.post('/api/pcs/:id/reactivate', async (req) => { keys.setMachineStatus(idOf(req), 'active', actor(req)); return { pc: keys.machine(idOf(req)) }; });
+    api.post('/api/pcs/:id/reactivate', async (req) => {
+      // After Disconnect only Re-enrol PC brings the PC back (docs/connector.md).
+      if (d.connector?.disconnected(idOf(req))) throw new KeyError('invalid_state', 'This PC was disconnected from this hub; use Re-enrol PC to bring it back.');
+      keys.setMachineStatus(idOf(req), 'active', actor(req)); return { pc: keys.machine(idOf(req)) };
+    });
 
     api.get('/api/agents', async (req) => {
       if (!req.member) return { agents: keys.agents() };
@@ -597,7 +628,8 @@ export function registerAdminApi(f: FastifyInstance, d: AdminDeps): string[] {
       return { decision: decision.owner ? { ...decision, owner: { owner_id: decision.owner.owner, owner: decision.owner.label, basis: decision.owner.basis, task: taskRef(decision.owner.task), via: decision.owner.via ?? null } } : decision, owner_ceilings: ceilingsView(cap) };
     });
 
-    registerPhase2(api, { db, keys, setup: d.setup, links: d.links, config, audit }, actor);
+    registerPhase2(api, { db, keys, setup: d.setup, links: d.links, config, audit, connector: d.connector }, actor);
+    if (d.connector) registerConnectorApi(api, { keys, connector: d.connector, messaging: d.messaging }, actor);
     registerPhase3(api, { db, keys, messaging: d.messaging }, actor);
     registerTeams(api, { db, keys, teams: d.teams, routing: d.routing, openPart: (id, a, o) => { d.blueprint.openTeamPart(id, { kind: 'operator', id: a.id }, o); }, setupOf: (id) => d.onboarding.setupOfTeam(id), attachments: d.taskAttachments }, actor);
     if (d.taskAttachments) registerAttachmentApi(api, { attachments: d.taskAttachments, store: d.store });
@@ -614,8 +646,8 @@ export function registerAdminApi(f: FastifyInstance, d: AdminDeps): string[] {
     registerFeedbackApi(api, { feedback: d.feedback }, actor);
     registerHardwareApi(api, { hardware: d.hardware }, actor);
     registerDirectivesApi(api, { directives: d.directives }, actor);
-    registerOnboardingApi(api, { keys, onboarding: d.onboarding, files: d.clientFiles, config }, actor);
-    if (d.checkouts && d.checkoutKeys) registerCheckoutApi(api, { checkouts: d.checkouts, checkoutKeys: d.checkoutKeys, teams: d.teams, label: (a) => keys.agent(a)?.label ?? a }, actor);
+    registerOnboardingApi(api, { keys, onboarding: d.onboarding, files: d.clientFiles, config, connector: d.connector }, actor);
+    if (d.checkouts && d.checkoutKeys) registerCheckoutApi(api, { checkouts: d.checkouts, checkoutKeys: d.checkoutKeys, delegations: d.delegations, teams: d.teams, label: (a) => keys.agent(a)?.label ?? a }, actor);
     if (d.mirror) registerMirrorApi(api, d.mirror, actor);
     registerDecisionsApi(api, { db, decisions: d.decisions, teams: d.teams, vault, routing: d.routing }, actor);
     const bpSources = new Sources(db, vault);

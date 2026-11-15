@@ -86,7 +86,7 @@ describe('kinds', () => {
     const { bp, p, w } = fresh();
     const r = w([
       { op: 'upsert', kind: 'summary', key: 'SUM', title: 'Conclave', fields: { vision: 'Agents work together.', objective: 'Who, what, done.', value: 'One hub.' } },
-      { op: 'upsert', kind: 'stakeholder', key: 'SH-*', title: 'Bruno', fields: { role: 'Operator', decides: true, seat: 'operator' } },
+      { op: 'upsert', kind: 'stakeholder', key: 'SH-*', title: 'Ben', fields: { role: 'Operator', decides: true, seat: 'operator' } },
       mod(),
       { op: 'upsert', kind: 'fr', key: 'FR-TEAM-*', parent_key: 'TEAM', title: 'Only one claim wins', fields: { priority: 'must', stories: ['As a coordinator …'] } },
       { op: 'upsert', kind: 'nfr', key: 'NFR-PERF-01', parent_key: 'TEAM', title: 'Footprint', fields: { category: 'performance', target: '1 vCPU / 2 GB' } },
@@ -527,8 +527,11 @@ describe('a team plans in its own project (§5)', () => {
     // The coordinator writes draft FRs in its own module at once.
     const w = await C('bp_write', { team_id: teamId, version: bp.project(p.id)!.version, ops: [
       { op: 'upsert', kind: 'fr', key: 'FR-FP-01', parent_key: 'FP', title: 'Field model v2 validated', body: 'Bench data.', fields: { priority: 'must' } },
-      { op: 'upsert', kind: 'fr', key: 'FR-FP-02', parent_key: 'FP', title: 'Run 47 explained', fields: { priority: 'should', unclear: true, evidence: 'vault/run47.md' } }] });
+      { op: 'upsert', kind: 'fr', key: 'FR-FP-02', parent_key: 'FP', title: 'Run 47 explained', fields: { priority: 'should', evidence: 'vault/run47.md' } }] });
     expect(w.structuredContent, JSON.stringify(w.structuredContent.why)).toMatchObject({ status: 'applied' });
+    // An unclear mark is one question to the operator that names the item (§2.7).
+    const askR = (await C('team_ask', { team_id: teamId, question: 'What does Run 47 show?', refs: ['FR-FP-02'] })).structuredContent; const ask = askR.decision_id;
+    expect((await C('bp_write', { team_id: teamId, version: bp.project(p.id)!.version, ops: [{ op: 'upsert', kind: 'fr', key: 'FR-FP-02', fields: { unclear: true, unclear_ask: ask } }] })).structuredContent).toMatchObject({ status: 'applied' });
     // Criteria of a draft FR in its part are the coordinator's too (rights are checked against the FR as it is).
     const ac = await C('bp_write', { team_id: teamId, version: w.structuredContent.version, ops: [{ op: 'upsert', kind: 'ac', key: 'FR-FP-01/AC1', parent_key: 'FR-FP-01', title: 'Acceptance', fields: { then: 'Within tolerance.' } }] });
     expect(ac.structuredContent.status).toBe('applied');
@@ -543,7 +546,7 @@ describe('a team plans in its own project (§5)', () => {
     // Agreed and verified read as open and met; a dropped FR reads as dropped.
     bp.write(p.id, { version: bp.project(p.id)!.version, ops: [{ op: 'upsert', kind: 'fr', key: 'FR-FP-01', status: 'verified' }, { op: 'upsert', kind: 'fr', key: 'FR-FP-02', status: 'dropped' }] }, op);
     expect(app.teams.plan(teamId).requirements.map((r) => r.status)).toEqual(['met', 'dropped']);
-    expect(app.teams.planEvents(teamId)[1]).toMatchObject({ kind: 'update', actor: { kind: 'agent', id: coordId }, added: expect.arrayContaining(['FR-FP-01', 'FR-FP-02']) });
+    expect(app.teams.planEvents(teamId)[2]).toMatchObject({ kind: 'update', actor: { kind: 'agent', id: coordId }, added: expect.arrayContaining(['FR-FP-01', 'FR-FP-02']) });
   });
 
   it('the operator\'s plan request is an event and stays open until the coordinator changes the part', async () => {

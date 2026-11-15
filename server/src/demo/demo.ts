@@ -42,7 +42,7 @@ interface StoryModule {
 }
 
 /** Settings the story changes (feedback, onboarding, blueprint limits, pinned teams): a replay starts from their defaults. */
-const STORY_SETTINGS_SQL = "key LIKE 'feedback.%' OR key LIKE 'onboarding.%' OR key='blueprint_limits' OR key LIKE 'home.pinned_teams:%'";
+const STORY_SETTINGS_SQL = "key LIKE 'feedback.%' OR key LIKE 'onboarding.%' OR key='blueprint_limits' OR key LIKE 'home.pinned_teams:%' OR key LIKE 'blueprint.views:%'";
 
 /** What the operator reset leaves behind and the story changes: directives, members with their links, and those settings. */
 function clearStoryState(db: App['db']): void {

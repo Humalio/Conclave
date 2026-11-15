@@ -5,7 +5,7 @@
 import { describe, it, expect } from 'vitest';
 import { checkoutStep, names, type CheckoutStepIn } from '../src/checkout/step.js';
 
-const L: Record<string, string> = { a1: 'Biraz Coordinator', a2: 'Biraz Developer 1', a3: 'Biraz Developer 2', a4: 'Biraz Reviewer' };
+const L: Record<string, string> = { a1: 'Echo Coordinator', a2: 'Echo Developer 1', a3: 'Echo Developer 2', a4: 'Echo Reviewer' };
 const step = (status: CheckoutStepIn['status'], handouts: CheckoutStepIn['handouts'], approvePc: CheckoutStepIn['approvePc'] = null) =>
   checkoutStep({ status, handouts, approvePc, label: (id) => L[id] ?? id });
 const h = (agent_id: string, status: string, waiting = 0) => ({ agent_id, status, waiting });
@@ -18,21 +18,21 @@ describe('checkoutStep', () => {
   });
   it('collecting: progress of the handouts and who writes next, by label', () => {
     const s = step('collecting', [h('a1', 'written'), h('a2', 'requested')]);
-    expect(s).toEqual({ n: 1, of: 5, text: 'Step 1 of 5. The members are stopping at a good point and writing their handouts: 1 of 2 written.', action: null, next: 'Next: Biraz Developer 1 writes its handout.' });
-    expect(step('collecting', [h('a1', 'requested'), h('a2', 'requested'), h('a3', 'requested')]).next).toBe('Next: Biraz Coordinator, Biraz Developer 1 and 1 more write their handouts.');
+    expect(s).toEqual({ n: 1, of: 5, text: 'Step 1 of 5. The members are stopping at a good point and writing their handouts: 1 of 2 written.', action: null, next: 'Next: Echo Developer 1 writes its handout.' });
+    expect(step('collecting', [h('a1', 'requested'), h('a2', 'requested'), h('a3', 'requested')]).next).toBe('Next: Echo Coordinator, Echo Developer 1 and 1 more write their handouts.');
   });
   it('collecting with leftovers that wait: the operator reviews them first', () => {
     const s = step('collecting', [h('a2', 'merged', 1), h('a3', 'merged', 2), h('a1', 'requested')]);
-    expect(s.text).toBe('Step 1 of 5. Biraz Developer 1 and Biraz Developer 2 merged their work and left 3 leftovers that wait for your review.');
+    expect(s.text).toBe('Step 1 of 5. Echo Developer 1 and Echo Developer 2 merged their work and left 3 leftovers that wait for your review.');
     expect(s.action).toBe('Review the leftovers');
-    expect(s.next).toBe('Then Biraz Developer 1 and Biraz Developer 2 write their handouts.');
+    expect(s.next).toBe('Then Echo Developer 1 and Echo Developer 2 write their handouts.');
     expect(step('collecting', [h('a2', 'merged', 1)]).text).toContain('merged its work and left 1 leftover that waits');
   });
   it('ready, rendered and restoring: one action for the operator, or who resumes next', () => {
     expect(step('ready', [h('a1', 'written'), h('a2', 'written')])).toMatchObject({ n: 2, action: 'Choose the target and keys', next: null, text: 'Step 2 of 5. All 2 handouts are written, and the team stays paused until you choose where it moves.' });
     expect(step('rendered', [h('a1', 'written')])).toMatchObject({ n: 3, action: 'Run the restore prompt', next: 'Then each member resumes on the target.' });
     expect(step('rendered', [h('a1', 'written')], { name: 'Studio PC' })).toMatchObject({ action: 'Approve the new PC', text: 'Step 3 of 5. The new PC Studio PC has enrolled and waits for your approval before its keys are released.' });
-    expect(step('restoring', [h('a1', 'consumed'), h('a4', 'written')])).toMatchObject({ n: 4, action: null, text: 'Step 4 of 5. The members are resuming on the target: 1 of 2 resumed.', next: 'Next: Biraz Reviewer resumes on the target.' });
+    expect(step('restoring', [h('a1', 'consumed'), h('a4', 'written')])).toMatchObject({ n: 4, action: null, text: 'Step 4 of 5. The members are resuming on the target: 1 of 2 resumed.', next: 'Next: Echo Reviewer resumes on the target.' });
   });
   it('restored, cancelled and expired: nothing left to do', () => {
     expect(step('restored', [h('a1', 'consumed')])).toMatchObject({ n: 5, action: null, next: null });

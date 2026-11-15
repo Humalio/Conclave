@@ -705,7 +705,9 @@ export class Mirror {
     const c: CheckoutRow = { id: v.id, team_id: v.team_id, status: v.status as CheckoutStatus, source_machine_id: (v.source_machine_id as string) ?? null, target_machine_id: (v.target_machine_id as string) ?? null,
       request_id: null, choices: v.choices ? JSON.stringify(v.choices) : null, handout_hashes: null, paused_team: 0, missing: JSON.stringify(Array.isArray(v.missing) ? v.missing : []),
       end_reason: (v.end_reason as string) ?? null, requested_by: null, created_at: num(v.created_at) ?? this.now(), updated_at: num(v.ended_at) ?? num(v.restored_at) ?? num(v.created_at) ?? this.now(),
-      ready_at: num(v.ready_at), rendered_at: num(v.rendered_at), restoring_at: num(v.restoring_at), restored_at: num(v.restored_at), ended_at: num(v.ended_at), expires_at: num(v.expires_at) ?? 0, overdue_at: num(v.overdue_at) };
+      ready_at: num(v.ready_at), rendered_at: num(v.rendered_at), restoring_at: num(v.restoring_at), restored_at: num(v.restored_at), ended_at: num(v.ended_at), expires_at: num(v.expires_at) ?? 0, overdue_at: num(v.overdue_at),
+      scope: v.scope === 'agent' ? 'agent' : 'team', agent_id: typeof v.agent_id === 'string' ? v.agent_id : null, delegate_user_id: null, delegate_render: null,
+      prompt_opened_at: null, pc_confirmed_at: null, pc_refused_at: null, released_at: num(v.released_at), released_by: null, release_reason: typeof v.release_reason === 'string' ? v.release_reason : null };
     if (!(c.status in CHECKOUT_WORDS)) throw new VaultError('invalid_argument', `Unknown checkout status ${JSON.stringify(v.status)}.`);
     const H: HandoutRow[] = (v.handouts as unknown[]).filter(isObj).map((h) => ({ id: String(h.id), checkout_id: c.id, agent_id: String(h.agent_id), status: h.status as HandoutRow['status'], source: h.source === 'hub' ? 'hub' : 'agent',
       report: h.report == null ? null : JSON.stringify(h.report), body: h.body == null ? null : JSON.stringify(h.body), version: num(h.version) ?? 0, created_at: c.created_at, updated_at: num(h.consumed_at) ?? num(h.written_at) ?? c.created_at,

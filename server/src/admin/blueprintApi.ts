@@ -5,6 +5,7 @@
  * operator acts of its part (bpRouting.ts); the rest stays admin-only. The import route is the docs import (§8).
  */
 import type { FastifyInstance, FastifyRequest } from 'fastify';
+import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import type { Db } from '../db/db.js';
 import type { Actor } from '../audit/audit.js';
@@ -26,6 +27,7 @@ import { parseSystems, refsOf, refUrl, SYSTEMS_MAX, TEMPLATE_MAX } from '../blue
 import type { Routing } from './routing.js';
 import type { BpRouting } from './bpRouting.js';
 import { Keywords } from '../teams/keywords.js';
+import { registerBlueprintViewsApi } from './blueprintViewsApi.js';
 
 export interface BlueprintApiDeps { db: Db; blueprint: Blueprint; routing?: Routing; bpRouting?: BpRouting; sources?: Sources; meetings?: Meetings }
 
@@ -65,7 +67,61 @@ const cursorIn = (list: string) => z.string().max(100).optional().transform((s, 
   if (!m || m[1] !== list) { ctx.addIssue({ code: 'custom', message: 'cursor is a next_cursor from this list' }); return z.NEVER; }
   return Number(m[2]);
 });
+/**
+ * A browse cursor is bound to the filters and the viewer it was made for (§6.1, Scope): it carries the offset and a hash of
+ * both, and a cursor from other filters or another viewer is refused rather than paging a different list.
+ */
+const browseSig = (filters: Record<string, unknown>, viewer: string): string => {
+  const { limit: _l, x: _x, ...f } = filters;
+  return createHash('sha256').update(JSON.stringify([f, viewer])).digest('base64url').slice(0, 12);
+};
+const browseCursor = (at: number | null, sig: string): string | null => (at === null ? null : Buffer.from(`browse:${at}:${sig}`).toString('base64url'));
+const browseCursorIn = z.string().max(100).optional().transform((s, ctx) => {
+  if (s === undefined) return undefined;
+  const m = /^browse:(\d{1,9}):([A-Za-z0-9_-]{12})$/.exec(Buffer.from(s, 'base64url').toString());
+  if (!m) { ctx.addIssue({ code: 'custom', message: 'cursor is a next_cursor from this list' }); return z.NEVER; }
+  return { at: Number(m[1]), sig: m[2]! };
+});
 const list = (max: number) => z.string().max(max * 24).optional().transform((s) => (s ? s.split(',').map((x) => x.trim()).filter(Boolean).slice(0, max) : undefined));
+
+/**
+ * A member's copy of one item's answer (docs/multi-user.md §4, §7): agents by their label and console users as plain
+ * `operator`, never an agent id or a username; no History (its revisions name both and hold earlier snapshots); and
+ * nothing addressed to the operator or the team (Next, the plain-reading issue marks). Standing stays: it is a fact.
+ * Who clarified a requirement reads "the operator", or the member's own name when they answered it ("Clarified by you").
+ */
+export function forMember(db: Db, out: Record<string, unknown>, userId: string): void {
+  const label = (a: unknown): unknown => {
+    if (typeof a !== 'string') return a;
+    const [kind, ...rest] = a.split(':'), id = rest.join(':');
+    if (kind === 'agent') return id ? (db.prepare('SELECT label FROM agents WHERE id=?').get(id) as { label: string } | undefined)?.label ?? 'an agent' : 'an agent';
+    if (kind === 'operator') return 'operator';
+    return a;
+  };
+  // A field that holds an agent's id (an owner, an author) reads that agent's label.
+  const named = (v: unknown): unknown => typeof v === 'string' && /^agent-[a-z0-9]+$/.test(v) && db.prepare('SELECT 1 FROM agents WHERE id=?').get(v) ? label(`agent:${v}`)
+    : Array.isArray(v) ? v.map(named) : v;
+  const it = out['item'] as Record<string, unknown> | undefined;
+  if (it) {
+    it['created_by'] = label(it['created_by']); it['updated_by'] = label(it['updated_by']);
+    const f = it['fields'] as Record<string, unknown> | undefined;
+    if (f && typeof f === 'object') for (const k of Object.keys(f)) f[k] = named(f[k]);
+  }
+  // A hypothesis's research: who moved its status, by label.
+  for (const c of (out['research'] as { changes?: { actor: unknown }[] } | undefined)?.changes ?? []) c.actor = label(c.actor);
+  out['actions'] = [];
+  const h = out['history'] as { total?: number } | undefined;
+  out['history'] = { revisions: [], total: h?.total ?? 0 };
+  delete out['next'];
+  const plain = out['plain'] as Record<string, unknown> | undefined;
+  if (plain) plain['issues'] = [];
+  const cl = out['clarification'] as { by_label?: string | null } | undefined;
+  if (cl) {
+    const answered = (db.prepare('SELECT answered_by FROM decisions WHERE id=?').get((cl as { decision_id?: string }).decision_id ?? '') as { answered_by: string | null } | undefined)?.answered_by;
+    const me = answered === userId ? (db.prepare('SELECT username FROM admin_users WHERE id=?').get(userId) as { username: string } | undefined)?.username : undefined;
+    cl.by_label = me ?? 'the operator';
+  }
+}
 
 export function registerBlueprintApi(api: FastifyInstance, d: BlueprintApiDeps, actor: (req: FastifyRequest) => Actor): void {
   const { db, blueprint: bp } = d;
@@ -198,6 +254,7 @@ export function registerBlueprintApi(api: FastifyInstance, d: BlueprintApiDeps, 
     // Outside references (§2.2), each linked only through the operator's URL template for its system.
     const systems = parseSystems(p.external_systems);
     out['external'] = refsOf(it.fields).map((r) => ({ ...r, url: refUrl(r, systems) }));
+    if (req.member) forMember(db, out, req.member.userId);
     return out;
   });
   // The Meetings view (§9): the vault notes live items cite in `source`, newest first; a note this viewer can't read is left out.
@@ -236,6 +293,8 @@ export function registerBlueprintApi(api: FastifyInstance, d: BlueprintApiDeps, 
   api.get('/api/projects/:id/items/:key/history', async (req) => {
     const q = z.object({ cursor: cursorIn('history'), limit: z.coerce.number().int().min(1).max(50).optional() }).strict().parse(req.query ?? {});
     const { next, ...r } = views.history(project(req).id, params(req).key!, { before: q.cursor, limit: q.limit ?? 50 });
+    // A member has no History (docs/multi-user.md §7): revisions name agents and people and hold earlier snapshots.
+    if (req.member) return { ...r, revisions: [], next_cursor: null };
     return { ...r, next_cursor: cursorOf('history', next) };
   });
 
@@ -243,12 +302,21 @@ export function registerBlueprintApi(api: FastifyInstance, d: BlueprintApiDeps, 
   api.get('/api/projects/:id/browse', async (req) => {
     const q = z.object({
       section: z.coerce.number().int().min(1).max(6).optional(), kind: list(20), status: list(20), sel: z.enum(['open', 'live', 'dropped', 'month', 'decide', 'risk']).optional(),
-      team: z.string().max(100).optional(), q: z.string().max(200).optional(), cursor: cursorIn('browse'), limit: z.coerce.number().int().min(1).max(BROWSE_MAX).optional(),
+      team: z.string().max(100).optional(), q: z.string().max(200).optional(), cursor: browseCursorIn, limit: z.coerce.number().int().min(1).max(BROWSE_MAX).optional(),
+      // List analysis (§6.1): dimension filters, one gap, the count table.
+      f: list(40), gap: z.string().max(40).optional(), x: z.string().max(40).optional(),
+      // Sort and group (§6.1).
+      g: z.string().max(40).optional(), s: z.string().max(10).optional(),
     }).strict().parse(req.query ?? {});
-    const p = project(req);
-    const { next, prev, ...r } = browse(db, p, { section: q.section, kinds: q.kind, status: q.status, sel: q.sel, team: q.team, q: q.q, offset: q.cursor, limit: q.limit });
+    const p = project(req), a = actor(req);
+    // Counts that read tasks follow what the viewer may read, as the section summary does.
+    const tasks = req.member ? (req.member.has(p.id, 'tasks') ? 'all' as const : null) : 'all' as const;
+    const viewer = `${a.kind}:${a.id ?? ''}:${req.member ? 'member' : 'admin'}:${tasks ? 'tasks' : '-'}`;
+    const { next, prev, ...r } = browse(db, p, { section: q.section, kinds: q.kind, status: q.status, sel: q.sel, team: q.team, q: q.q, f: q.f, gap: q.gap, x: q.x, g: q.g, s: q.s, tasks, offset: q.cursor?.at, limit: q.limit });
+    const sig = browseSig(r.filters, viewer);
+    if (q.cursor && q.cursor.sig !== sig) throw new KeyError('invalid_argument', 'This cursor was made for other filters or another viewer; start again from the first page.');
     // may_archive: whether this viewer may archive what the list shows (the admin only, §6.1); the route checks it again.
-    return { ...r, next_cursor: cursorOf('browse', next), prev_cursor: cursorOf('browse', prev), project_id: p.id, may_archive: !req.member && isAdmin(actor(req)) };
+    return { ...r, next_cursor: browseCursor(next, sig), prev_cursor: browseCursor(prev, sig), project_id: p.id, may_archive: !req.member && isAdmin(a) };
   });
   // Archive a dropped item with its subtree, or bring it back (§6.1), one write each. Rights as for any operator write that
   // is not a decider's status move (§1.3): the admin's (op), and the route scope is admin. The kind table decides what may
@@ -263,6 +331,15 @@ export function registerBlueprintApi(api: FastifyInstance, d: BlueprintApiDeps, 
     });
   }
 
+  // A requirement marked unclear before the question route has no ask: the operator sends its team one fixed notice to ask it (admin only).
+  api.post('/api/projects/:id/items/:key/ask-unclear', async (req) => {
+    body(z.object({}).strict(), req);
+    const p = project(req), a = op(req), key = params(req).key!;
+    const r = bp.askClarify(p.id, key);
+    audit.event(actor(req), 'blueprint.ask_unclear', { kind: 'project', id: p.id }, { key: p.key, item: key, notified: r.notified });
+    return { project_id: p.id, key, ...r };
+  });
+
   // ───── writing, proposals, requests ─────
   api.post('/api/projects/:id/ops', async (req) => {
     const b = body(z.object({ version: z.number().int().min(0), ops: z.array(opSchema).min(1).max(MAX_OPS), note: z.string().max(2000).nullable().optional(), team_id: z.string().max(100).nullable().optional() }).strict(), req);
@@ -272,7 +349,7 @@ export function registerBlueprintApi(api: FastifyInstance, d: BlueprintApiDeps, 
     if (req.member && !team) throw new KeyError('not_decider', 'A decider makes the operator\'s status moves in their team\'s part (agree, drop or reopen a requirement, decide a decision entry, move a paper on), except on items an open re-plan marks; the admin makes every other change.');
     if (!req.member) op(req);
     const who = routed(req, team, true, 'No such project.');
-    const r = bp.write(p.id, { version: b.version, ops: b.ops as Op[], note: b.note?.trim() || (req.member ? 'decider' : 'operator'), team_id: b.team_id ?? null }, bpActor(who));
+    const r = bp.write(p.id, { version: b.version, ops: b.ops as Op[], note: b.note?.trim() || (req.member ? 'decider' : 'operator'), item_note: b.note?.trim() || null, team_id: b.team_id ?? null }, bpActor(who));
     bp.deps.audit?.event(who, 'blueprint.write', { kind: 'project', id: p.id }, { key: p.key, version: r.version, ops: b.ops.length });
     return { project_id: p.id, ...r, support_changed: watch(r) };
   });
@@ -440,6 +517,9 @@ export function registerBlueprintApi(api: FastifyInstance, d: BlueprintApiDeps, 
     const only = req.member ? { projects: new Set(req.member.projects('blueprint')), proposals: new Set((d.bpRouting?.routedTo(req.member.userId) ?? []).map((p) => p.id)) } : undefined;
     return views.attention({ limit: q.limit ?? 50, ...(only ? { only } : {}) });
   });
+
+  // Saved list views, per user: a project is seen when it exists and, for a member, is granted with blueprint.
+  registerBlueprintViewsApi(api, { db, sees: (req, id) => { try { const p = views.mustProject(id); return !req.member || req.member.has(p.id, 'blueprint'); } catch { return false; } } });
 
   // ───── Settings: limits ─────
   api.get('/api/settings/blueprint', async () => ({ limits: asApi(bp.limits), defaults: asApi(DEFAULT_LIMITS), max: Object.fromEntries(Object.entries(LIMIT_SETTINGS).map(([k, s]) => [k, s.max])) }));

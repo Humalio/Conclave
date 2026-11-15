@@ -56,7 +56,8 @@ describe('plan events', () => {
     const p = app.blueprint.projectOfTeam(teamId)!;
     app.blueprint.write(p.id, { version: p.version, ops: [{ op: 'upsert', kind: 'module', key: 'INT', title: 'Integration', team_id: teamId }, { op: 'upsert', kind: 'milestone', key: 'M1', title: 'Field model frozen', team_id: teamId }], team_id: teamId }, { kind: 'operator', id: null });
     expect((await C('bp_write', { team_id: teamId, version: version(), ops: [{ op: 'upsert', kind: 'fr', key: 'FR-INT-01', parent_key: 'INT', title: 'Fold and return', fields: { priority: 'must' } }, { op: 'upsert', kind: 'fr', key: 'FR-INT-02', parent_key: 'INT', title: 'Field model frozen', fields: { priority: 'must' } }] })).structuredContent.status).toBe('applied');
-    expect((await C('bp_write', { team_id: teamId, version: version(), ops: [{ op: 'upsert', kind: 'fr', key: 'FR-INT-02', fields: { unclear: true } }, { op: 'upsert', kind: 'fr', key: 'FR-INT-03', parent_key: 'INT', title: 'Quench margin', fields: { priority: 'must' } }] })).structuredContent.status).toBe('applied');
+    const ask = (await C('team_ask', { team_id: teamId, question: 'What is FR-INT-02 about?', refs: ['FR-INT-02'] })).structuredContent.decision_id;
+    expect((await C('bp_write', { team_id: teamId, version: version(), ops: [{ op: 'upsert', kind: 'fr', key: 'FR-INT-02', fields: { unclear: true, unclear_ask: ask } }, { op: 'upsert', kind: 'fr', key: 'FR-INT-03', parent_key: 'INT', title: 'Quench margin', fields: { priority: 'must' } }] })).structuredContent.status).toBe('applied');
     const [u2, u1, u0] = await events();
     expect(u0).toMatchObject({ kind: 'update', added: ['INT', 'M1'] });
     expect(u1).toMatchObject({ kind: 'update', actor: { kind: 'agent', id: coordId }, added: ['FR-INT-01', 'FR-INT-02'], removed: [], changed: [] });

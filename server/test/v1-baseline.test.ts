@@ -113,6 +113,15 @@ describe('a 0.x database at migration 69', () => {
     expect(versions(db)).toContain(BASELINE);
   });
 
+  it('is recognised when migrations 15 and 26 are recorded with the checksum of their text before two comments were reworded', () => {
+    const db = oldChain();
+    const set = db.prepare('UPDATE schema_migrations SET checksum=? WHERE version=?');
+    set.run('4334507576d6263178944ba0d36a619b6df40f4cde5664c3bb6a09b95c97074e', 15);
+    set.run('7528db371e66d9ad66158e001727c3cc3a6d55a81be7e8f403619b000e2dda19', 26);
+    migrate(db);
+    expect(versions(db)).toContain(BASELINE);
+  });
+
   const refused: [string, (db: DatabaseSync) => void, RegExp][] = [
     ['one changed column', (db) => {
       db.exec(`CREATE TABLE trd_copy AS SELECT * FROM team_role_defaults; DROP TABLE team_role_defaults;

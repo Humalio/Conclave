@@ -9,7 +9,7 @@ import { execFile } from 'node:child_process';
 import { createServer } from 'node:http';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, dirname } from 'node:path';
+import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const HELPER = join(dirname(fileURLToPath(import.meta.url)), 'agent-hub-headers.mjs');
@@ -34,7 +34,8 @@ before(async () => {
     req.on('data', (c) => { body += c; });
     req.on('end', () => {
       const msg = JSON.parse(body);
-      state.requests.push({ tool: msg.params.name, args: msg.params.arguments, auth: req.headers.authorization, session: req.headers['x-agent-hub-session'] });
+      state.requests.push({ tool: msg.params.name, args: msg.params.arguments, auth: req.headers.authorization, session: req.headers['x-agent-hub-session'],
+        folder: req.headers['x-agent-hub-folder'], sessionVar: req.headers['x-agent-hub-session-var'] });
       if (state.redirect) { res.writeHead(307, { location: state.redirect }); return res.end(); }
       if (state.raw) { res.writeHead(200, { 'content-type': 'text/event-stream' }); return res.end(state.raw); }
       const r = msg.params.name === 'session_whoami' ? state.whoami(req.headers['x-agent-hub-session']) : state.login(msg.params.arguments);
@@ -97,6 +98,15 @@ test('logs in once, prints both headers, caches the token and logs start and ok'
   assert.match(log, / start dir=/);
   assert.match(log, / ok dir=/);
   assert.ok(!log.includes(APP_KEY) && !log.includes(SES_KEY) && !log.includes('tok-new'));
+});
+
+test('tells the hub the folder and the variable name with its own calls, never in the printed headers', async () => {
+  const s = setup();
+  const r = await run(s);
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(decodeURIComponent(state.requests[0].folder), resolve(s.agent));
+  assert.equal(state.requests[0].sessionVar, VAR);
+  assert.deepEqual(Object.keys(headers(r)), ['Authorization', 'X-Agent-Hub-Session']);
 });
 
 test('reuses a cached token the hub still accepts, without logging in', async () => {

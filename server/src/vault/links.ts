@@ -5,10 +5,12 @@
  * - a target that starts with `/` is a path from the vault root (with or without the vault's alias), and only that;
  * - a target that starts with `./` or `../` is a path from the folder that holds the note, and only that;
  * - any other target, a bare name or a path with folders (`Plan`, `Projects/Plan.md`, `[[Projects/Plan]]`), is tried
- *   from the vault root, then from the note's folder, then under each extra base folder, and finally as the end of a
- *   path anywhere the viewer may look (shortest-path links), nearest to the note first.
+ *   from the note's folder first, then from the vault root, then under each extra base folder, and finally as the end
+ *   of a path anywhere the viewer may look (shortest-path links), nearest to the note first.
  *
- * A target without an extension also matches the same path with `.md`. The resolver only names candidates; the lookup
+ * A target without an extension also matches the same path with `.md`. A file wins over a folder: only when no file
+ * matches does a lookup that knows folders (the vault viewer) answer with a folder at the same places, in the same order.
+ * A folder answers as its path with an empty last segment, so it joins as `Papers/Draft/`. The resolver only names candidates; the lookup
  * a caller passes decides which files exist and which the viewer may see, so every access check stays with the caller.
  */
 
@@ -18,6 +20,8 @@ export interface LinkLookup {
   file(rel: string[]): Promise<string[] | null>;
   /** For each wanted tail, the visible files whose path ends with it (case and Unicode form ignored; see tailMatch). */
   tails(wanted: string[][]): Promise<string[][][]>;
+  /** The canonical path of a visible folder at exactly this path, or null. Without it, a link opens files only. */
+  folder?(rel: string[]): Promise<string[] | null>;
 }
 
 export const hasExt = (name: string) => /\.[^./]{1,10}$/.test(name);
@@ -68,16 +72,15 @@ export async function resolveLinks(targets: string[], o: { alias: string; from: 
   for (const t of new Set(targets)) {
     const s = linkSegments(t, o.alias, o.from);
     if (!s) { out.set(t, []); continue; }
-    const tries: string[][] = [s.segs];
-    if (s.mode === 'any') {
-      if (o.from) tries.push([...o.from.slice(0, -1), ...s.segs]);
-      for (const b of o.bases ?? []) if (b.length) tries.push([...b, ...s.segs]);
-    }
+    // Obsidian's order for a path that names neither the root nor the note's folder: next to the note, then from the root.
+    const tries: string[][] = s.mode === 'any' && o.from ? [[...o.from.slice(0, -1), ...s.segs], s.segs] : [s.segs];
+    if (s.mode === 'any') for (const b of o.bases ?? []) if (b.length) tries.push([...b, ...s.segs]);
     let hit: string[] | null = null;
     for (const r of tries) {
       for (const c of hasExt(r.at(-1)!) ? [r] : [r, [...r.slice(0, -1), r.at(-1)! + '.md']]) { hit = await o.look.file(c); if (hit) break; }
       if (hit) break;
     }
+    if (!hit && o.look.folder) for (const r of tries) { const d = await o.look.folder(r); if (d) { hit = [...d, '']; break; } }
     if (hit) out.set(t, [hit]);
     else if (s.mode === 'any') later.push({ t, segs: s.segs });
     else out.set(t, []);

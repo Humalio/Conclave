@@ -70,7 +70,7 @@ export function renderPrompt(files: ClientFiles, o: { hubUrl: string; lanUrl?: s
 }
 
 const STATUS: Record<string, number> = {
-  invalid_argument: 400, contains_key: 400, unauthorized: 401, capability_off: 403, suspended: 403, not_found: 404, denied: 404,
+  invalid_argument: 400, contains_key: 400, unauthorized: 401, invalid_pairing_code: 401, capability_off: 403, suspended: 403, not_found: 404, denied: 404,
   conflict: 409, invalid_state: 409, checkout_open: 409, handout_changed: 409, scan_pending: 409, lockdown: 423, upgrade_required: 426, rate_limited: 429,
 };
 
@@ -119,6 +119,11 @@ export function registerOnboarding(f: FastifyInstance, ob: Onboarding, files: Cl
   // The code may come in the x-conclave-enrol-code header (setup.mjs restore), never in a URL.
   route('post', '/onboard/enrol', (req) => { const b = obj(req.body), h = req.headers['x-conclave-enrol-code']; return ob.enrol((b.code ?? (typeof h === 'string' ? h : undefined)) as string, b.nonce as string, req.ip); });
   route('post', '/onboard/enrol/confirm', (req) => ob.enrolConfirm(obj(req.body).nonce as string, req.ip));
+
+  // ── connector pairing (docs/connector.md, "Pairing"): no key; the code is bound to this hub's id, origin and CA ──
+  const pinned = () => ({ ...ob.hubInfo(), caSha256: files.ca()?.sha256 ?? null });
+  route('get', '/connector/v1/hub', () => { const h = pinned(); return { hub_id: h.id, origin: h.origin }; });
+  route('post', '/connector/v1/pair', (req) => { const b = obj(req.body); return ob.pair(b.pairing_code, { origin: b.hub_origin, caSha256: b.hub_ca_sha256 }, pinned(), req.ip); });
 
   // ── requests (the PC key) ──
   route('post', '/onboard/requests', (req) => ob.file(ob.authApp(bearer(req), req.ip), req.body));

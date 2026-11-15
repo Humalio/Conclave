@@ -1,5 +1,5 @@
 /**
- * Codex wake (docs/codex-wake.md): deploy/client/codex-wake.mjs's Waker against a real hub on 127.0.0.1, logged in with
+ * Codex wake (docs/connector.md): deploy/client/codex-wake.mjs's Waker against a real hub on 127.0.0.1, logged in with
  * the reviewer's keys the way the bridge is. No Codex CLI runs: the launch stub plays the woken Codex turn and posts the
  * verdict over its own MCP login. Also the hub side: work_next {kinds}, and review text through the vault copy's filter.
  */

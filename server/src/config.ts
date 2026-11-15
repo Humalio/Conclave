@@ -46,6 +46,10 @@ export interface Config {
   clientDir?: string;
   /** CONCLAVE_REPO_HOSTS: the repo host allowlist for checkout handouts until the operator saves one (docs/checkout.md §8). */
   repoHosts?: string[];
+  /** CONNECTOR_RELEASE_URL: the GitHub Releases page Add PC links to for the connector download (docs/connector.md). */
+  connectorReleaseUrl?: string;
+  /** API list prices per million tokens, by model, for the admin's usage view; a model without one has an Unknown cost. */
+  connectorPrices?: Record<string, import('./connector/connector.js').ModelPrice>;
   /** BACKUP_DIR: the folder of database backups a Blueprint restore may read authorship from (default <DATA_DIR>/backups, docs/blueprint.md §4.2). */
   backupDir?: string;
 }
@@ -83,13 +87,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     vaultScanSeconds: env.VAULT_SCAN_SECONDS !== undefined ? Number(env.VAULT_SCAN_SECONDS) : demo ? 5 : 60, vaultWatch: env.VAULT_WATCH !== '0',
     channelBridgeMax: env.CHANNEL_MAX_BYTES ? Number(env.CHANNEL_MAX_BYTES) : undefined, channelBufferBytes: env.CHANNEL_BUFFER_BYTES ? Number(env.CHANNEL_BUFFER_BYTES) : undefined,
     channelBytesPerHour: env.CHANNEL_BYTES_PER_HOUR ? Number(env.CHANNEL_BYTES_PER_HOUR) : undefined, shareBytesPerHour: env.SHARE_BYTES_PER_HOUR ? Number(env.SHARE_BYTES_PER_HOUR) : undefined,
-    retention: { ...(env.RETENTION_SHARES_DAYS ? { sharesDays: Number(env.RETENTION_SHARES_DAYS) } : {}), ...(env.RETENTION_CHANNELS_DAYS ? { channelsDays: Number(env.RETENTION_CHANNELS_DAYS) } : {}), ...(env.RETENTION_WORK_ITEMS_DAYS ? { workItemsDays: Number(env.RETENTION_WORK_ITEMS_DAYS) } : {}) },
+    retention: { ...(env.RETENTION_SHARES_DAYS ? { sharesDays: Number(env.RETENTION_SHARES_DAYS) } : {}), ...(env.RETENTION_CHANNELS_DAYS ? { channelsDays: Number(env.RETENTION_CHANNELS_DAYS) } : {}), ...(env.RETENTION_WORK_ITEMS_DAYS ? { workItemsDays: Number(env.RETENTION_WORK_ITEMS_DAYS) } : {}), ...(env.RETENTION_USAGE_DAYS ? { usageDays: Number(env.RETENTION_USAGE_DAYS) } : {}) },
     trustProxy: parseTrustProxy(env.TRUST_PROXY),
     lanUrl: env.LAN_URL ? env.LAN_URL.replace(/\/+$/, '') : undefined, caCertFile: env.CA_CERT_FILE || undefined, clientDir: env.CLIENT_DIR || undefined,
     allowedOrigins: (env.ALLOWED_ORIGINS ?? '').split(',').map((s) => s.trim().replace(/[/]+$/, '')).filter(Boolean),
     // Test and demo hubs (eval/run.mjs) shorten the indexing debounce so curator jobs appear within the run.
     ...(env.GRAPH_DEBOUNCE_MS !== undefined && Number.isFinite(Number(env.GRAPH_DEBOUNCE_MS)) ? { graph: { debounceMs: Number(env.GRAPH_DEBOUNCE_MS) } } : demo ? { graph: { debounceMs: 1000 } } : {}),
     demoMode: demo,
+    ...(env.CONNECTOR_RELEASE_URL?.trim() && /^https:\/\//.test(env.CONNECTOR_RELEASE_URL.trim()) ? { connectorReleaseUrl: env.CONNECTOR_RELEASE_URL.trim() } : {}),
     backupDir: resolve(env.BACKUP_DIR ?? join(dataDir, 'backups')),
     ...(env.CONCLAVE_REPO_HOSTS?.trim() ? { repoHosts: env.CONCLAVE_REPO_HOSTS.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean) } : {}),
   };

@@ -36,6 +36,8 @@ const live = (i: Item) => !i.deleted_at;
 const count = (xs: Item[], f: (i: Item) => boolean) => xs.filter(f).length;
 const liveOf = (i: Item) => !isRetired(i.kind, i.status);
 const actorLabel = (kind: string, id: string | null) => `${kind}${id ? `:${id}` : ''}`;
+/** The signed-in user an operator revision names (a decider or an admin), so history reads their name and not just "operator". */
+const userName = (db: Db, kind: string, id: string | null): string | null => kind === 'operator' && id ? (db.prepare('SELECT username FROM admin_users WHERE id=?').get(id) as { username: string } | undefined)?.username ?? null : null;
 
 export interface Bar { done: number; total: number }
 export interface Measures {
@@ -290,8 +292,19 @@ export class BlueprintViews {
       },
       // Every task naming the item is listed; done/total count accepted, live work only (like team progress): not backlog, cancelled or discarded.
       tasks: { items: tasks, done: tasks.filter((t) => t.status === 'done').length, total: tasks.filter((t) => !NOT_COUNTED.includes(t.status)).length },
-      history: { revisions: revs.slice(0, 10).map((r) => ({ rev: r.rev, at: r.at, actor: actorLabel(r.actor_kind, r.actor_id), note: r.change_note, snapshot: r.snapshot })), total: revs.length },
+      history: { revisions: revs.slice(0, 10).map((r) => ({ rev: r.rev, at: r.at, actor: actorLabel(r.actor_kind, r.actor_id), actor_name: userName(this.db, r.actor_kind, r.actor_id), note: r.change_note, snapshot: r.snapshot })), total: revs.length },
     };
+    // The operator's answer to the question that marked a requirement unclear, kept after the mark is cleared (the revisions hold the ask's id).
+    if (it.kind === 'fr' || it.kind === 'nfr') {
+      const asks = [it.fields['unclear_ask'], ...revs.map((r) => (r.snapshot['fields'] as Record<string, unknown> | undefined)?.['unclear_ask'])].filter((x, i, a): x is string => typeof x === 'string' && a.indexOf(x) === i);
+      for (const id of asks) {
+        const a = this.db.prepare("SELECT id, answer_text, answered_at, answered_by FROM decisions WHERE id=? AND status='answered'").get(id) as { id: string; answer_text: string | null; answered_at: number | null; answered_by: string | null } | undefined;
+        if (!a) continue;
+        const who = a.answered_by ? (this.db.prepare('SELECT username FROM admin_users WHERE id=?').get(a.answered_by) as { username: string } | undefined)?.username ?? null : null;
+        out['clarification'] = { text: a.answer_text, by_label: who ?? 'the operator', at: a.answered_at, decision_id: a.id };
+        break;
+      }
+    }
     if (!it.deleted_at) {
       // Plain reading (docs/blueprint.md §2.7): only the server tokenises; the console marks the exact tokens it is given.
       const issues: Warning[] = this.bp.plainIssues(p.id).get(key) ?? [];
@@ -341,7 +354,7 @@ export class BlueprintViews {
     const limit = Math.max(1, Math.min(HISTORY_MAX, o.limit ?? 20));
     const all = this.bp.revisions(it.id).filter((r) => o.before === undefined || r.rev < o.before);
     const page = all.slice(0, limit);
-    return { project: ref(p), key, revisions: page.map((r) => ({ rev: r.rev, at: r.at, actor: actorLabel(r.actor_kind, r.actor_id), note: r.change_note, snapshot: r.snapshot })),
+    return { project: ref(p), key, revisions: page.map((r) => ({ rev: r.rev, at: r.at, actor: actorLabel(r.actor_kind, r.actor_id), actor_name: userName(this.db, r.actor_kind, r.actor_id), note: r.change_note, snapshot: r.snapshot })),
       next: all.length > limit ? page.at(-1)!.rev : null };
   }
 

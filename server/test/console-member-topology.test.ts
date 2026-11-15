@@ -44,7 +44,7 @@ ${heads.map(decl).join('\n')}
 return { ${names.join(', ')} };`)(S, esc, plural, trunc, (t: string) => `<h>${esc(t)}</h>`, (o: { title: string; meta: string; trail: string }) => `<r>${esc(o.title)}|${esc(o.meta)}|${o.trail}</r>`,
     (t: string, r: string) => `<k>${t}${r}</k>`, (s: string) => s[0].toUpperCase() + s.slice(1), () => '1m', () => undefined, { type: null }, 1, () => '', () => '') as Record<string, (...a: any[]) => any>;
 
-  const label = (n: string) => `BIRAZ · ${n}`;
+  const label = (n: string) => `ECHO · ${n}`;
   const topo = {
     teams: [
       { id: 't1', name: 'Mapping', room_id: 'r1', agents: [{ agent_id: 'a1', label: label('Coordinator'), role: 'coordinator' }, { agent_id: 'a2', label: label('CAD Modeler'), role: 'worker' }] },
@@ -65,13 +65,13 @@ return { ${names.join(', ')} };`)(S, esc, plural, trunc, (t: string) => `<h>${es
   it('drops the shared prefix from the node names and initials and keeps the full label in the tip', () => {
     expect(html).toContain('Coordinator');
     expect(html).toContain('CAD Modeler');
-    expect(html).toContain('<title>BIRAZ · Coordinator · coordinator</title>');
-    expect(html).not.toMatch(/class="tg-lbl"[^>]*>BIRAZ/);
+    expect(html).toContain('<title>ECHO · Coordinator · coordinator</title>');
+    expect(html).not.toMatch(/class="tg-lbl"[^>]*>ECHO/);
     expect(html).toMatch(/class="ini"[^>]*>C[A-Z]?</);
   });
   it('keeps the list under the graph: agent, role and the messages sent in 7 days', () => {
-    expect(html).toContain('<r>BIRAZ · Coordinator|Coordinator|<span class="meta">3 messages</span></r>');
-    expect(html).toContain('<r>BIRAZ · CAD Modeler|Worker|<span class="meta">Quiet</span></r>');
+    expect(html).toContain('<r>ECHO · Coordinator|Coordinator|<span class="meta">3 messages</span></r>');
+    expect(html).toContain('<r>ECHO · CAD Modeler|Worker|<span class="meta">Quiet</span></r>');
   });
   it('shows nothing the collaborator cannot know: no live state, no progress bar, edges are read-only', () => {
     expect(html).not.toMatch(/offline|connected|tg-prog|tg-hit|tabindex|data-n=/);

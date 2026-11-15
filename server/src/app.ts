@@ -15,15 +15,18 @@ import { LeakGuard } from './guard/leakGuard.js';
 import { Vault, VaultError } from './vault/vault.js';
 import { VaultStore } from './vault/store.js';
 import { builtinTemplates } from './policy/catalogue.js';
-import { buildMcpServer, removedToolAnswer, compactHeader } from './mcp/tools.js';
+import { buildMcpServer, removedToolAnswer, compactHeader, clientHint } from './mcp/tools.js';
 import { Setup } from './setup/setup.js';
 import { Links } from './links/links.js';
 import { OwnerScope } from './policy/ownerScope.js';
+import { Delegations } from './checkout/delegate.js';
 import { Messaging } from './messaging/messaging.js';
 import { Teams } from './teams/teams.js';
 import { Blueprint } from './blueprint/blueprint.js';
 import { BlueprintViews } from './blueprint/views.js';
 import { registerBridge } from './bridge/http.js';
+import { Connector } from './connector/connector.js';
+import { registerConnector } from './connector/http.js';
 import { Shares } from './shares/shares.js';
 import { TaskAttachments } from './shares/taskAttachments.js';
 import { Channels } from './channels/channels.js';
@@ -48,8 +51,10 @@ import { MIRROR_FOLDER } from './mirror/folder.js';
 import { setReserved } from './policy/engine.js';
 import { ClientFiles, findClientDir, registerOnboarding } from './onboarding/http.js';
 
-const STATUS: Record<string, number> = { not_found: 404, conflict: 409, lockdown: 423, too_large: 413, binary: 400, patch_failed: 409, invalid_state: 409, paused: 409, invalid_argument: 400, invalid_path: 400, denied: 404, gone: 410, admin_only: 403, totp_required: 403, export_denied: 403, read_only: 403, board_denied: 403, not_decider: 403,
-  checkout_open: 409, checkpoint_incomplete: 409, handout_consumed: 409, handout_changed: 409, repo_no_remote: 409, unmerged_work: 409, restore_unavailable: 409, scan_pending: 409, rate_limited: 429 };
+const STATUS: Record<string, number> = { not_found: 404, conflict: 409, already_clear: 409, lockdown: 423, too_large: 413, binary: 400, patch_failed: 409, invalid_state: 409, paused: 409, invalid_argument: 400, invalid_path: 400, denied: 404, gone: 410, admin_only: 403, totp_required: 403, export_denied: 403, read_only: 403, board_denied: 403, not_decider: 403,
+  checkout_open: 409, checkpoint_incomplete: 409, handout_consumed: 409, handout_changed: 409, repo_no_remote: 409, unmerged_work: 409, restore_unavailable: 409, scan_pending: 409, rate_limited: 429,
+  // Delegate one agent (docs/checkout.md §9 F1).
+  checkout_conflict: 409, only_coordinator: 409, no_project: 409, not_ready: 409, prompt_in_use: 409, pc_not_confirmed: 409, agent_away: 409 };
 
 /**
  * Where KaTeX lives: the copy Mermaid depends on, resolved through Mermaid (not through npm's hoisting), and the font
@@ -79,6 +84,8 @@ export async function buildApp(config: Config, extras: { demo?: import('./demo/d
   const loginLimit = new RateLimit(db, 10, 10 * 60 * 1000);
   const setup = new Setup(db, config.pepper, audit, keys, config.publicUrl, config.bridgeFile);
   const links = new Links(db, keys, audit);
+  const connector = new Connector(db, keys, audit, config.pepper, config.connectorPrices ?? {});
+  connector.guard = guard;
   const messaging = new Messaging(db, keys, links);
   // Owner enforcement (docs/authorization.md#owner-enforcement): no ceiling while the setting is off.
   const ownerScope = new OwnerScope(db, vault.alias);
@@ -106,10 +113,23 @@ export async function buildApp(config: Config, extras: { demo?: import('./demo/d
   // A new team gets its project at once, so bp_* work from the start (docs/blueprint.md §3); a submitted share is checked (F-19).
   teams.onTeamCreated = (teamId) => { blueprint.ensureTeamProject(teamId, { kind: 'system', id: null }); };
   teams.blueprint = blueprint; // status and plan requests are opened by the blueprint
+  blueprint.onProposalClosed = (teamId, proposalId, status) => teams.settlePendingRefs(teamId, proposalId, status);
+  blueprint.onKeysAdded = (projectId, keys) => teams.pendingRefsLive(projectId, keys);
   teams.checkShare = (agentId, shareId, version) => shares.checkSubmitted(agentId, shareId, version);
   if (config.shareBytesPerHour) shares.bytesPerHour = config.shareBytesPerHour;
   // Task attachments: hub-made shares bound to a task, read under the task rule (docs/specification.md, Tasks).
   const taskAttachments = new TaskAttachments(db, shares, teams, audit, store);
+  // What a task names that its reviewer cannot read under the hub's rules: the submitted share and the brief and
+  // submission files. Empty when everything opens, so a request for changes "evidence unreadable" counts as usual.
+  teams.unreadableEvidence = (t, agentId) => {
+    const out: string[] = [];
+    if (t.share_id) { const sh = shares.share(t.share_id); if (!sh || !shares.canAccess(sh, agentId)) out.push(`the submitted share ${sh?.name ?? t.share_id}`); }
+    for (const role of ['brief', 'submission'] as const) {
+      const set = taskAttachments.setOf(t.id, role);
+      if (set && set.status !== 'revoked' && !taskAttachments.canRead(set, agentId)) out.push(`the ${role} files`);
+    }
+    return out;
+  };
   const channels = new Channels(db, keys, teams, setup, store, vault, shares, guard, audit, {
     inlineMax: config.channelInlineMax ?? 1024 * 1024, bridgeMax: config.channelBridgeMax ?? 20 * 1024 ** 3, perKey: config.channelPerKey ?? 4, global: config.channelGlobal ?? 32,
     bytesPerHour: config.channelBytesPerHour ?? 50 * 1024 ** 3, bufferBytes: config.channelBufferBytes ?? 8 * 1024 * 1024, tmpDir: join(config.dataDir, 'tmp'), expireMs: 10 * 60_000, idleMs: config.channelIdleMs ?? 2 * 3600_000,
@@ -117,6 +137,7 @@ export async function buildApp(config: Config, extras: { demo?: import('./demo/d
   channels.ownerScope = ownerScope;
   const access = new Access(db, keys, audit);
   const lockdown = new Lockdown(db, vault.alias);
+  lockdown.onLift = (kind, id, since) => teams.holdLifted(kind, id, since); // the sweep skipped held members: restart their leases
   keyCollections.lockdown = lockdown;
   taskAttachments.lockdown = lockdown;
   const feedback = new Feedback(db, keys, audit, teams);
@@ -128,6 +149,7 @@ export async function buildApp(config: Config, extras: { demo?: import('./demo/d
   access.routeTeam = (agentId) => routing.requestTeam(agentId);
   blueprint.deps = { keys, audit, lockdown, exportMd: (id) => new BlueprintViews(db, blueprint).exportMarkdown(id).text, backupDir: config.backupDir ?? join(config.dataDir, 'backups') };
   decisions.blueprint = blueprint;
+  blueprint.onItemAsk = (a) => decisions.askForItem(a); // an unclear mark's question, opened by its own write (docs/blueprint.md §2.7)
   const directives = new Directives(db, keys, teams, audit);
   // Directive reach follows live team memberships and their projects: each change tells the agents it moved (docs/directives.md#project-reach).
   teams.reachGuard = (ids, fn) => directives.refresh(ids, fn);
@@ -152,6 +174,7 @@ export async function buildApp(config: Config, extras: { demo?: import('./demo/d
   const clientFiles = new ClientFiles(findClientDir(config.clientDir), config.caCertFile);
   // Checkout keys and render (docs/checkout.md §5): the checkout kind of onboarding request, successor keys, the target table.
   const checkoutKeys = new CheckoutKeys({ db, keys, teams, audit, onboarding, checkouts, files: clientFiles, hubUrl: config.publicUrl });
+  const delegations = new Delegations({ db, keys, teams, audit, onboarding, checkouts, checkoutKeys, ownerScope, users });
   // The read-only copies of the hub's records in "99 Conclave/" and the deferred purge of handout bodies (D63).
   const mirror = new Mirror({ db, store, vault, guard, audit, decisions, publicUrl: config.publicUrl, pushList: (id) => checkoutKeys.pushList(checkouts.mustCheckout(id)) });
   checkouts.onChange = (id, expect) => { void mirror.checkoutChanged(id, expect); };
@@ -252,9 +275,10 @@ export async function buildApp(config: Config, extras: { demo?: import('./demo/d
     return reply.type(ext === 'woff2' ? 'font/woff2' : ext === 'woff' ? 'font/woff' : 'font/ttf').header('cache-control', 'public, max-age=86400').send(body);
   });
 
-  const adminRoutes = registerAdminApi(fastify, { ownerScope, users, routing, demo: extras.demo, db, keys, audit, vault, store, config, loginLimit, setup, links, messaging, teams, phase5: { access, lockdown, alerts, shares, channels, maintenance }, graph, feedback, hardware, decisions, directives, onboarding, clientFiles, blueprint, checkouts, checkoutKeys, mirror, keyCollections, taskAttachments });
+  const adminRoutes = registerAdminApi(fastify, { ownerScope, users, routing, demo: extras.demo, db, keys, audit, vault, store, config, loginLimit, setup, links, messaging, teams, phase5: { access, lockdown, alerts, shares, channels, maintenance }, graph, feedback, hardware, decisions, directives, onboarding, clientFiles, blueprint, checkouts, checkoutKeys, delegations, mirror, keyCollections, taskAttachments, connector });
   registerOnboarding(fastify, onboarding, clientFiles);
-  const bridge = registerBridge(fastify, setup, pairLimit, channels);
+  registerConnector(fastify, db, connector, keys, setup, directives);
+  const bridge = registerBridge(fastify, setup, pairLimit, channels, keys);
   fastify.addHook('preClose', async () => { bridge.releaseAll(); onboarding.releaseAll(); messaging.releaseAll(); teams.releaseAll(); clearInterval(upkeep); maintenance.stop(); });
 
   // ── MCP (stateless) ──
@@ -301,7 +325,7 @@ export async function buildApp(config: Config, extras: { demo?: import('./demo/d
     // A call to a tool removed in 1.0 is answered here, before the transport (docs/mcp.md, "Removed tools").
     const removed = removedToolAnswer(req.body);
     if (removed) return reply.code(200).type('application/json').send(removed);
-    const server = buildMcpServer({ db, keys, audit, guard, vault, store, loginLimit, setup, links, messaging, teams, messagesPerHour: config.messagesPerHour ?? 120, shares, channels, access, lockdown, alerts, graph, feedback, hardware, decisions, directives, blueprint, checkouts, ownerScope, attachments: taskAttachments }, app, req.ip, headerToken, headerSession, compactHeader(req.headers['x-agent-hub-compact']));
+    const server = buildMcpServer({ db, keys, audit, guard, vault, store, loginLimit, setup, links, messaging, teams, messagesPerHour: config.messagesPerHour ?? 120, shares, channels, access, lockdown, alerts, graph, feedback, hardware, decisions, directives, blueprint, checkouts, ownerScope, attachments: taskAttachments }, app, req.ip, headerToken, headerSession, compactHeader(req.headers['x-agent-hub-compact']), clientHint(req.headers['x-agent-hub-folder'], req.headers['x-agent-hub-session-var']));
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
     reply.hijack();
     reply.raw.on('close', () => { void transport.close(); void server.close(); });
@@ -312,6 +336,6 @@ export async function buildApp(config: Config, extras: { demo?: import('./demo/d
   fastify.get('/mcp', notAllowed);
   fastify.delete('/mcp', notAllowed);
 
-  return { fastify, users, routing, adminRoutes, onboarding, keyCollections, taskAttachments, checkouts, checkoutKeys, clientFiles, db, keys, audit, vault, store, config, setup, links, messaging, teams, blueprint, shares, channels, access, lockdown, alerts, maintenance, graph, feedback, hardware, decisions, directives, mirror, close: async () => { await fastify.close(); await mirror.stop(); await store.stop(); db.close(); } };
+  return { fastify, users, routing, adminRoutes, connector, onboarding, keyCollections, taskAttachments, checkouts, checkoutKeys, delegations, clientFiles, db, keys, audit, vault, store, config, setup, links, messaging, teams, blueprint, shares, channels, access, lockdown, alerts, maintenance, graph, feedback, hardware, decisions, directives, mirror, close: async () => { await fastify.close(); await mirror.stop(); await store.stop(); db.close(); } };
 }
 export type App = Awaited<ReturnType<typeof buildApp>>;

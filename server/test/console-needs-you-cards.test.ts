@@ -19,9 +19,9 @@ const fn = (head: string) => part(head, '\n}\n');
 
 const SRC = [part('function mdText(', '\n'), ...['ic', 'esc', 'ago', 'plural', 'trunc', 'cap', 'pill'].map(line), part('const NY_KIND = ', '};\n'), line('nyKind'), fn('function nyOpenAttr('),
   line('nyLaterBtn'), fn('function awBtns('), line('nyUntil'), line('nySum'), line('NY_EFFECT_MAX'), part('const nyWho = ', '; };\n'), line('nyTeamOf'), line('nyHeadLine'), line('nyHead'), fn('function nyOpsLine('),
-  line('nyReplyBtn'), line('nyReplyBox'), line('nyOpenBtn'), line('nyActBtn'), fn('function nyBody('), part('const nyCardBox = ', '</article>`;\n'), fn('function nyCard(')].join('\n');
+  line('nyReplyBtn'), line('nyReplyBox'), line('nyOpenBtn'), line('nyActBtn'), fn('function nyBody('), line('NY_QDET'), fn('function nyQCard('), part('const nyCardBox = ', '</article>`;\n'), fn('function nyCard(')].join('\n');
 const card = (r: unknown) => {
-  const ctx: Record<string, unknown> = { S: { teams: [{ id: 'team_a', name: 'Conclave Developers' }] }, Date, mdPlain, NAV_NAMES: new Map([['prj_c', 'Conclave']]), BP_KIND: {}, dt: () => '', bpArg: () => '', bpItemArg: () => '', r };
+  const ctx: Record<string, unknown> = { S: { teams: [{ id: 'team_a', name: 'Conclave Developers' }] }, Date, mdPlain, mdDoc: (t: string) => `<p>${t}</p>`, NAV_NAMES: new Map([['prj_c', 'Conclave']]), BP_KIND: {}, dt: () => '', bpArg: () => '', bpItemArg: () => '', r };
   vm.createContext(ctx);
   return vm.runInContext(`${SRC}\nnyCard(r)`, ctx) as string;
 };
@@ -81,11 +81,13 @@ describe("Needs you cards lead with the item's title", () => {
     expect(c).not.toContain('class="ny-sum"');
   });
 
-  it('a question leads with itself; its context is the summary, the task it blocks and the recommendation the extras line', () => {
+  it('a question leads with what it blocks and who asks, then itself; the recommendation is on its button, not on a meta line', () => {
     const c = card({ id: 'question:q2', kind: 'question', source: { kind: 'question', id: 'q2', version: '1' }, scope: sc, title: 'Ship now?', reason: '', open: { kind: 'question', id: 'q2' }, actions: [], at: now - 60_000,
-      by: 'Coordinator', summary: 'The gate passed.', detail: { kind: 'question', context: 'The gate passed.', asked_by: 'Coordinator', blocks: { title: 'Gate task' }, recommended: 'a', options: [{ key: 'a', label: 'Ship now' }, { key: 'b', label: 'Wait' }] } });
-    expect(c).toContain('<span>Question for you · Coordinator · Conclave Developers · 1m ago</span></p><h3 class="ny-msg">Ship now?</h3><p class="ny-sum">The gate passed.</p>');
-    expect(c).toContain('<p class="meta ny-meta">blocks Gate task · recommends Ship now</p>');
+      by: 'Coordinator', summary: 'The gate passed.', detail: { kind: 'question', context: 'The gate passed.', asked_by: 'Coordinator', blocks: { id: 'task_g', title: 'Gate task' }, recommended: 'a', options: [{ key: 'a', label: 'Ship now' }, { key: 'b', label: 'Wait' }] } });
+    expect(c).toContain('>Blocks 1 task</button><span>Conclave Developers · Coordinator · 1m ago</span></p><h3 class="ny-msg">Ship now?</h3><div class="ny-opts"');
+    expect(c).not.toContain('ny-meta');
+    expect(c).not.toContain('recommends');
+    expect(c).toContain('class="ny-opt rec" data-ny="question:q2|1|opt:a"');
   });
 
   it('Reply… opens the note box in place of the buttons; ⋯ runs the hidden buttons and Later opens at ⋯', () => {
@@ -131,18 +133,70 @@ describe('Needs you card styles', () => {
   });
 });
 
-describe('question options keep their effect readable before the choice', () => {
+describe('a question reads at a glance: each answer once, with its effect, and the rest under Details', () => {
   const q = { id: 'question:q1', kind: 'question', source: { kind: 'question', id: 'q1', version: '1' }, scope: sc, title: 'Which path for the gate?', reason: '', open: { kind: 'question', id: 'q1' },
-    actions: [], at: now - 60_000, detail: { kind: 'question', context: 'The gate slipped.', blocks: { title: 'Gate task' }, recommended: 'a', options: [
+    actions: [], at: now - 60_000, detail: { kind: 'question', context: 'The gate **slipped**.', blocks: { id: 'task_g', title: 'Gate task' }, recommended: 'b', options: [
       { key: 'a', label: 'Approve', effect: 'Ships the amendment today.' }, { key: 'b', label: 'Hold', effect: 'Waits a week for the reviewer.' }, { key: 'c', label: 'Split', effect: 'Ships half now, half later.' }] } };
-  it('every option with an effect has one visible line on the card, including the one only in ⋯', () => {
-    const c = card(q);
-    expect(c).toContain('<ul class="ny-fx"><li><b>Approve</b> · Ships the amendment today.</li><li><b>Hold</b> · Waits a week for the reviewer.</li><li><b>Split</b> · Ships half now, half later.</li></ul>');
-    expect(c.indexOf('class="ny-fx"')).toBeLessThan(c.indexOf('<div class="ny-acts">'));
-    expect(c).toMatch(/<div class="ny-more-acts" hidden>.*Split/);
+  // What a reader sees before opening anything: the card up to Details' panel and the note box.
+  const shown = (c: string) => c.slice(0, c.indexOf('<div class="ny-qdet"'));
+
+  it('every answer appears once on the card, as a button with its effect under it, the recommended one first', () => {
+    const c = card(q), v = shown(c);
+    for (const [l, fx] of [['Approve', 'Ships the amendment today.'], ['Hold', 'Waits a week for the reviewer.'], ['Split', 'Ships half now, half later.']]) {
+      expect(v.split(`<b>${l}</b>`).length - 1).toBe(1);
+      expect(v.split(`<span class="ny-opt-fx">${fx}</span>`).length - 1).toBe(1);
+      expect(v).toMatch(new RegExp(`<b>${l}</b>(<span class="pill acc">Recommended</span>)?</span><span class="ny-opt-fx">${fx.replace('.', '\\.')}</span></button>`));
+    }
+    expect(v.indexOf('opt:b')).toBeLessThan(v.indexOf('opt:a'));
+    expect(v.indexOf('opt:a')).toBeLessThan(v.indexOf('opt:c'));
+    // Every answer is on the card, none only in ⋯.
+    const m = c.slice(c.indexOf('<div class="ny-more-acts" hidden>')); expect(m.slice(0, m.indexOf('</div>'))).not.toContain('opt:');
   });
-  it('a question whose options have no effect has no list', () => {
-    const plain = { ...q, detail: { ...q.detail, options: q.detail.options.map((o: { key: string; label: string }) => ({ key: o.key, label: o.label })) } };
-    expect(card(plain)).not.toContain('ny-fx');
+
+  it('the recommended answer has the accent border and the Recommended tag, once; no meta line repeats it', () => {
+    const c = shown(card(q));
+    expect(c.match(/class="ny-opt rec"/g)).toHaveLength(1);
+    expect(c).toContain('class="ny-opt rec" data-ny="question:q1|1|opt:b"');
+    expect(c.match(/Recommended/g)).toHaveLength(1);
+    expect(c).not.toContain('ny-meta');
+    expect(css).toContain('.ny-opt.rec{border-color:var(--accent)}');
+  });
+
+  it('Details is a folded button with aria-expanded; it holds the context as Markdown and the blocked task as a link', () => {
+    const c = card(q);
+    expect(c).toContain('<button type="button" class="btn ghost ny-qdet-btn" data-ny-qdet-btn aria-expanded="false">');
+    expect(c).toContain('<div class="ny-qdet" data-ny-qdet hidden><article class="md ny-qdet-md"><p>The gate **slipped**.</p></article>');
+    expect(c).toContain('<p class="ny-qdet-blk"><span class="meta">Blocks</span><button type="button" class="lnk" data-task="team_a|task_g">Gate task</button></p>');
+    expect(shown(c)).not.toContain('slipped');
+    // The fold is this viewer's, for this page: a set in memory, never sent to the hub.
+    const t = fn('function nyQDet(');
+    expect(t).toContain("b.setAttribute('aria-expanded', String(on));");
+    expect(t).toContain('NY_QDET.add(card.dataset.nyRow)');
+    expect(t).not.toMatch(/post\(|api\(|localStorage/);
+    expect(js).toContain("const nyq = t.closest('[data-ny-qdet-btn]'); if (nyq) { nyQDet(nyq); return; }");
+  });
+
+  it('the Blocks chip is warn-toned, names the task in its tooltip and opens it', () => {
+    expect(card(q)).toContain('<button type="button" class="pill warn pill-btn ny-blocks" data-task="team_a|task_g" title="Gate task" aria-label="Blocks 1 task: Gate task">Blocks 1 task</button>');
+    // Without a team to open it in, the chip is plain text.
+    expect(card({ ...q, scope: { project_id: 'prj_c', team_id: null } })).toContain('<span class="pill warn ny-blocks" title="Gate task">Blocks 1 task</span>');
+    // No task blocked: no chip, and no Details unless there is context.
+    const free = card({ ...q, detail: { ...q.detail, blocks: null, context: null } });
+    expect(free).not.toContain('ny-blocks');
+    expect(free).not.toContain('data-ny-qdet');
+  });
+
+  it('the answer buttons send the same choice as before: the option key, with the note when one is written', () => {
+    const c = card(q);
+    for (const k of ['a', 'b', 'c']) expect(c).toMatch(new RegExp(`class="ny-opt( rec)?" data-ny="question:q1\\|1\\|opt:${k}" data-ny-inline="note" data-ny-label="`));
+    // Add a note… opens the note box, which keeps one button per answer.
+    expect(c).toMatch(/<div class="ny-reply" data-ny-reply-box hidden>.*data-ny="question:q1\|1\|opt:b".*data-ny="question:q1\|1\|opt:a".*data-ny="question:q1\|1\|opt:c"/);
+    expect(css).toContain('.ny-card:has(>.ny-reply:not([hidden]))>.ny-opts{display:none}');
+    expect(js).toContain("const nyb = t.closest('[data-ny]'); if (nyb) { nyAct(nyb, nyb.dataset.ny, nyAfter); return; }");
+  });
+
+  it('answers are full-width buttons with 3 px corners, on phones too', () => {
+    expect(css).toContain('.ny-opts{display:flex;flex-direction:column;');
+    expect(css).toMatch(/\.ny-opt\{[^}]*width:100%;[^}]*border-radius:var\(--r-chip\)/);
   });
 });

@@ -422,3 +422,36 @@ describe('7. the source after setup, and Done for a team whose part holds conten
     expect(notices()[0]!.body).toContain('grants no access');
   });
 });
+
+describe('8. a setup whose next step is the operator\'s is one Needs you row', () => {
+  const setups = async (team: string) => ((await api('GET', `/needs-you?team=${team}`)).body.items as { kind: string; title: string; source: { version: string }; open: { kind: string; id: string } }[]).filter((x) => x.kind === 'setup');
+  const teamOf = async (over: Record<string, unknown>, pc: string) => { const r = await filed(pc, over); const a = await approve(r); expect(a.status, JSON.stringify(a.body)).toBe(200); return { id: r.id, team: a.body.request.team_id as string }; };
+
+  it('shows for Source not asked and Waiting for you, opens the setup, and leaves when the state changes', async () => {
+    const o = await teamOf({}, 'ny-old-pc');
+    const [row, ...more] = await setups(o.team);
+    expect(more).toHaveLength(0);
+    expect(row).toMatchObject({ title: 'Setup: Set where the requirements or the brief come from', open: { kind: 'setup', id: o.id }, source: { version: 'not_asked:' } });
+    expect((await api('PUT', `/onboarding/${o.id}/source`, { source: { from: 'operator' } })).status).toBe(200);
+    expect((await setups(o.team)).map((x) => x.title)).toEqual(['Setup: Supply the requirements or the brief']);
+    expect((await api('PUT', `/onboarding/${o.id}/source`, { source: { from: 'coordinator' } })).status).toBe(200);
+    expect(await setups(o.team)).toHaveLength(0); // the coordinator's now
+  });
+
+  it('none while the coordinator owes it or a proposal is in review; one when a rejected proposal returns to the operator; none once Done', async () => {
+    expect(await setups((await teamOf({ source: { from: 'existing', ref: 'docs/spec.md' } }, 'ny-ex-pc')).team)).toHaveLength(0);
+    expect(await setups((await teamOf({ source: { from: 'coordinator' } }, 'ny-co-pc')).team)).toHaveLength(0);
+    const req = [{ kind: 'fr', title: 'Export', text: 'The data exports as CSV.' }];
+    const r = await teamOf({ source: { from: 'operator' }, requirements: req }, 'ny-rej-pc');
+    expect(await setups(r.team)).toHaveLength(0); // in review: the proposal itself is what waits
+    expect((await api('POST', `/proposals/${proposalsOf(r.team)[0]!.id}/reject`, { note: 'Too vague' })).status).toBe(200);
+    expect((await setups(r.team)).map((x) => x.source.version)).toEqual([`returned:${proposalsOf(r.team)[0]!.id}`]);
+    // Returned to the coordinator (it derives them): theirs, not a row.
+    const c = await teamOf({ source: { from: 'coordinator' }, requirements: req }, 'ny-rejc-pc');
+    expect((await api('POST', `/proposals/${proposalsOf(c.team)[0]!.id}/reject`, { note: 'Too vague' })).status).toBe(200);
+    expect(await setups(c.team)).toHaveLength(0);
+    const d = await teamOf({ source: { from: 'operator' }, requirements: req }, 'ny-done-pc');
+    expect((await api('POST', `/proposals/${proposalsOf(d.team)[0]!.id}/apply`, {})).status).toBe(200);
+    expect(await setups(d.team)).toHaveLength(0);
+  });
+});

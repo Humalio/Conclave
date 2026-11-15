@@ -16,7 +16,7 @@ export const BP_WRITING = 'Blueprint items are read by the operator, a person, i
   + 'An acceptance criterion says given, when and then, and its title says what is checked. '
   + 'Cite sources as [[note]] links to vault files. Anything evidence rests on (ledgers, records, registers) lives in the vault; repo paths and commits go under Records. '
   + 'Tracker story ids, pull request numbers and other outside ids go in fields.external as {system, id}, not in the body.'
-  + ' A question to someone outside the team says in fields.purpose what the team does today and what each answer would change; when work waits on an answer, link the question to that work with blocks. Ask the operator with team_ask, not with a Blueprint question.';
+  + ' A question to someone outside the team says in fields.purpose what the team does today and what each answer would change; when work waits on an answer, link the question to that work with blocks. Ask the operator with team_ask, not with a Blueprint question. Mark a requirement unclear rather than guess, and ask the operator what is unclear with one team_ask that names the requirement; set unclear_ask to that question. Or put the question itself in unclear_ask, as its text or {question, options, recommended}, and the write asks it for you.';
 
 /** When to file feedback: problems, and steps that could cost fewer calls, tokens or minutes. */
 export const FEEDBACK_HABIT = 'If a Conclave tool is missing, broken or confusing, makes you work around it, or a step costs more calls, tokens or time than it should, '

@@ -64,6 +64,14 @@ export function phaseOf(status: string): TurnPhase | null {
 /** The statuses an assignee holds a task in while it waits on them: released together when a poll member's lease passes. */
 export const HELD_STATUSES = ['assigned', 'changes_requested', 'in_progress'] as const;
 const HELD = HELD_STATUSES.map((x) => `'${x}'`).join(',');
+/**
+ * SQL: an operator hold covers this member, so no sweep may release or flag its work (docs/specification.md, "Task turns
+ * and deadlines"): a lockdown of all agent writes, of the team, of the agent, or of the PC its team key is bound to. The
+ * flags are the ones safety/lockdown.ts writes; lifting one restarts the member's lease (Teams.holdLifted).
+ */
+export const heldByLockdown = (team: string, agent: string, credential: string): string => `EXISTS (SELECT 1 FROM system_settings s WHERE s.value='true'
+  AND s.key IN ('emergency.writes_disabled', 'emergency.team_disabled.'||${team}, 'emergency.agent_disabled.'||${agent},
+    'emergency.pc_disabled.'||COALESCE((SELECT c.bound_machine_id FROM credentials c WHERE c.id=${credential}),'')))`;
 const WAKE_VERB: Record<TurnPhase, string> = { queued: 'start', work: 'continue', review: 'review' };
 /** The wake text a hand-off gives for an on-demand holder ("review task_x"): the same words for the console's waiting rows. */
 export const wakeText = (phase: TurnPhase, taskId: string): string => `${WAKE_VERB[phase]} ${taskId}`;
@@ -205,18 +213,22 @@ export class TurnService {
    * What the upkeep tick acts on (one query each, §8.4): poll members whose lease has passed (MAX(last activity,
    * busy_until) + lease_minutes < now, §8.6 and 8.A2) and who still hold a queued or started task; and on-demand work turns past their
    * check-in time and not yet flagged overdue. A queued task never lapses on its own: only its holder's silence releases it.
+   * A paused team, an away member and a member under an operator lockdown are skipped: nothing is swept while they are held.
    */
   sweep(now = Date.now()): { lapsed: { team_id: string; agent_id: string }[]; overdue: { id: string }[] } {
     const lapsed = this.db.prepare(`SELECT m.team_id, m.agent_id FROM team_members m
         JOIN teams t ON t.id=m.team_id AND t.status='running' AND t.delivery_mode='poll'
         LEFT JOIN agents a ON a.id=m.agent_id
-      WHERE m.removed_at IS NULL
+      WHERE m.removed_at IS NULL AND COALESCE(m.away_until,0) <= ? AND NOT ${heldByLockdown('m.team_id', 'm.agent_id', 'm.credential_id')}
         AND MAX(m.joined_at, COALESCE(m.last_work_next_at,0), COALESCE(a.last_seen_at,0), COALESCE(m.busy_until,0)) + t.lease_minutes*60000 < ?
         AND EXISTS (SELECT 1 FROM tasks k WHERE k.team_id=m.team_id AND k.assignee_agent_id=m.agent_id AND k.status IN (${HELD}))`)
-      .all(now) as unknown as { team_id: string; agent_id: string }[];
+      .all(now, now) as unknown as { team_id: string; agent_id: string }[];
+    // An away assignee (a one-agent checkout, docs/checkout.md §9 F1) keeps its tasks: they are never flagged overdue meanwhile.
     const overdue = this.db.prepare(`SELECT k.id FROM tasks k JOIN teams t ON t.id=k.team_id AND t.status='running'
-      WHERE t.delivery_mode='on_demand' AND k.status='in_progress' AND k.overdue_at IS NULL AND k.lease_expires_at IS NOT NULL AND k.lease_expires_at<?`)
-      .all(now) as unknown as { id: string }[];
+      WHERE t.delivery_mode='on_demand' AND k.status='in_progress' AND k.overdue_at IS NULL AND k.lease_expires_at IS NOT NULL AND k.lease_expires_at<?
+        AND NOT EXISTS (SELECT 1 FROM team_members m WHERE m.team_id=k.team_id AND m.agent_id=k.assignee_agent_id AND m.removed_at IS NULL
+          AND (COALESCE(m.away_until,0) > ? OR ${heldByLockdown('m.team_id', 'm.agent_id', 'm.credential_id')}))`)
+      .all(now, now) as unknown as { id: string }[];
     return { lapsed, overdue };
   }
   /**
