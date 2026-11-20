@@ -194,7 +194,7 @@ describe('a bad unclear_ask says what to pass', () => {
     expect(item(key).fields['unclear_ask']).toBe(next.asks![0]!.decision_id);
   });
 
-  it('gives agents the guidance sentence Bruno approved for Clarify, word for word', () => {
+  it('gives agents the guidance sentence the operator approved for Clarify, word for word', () => {
     expect(BP_WRITING).toContain('Mark a requirement unclear rather than guess, and ask the operator what is unclear with one team_ask that names the requirement; set unclear_ask to that question.');
   });
 

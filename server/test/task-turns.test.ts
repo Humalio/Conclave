@@ -35,8 +35,8 @@ async function session(secret: string): Promise<Call> {
   return async (name, args = {}) => (await c.callTool({ name, arguments: { session_token: token, ...args } })) as Res;
 }
 let n = 0;
-/** A running team: coordinator, two workers and two reviewers, all logged in; polling unless `on_demand`. */
-async function team(mode: 'on_demand' | 'poll' = 'poll') {
+/** A running team: coordinator, two workers and two reviewers, all logged in (one delivery model: every team is woken). */
+async function team() {
   const name = `TT${++n}`;
   const agent = async (label: string) => {
     const a = app.keys.createAgent(`${name}-${label}`, null, sys);
@@ -48,7 +48,6 @@ async function team(mode: 'on_demand' | 'poll' = 'poll') {
   const id = app.teams.create({ name, goal: 'g', members: [{ agent_id: c!.id, role: 'coordinator', credential_id: c!.cred }, { agent_id: w!.id, role: 'worker', credential_id: w!.cred },
     { agent_id: w2!.id, role: 'worker', credential_id: w2!.cred }, { agent_id: r!.id, role: 'reviewer', credential_id: r!.cred }, { agent_id: r2!.id, role: 'reviewer', credential_id: r2!.cred }] }, sys).id;
   app.teams.start(id, sys);
-  if (mode === 'on_demand') expect((await api('PATCH', `/teams/${id}`, { delivery_mode: 'on_demand' })).body.team.delivery_mode).toBe('on_demand');
   const s = async (x: typeof c) => ({ ...x!, call: await session(x!.secret) });
   return { id, c: await s(c), w: await s(w), w2: await s(w2), r: await s(r), r2: await s(r2) };
 }
@@ -105,7 +104,13 @@ describe('a turn per transition', () => {
     const X = await team();
     const id = await assigned(X);
     expect(only(id).seen_at).toBeNull();
-    const r = ok(await X.w.call('work_next', { wait_seconds: 0 }));
+    let r = ok(await X.w.call('work_next', { wait_seconds: 0 }));
+    if (r.item?.kind === 'notice') {
+      expect(only(id).seen_at).toBeNull(); // the notice names the task; it is not a full read of it
+      ok(await X.w.call('work_ack', { item_id: r.item.item_id }));
+      r = ok(await X.w.call('work_next', { wait_seconds: 0 }));
+    }
+    expect(r.item?.kind).not.toBe('notice');
     expect(JSON.stringify(r)).toContain(id);
     expect(only(id).seen_at).not.toBeNull();
   });
@@ -157,7 +162,7 @@ describe('a turn per transition', () => {
     expect(wk!.seen_at).toBe(wk!.opened_at);
   });
   it('task_progress until moves the work turn\'s deadline with the task\'s', async () => {
-    const X = await team('on_demand');
+    const X = await team();
     const id = await started(X);
     const until = Date.now() + 3 * 3600_000;
     ok(await X.w.call('task_progress', { task_id: id, note: 'long run', until }));
@@ -176,7 +181,7 @@ describe('a turn per transition', () => {
     expect(only(id).seen_at).not.toBeNull();
   });
   it('request_changes closes the review turn and queues the task for the assignee again', async () => {
-    const X = await team('on_demand');
+    const X = await team();
     const id = await inReview(X);
     ok(await X.r.call('task_review', { task_id: id, decision: 'request_changes', comments: 'fix it', version: app.teams.task(id)!.version }));
     expect(turns(id).at(-2)).toMatchObject({ phase: 'review', close_reason: 'acted' });
@@ -216,7 +221,7 @@ describe('a turn per transition', () => {
     expect(turns(b).at(-1)).toMatchObject({ close_reason: 'released' });
   });
   it('member removal hands a waiting review to a coordinator when coordinators review: one turn, and an on-demand coordinator is told', async () => {
-    const X = await team('on_demand');
+    const X = await team();
     expect((await api('PATCH', `/teams/${X.id}`, { coordinator_reviews: true })).status).toBe(200);
     app.teams.removeMember(X.id, X.r2.id, sys);
     const id = await inReview(X);
@@ -261,7 +266,7 @@ describe('a turn per transition', () => {
     expect(turns(id).at(-1)).toMatchObject({ phase: 'queued', close_reason: 'cancelled' });
   });
   it('a task never has two open turns, through a whole review round trip', async () => {
-    const X = await team('on_demand');
+    const X = await team();
     const id = await inReview(X);
     ok(await X.r.call('task_review', { task_id: id, decision: 'request_changes', comments: 'again', version: app.teams.task(id)!.version }));
     ok(await X.w.call('task_start', { task_id: id }));
@@ -283,20 +288,14 @@ describe('a turn per transition', () => {
 });
 
 describe('the hand-off', () => {
-  it('on demand, assignment sends the assignee a task_assigned notice and a work item (8.A10)', async () => {
-    const X = await team('on_demand');
+  it('assignment sends the assignee a task_assigned notice and a work item, in every team (8.A10)', async () => {
+    const X = await team();
     const id = await assigned(X);
     const nt = notices(X.w.id, 'task_assigned');
     expect(nt).toHaveLength(1);
     expect(nt[0]!.body).toContain(id);
     expect(items(X.w.id, 'task_assigned', id)).toBe(1);
     expect(only(id).phase).toBe('queued');
-  });
-  it('polling, assignment gives the work item only', async () => {
-    const X = await team();
-    const id = await assigned(X);
-    expect(notices(X.w.id, 'task_assigned')).toHaveLength(0);
-    expect(items(X.w.id, 'task_assigned', id)).toBe(1);
   });
   it('a coordinator assigning a task to itself sees the turn at once and still gets the work item', async () => {
     const X = await team();
@@ -338,23 +337,16 @@ describe('the hand-off', () => {
     expect(open(id)).toHaveLength(0);
     expect(turns(id).at(-1)).toMatchObject({ phase: 'review', close_reason: 'blocked' });
   });
-  it('handOff returns the wake text for an on-demand holder and none for a poll holder', async () => {
-    for (const mode of ['on_demand', 'poll'] as const) {
-      const X = await team(mode);
-      const id = await started(X);
-      const t = app.teams.task(id)!, tm = app.teams.team(X.id)!;
-      const h = app.teams.turns.handOff({ ...t, status: 'in_review' }, tm, X.r.id, { kind: 'agent', id: X.w.id });
-      expect(h).toMatchObject({ to: X.r.id, phase: 'review', on_demand: mode === 'on_demand', seen: false });
-      expect(h.to_label).toContain('rev');
-      if (mode === 'on_demand') {
-        expect(h.wake_text).toBe(`review ${id}`);
-        expect(wakeLine(h)).toBe(`${h.to_label} (on demand) only sees this when woken. Tell its session: review ${id}`);
-      } else {
-        expect(h.wake_text).toBeUndefined();
-        expect(wakeLine(h)).toBeNull();
-      }
-      expect(only(id).phase).toBe('review');
-    }
+  it('handOff returns the wake text for every holder (one delivery model)', async () => {
+    const X = await team();
+    const id = await started(X);
+    const t = app.teams.task(id)!, tm = app.teams.team(X.id)!;
+    const h = app.teams.turns.handOff({ ...t, status: 'in_review' }, tm, X.r.id, { kind: 'agent', id: X.w.id });
+    expect(h).toMatchObject({ to: X.r.id, phase: 'review', on_demand: true, seen: false });
+    expect(h.to_label).toContain('rev');
+    expect(h.wake_text).toBe(`review ${id}`);
+    expect(wakeLine(h)).toContain(`Tell its session: review ${id}`);
+    expect(only(id).phase).toBe('review');
   });
   it('phaseOf maps every held status and nothing else', () => {
     expect(['assigned', 'changes_requested', 'in_progress', 'in_review', 'open', 'approved', 'blocked', 'done'].map(phaseOf))

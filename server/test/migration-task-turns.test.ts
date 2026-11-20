@@ -12,7 +12,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { migrate, migrationChecksum } from '../src/db/db.js';
 import { buildApp, type App } from '../src/app.js';
-import { ON_DEMAND_PLAYBOOKS, HANDOFF_LINE, type TurnRow } from '../src/teams/teams.js';
+import { ON_DEMAND_PLAYBOOKS, HANDOFF_LINE, REFINE_LINE, type TurnRow } from '../src/teams/teams.js';
 import { testConfig } from './hub.js';
 
 const MIGRATIONS = join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'db', 'migrations');
@@ -34,7 +34,7 @@ const upTo = (last: number, eol: 'lf' | 'crlf' = 'lf'): string => {
 };
 
 /** The on-demand text shipped before 0107: the constant without the hand-off line. */
-const OLD_OD = { coordinator: ON_DEMAND_PLAYBOOKS.coordinator!.replace(' ' + HANDOFF_LINE, ''), worker: ON_DEMAND_PLAYBOOKS.worker!.replace(' ' + HANDOFF_LINE, '') };
+const OLD_OD = { coordinator: ON_DEMAND_PLAYBOOKS.coordinator!.replace(' ' + REFINE_LINE, '').replace(' ' + HANDOFF_LINE, ''), worker: ON_DEMAND_PLAYBOOKS.worker!.replace(' ' + HANDOFF_LINE, '') };
 const count = (hay: string, needle: string) => hay.split(needle).length - 1;
 
 const MIN = 60_000, HOUR = 60 * MIN;
@@ -132,7 +132,8 @@ describe('migration 0107', () => {
     const db = app!.db;
     expect(db.prepare('SELECT version FROM schema_migrations WHERE version=107').get()).toBeTruthy();
     const cols = (t: string) => (db.prepare(`PRAGMA table_info(${t})`).all() as { name: string; notnull: number; dflt_value: string | null }[]);
-    expect(cols('task_turns').map((c) => c.name)).toEqual(['id', 'task_id', 'team_id', 'phase', 'holder_agent_id', 'opened_at', 'opened_by_kind', 'opened_by_id',
+    // Migration 0153 adds delivered_at and delivery_reason after these.
+    expect(cols('task_turns').map((c) => c.name).slice(0, 14)).toEqual(['id', 'task_id', 'team_id', 'phase', 'holder_agent_id', 'opened_at', 'opened_by_kind', 'opened_by_id',
       'seen_at', 'due_at', 'overdue_at', 'wake_noted_at', 'closed_at', 'close_reason']);
     expect(cols('tasks').find((c) => c.name === 'started_at')).toMatchObject({ notnull: 0 });
     expect(cols('team_members').find((c) => c.name === 'busy_until')).toMatchObject({ notnull: 0 });
@@ -179,9 +180,10 @@ describe('migration 0107', () => {
     const copy = (team: string, role: string) => (db.prepare('SELECT playbook FROM team_roles WHERE team_id=? AND role=?').get(team, role) as { playbook: string }).playbook;
     const defaults = (role: string) => (db.prepare('SELECT playbook FROM team_role_defaults WHERE role=?').get(role) as { playbook: string }).playbook;
     for (const r of ['coordinator', 'worker'] as const) {
-      expect(defaults(r)).toBe(`${oldPoll[r]} ${HANDOFF_LINE}`);
+      // Migration 0153 (one delivery model) then moves every shipped copy and the defaults to the act-when-woken texts.
+      expect(defaults(r)).toBe(ON_DEMAND_PLAYBOOKS[r]);
       expect(copy(ids.team, r)).toBe(defaults(r));
-      // The on-demand copy now equals the shipped constant, so switchMode() still swaps it.
+      // The on-demand copy equals the shipped constant.
       expect(copy(ids.od, r)).toBe(ON_DEMAND_PLAYBOOKS[r]);
       expect(count(copy(ids.od, r), HANDOFF_LINE)).toBe(1);
     }

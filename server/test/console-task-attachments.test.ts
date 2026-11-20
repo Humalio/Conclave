@@ -85,6 +85,12 @@ describe('the brief', () => {
     expect(L.taBriefH({ id: 't', attachments: { brief: null, rounds: [] } }, true)).toContain('PNG, JPEG, GIF, WebP or HTML, 1 MB at a time.');
     expect(L.taBriefH({ id: 't', attachments: { brief: null, rounds: [] } }, false)).toBe('');
   });
+
+  it('wraps the hint on a phone, since .meta alone stays on one line', () => {
+    expect(L.taBriefH({ id: 't', attachments: { brief: null, rounds: [] } }, true)).toContain('<span class="ta-ht"><b>Attachments</b><span class="meta">');
+    expect(css).toMatch(/^\.meta\{[^}]*white-space:nowrap/m);
+    expect(css).toMatch(/^\.ta-ht \.meta\{[^}]*white-space:normal/m);
+  });
 });
 
 describe('review rounds', () => {

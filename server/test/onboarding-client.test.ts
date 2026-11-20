@@ -251,7 +251,10 @@ describe('setup.mjs end to end', () => {
       expect(mcp.headersHelper).toContain('agent-hub-headers.mjs');
       expect(mcp.headersHelper).toContain(f.replace(/\\/g, '/'));
       expect(JSON.parse(readFileSync(join(f, '.claude', 'settings.local.json'), 'utf8')).enabledMcpjsonServers).toEqual(['agent-hub']);
-      expect(readFileSync(join(f, 'CLAUDE.md'), 'utf8')).toContain(cfg.session_var);
+      const claudeMd = readFileSync(join(f, 'CLAUDE.md'), 'utf8');
+      expect(claudeMd).toContain('through the Conclave connector on this PC');
+      expect(claudeMd).not.toContain(cfg.session_var);
+      expect(claudeMd).not.toMatch(/keys.env|headers helper|helper.log|codex-bridge/);
       expect(readFileSync(join(f, '.git', 'info', 'exclude'), 'utf8').split(/\r?\n/)).toContain('*');
       expect(claude.projects[f.replace(/\\/g, '/')]?.hasTrustDialogAccepted).toBe(true);
     }

@@ -26,6 +26,8 @@ const key = (kind: LockKind, id?: string) => kind === 'writes' ? 'emergency.writ
 export class Lockdown {
   constructor(private readonly db: Db, private readonly vaultAlias: string) {}
   /** Set in app.ts: a scope was lifted that had been on since `since`, so the teams restart the leases it held (Teams.holdLifted). */
+  /** Set in app.ts: a lockdown went on (a PC's push stream closes). */
+  onSet?: (kind: LockKind, id: string | undefined) => void;
   onLift?: (kind: LockKind, id: string | undefined, since: number) => void;
 
   private get(k: string): boolean {
@@ -35,6 +37,7 @@ export class Lockdown {
   set(kind: LockKind, id: string | undefined, on: boolean, _adminId: string | null): void {
     if (kind !== 'writes' && !id) throw new KeyError('invalid_argument', `${kind} lockdown needs an id`);
     const k = key(kind, id);
+    if (on) this.onSet?.(kind, id);
     if (on) this.db.prepare('INSERT INTO system_settings(key,value,updated_at) VALUES (?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at').run(k, 'true', Date.now());
     else {
       const was = this.db.prepare("SELECT updated_at FROM system_settings WHERE key=? AND value='true'").get(k) as { updated_at: number } | undefined;

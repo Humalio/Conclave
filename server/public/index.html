@@ -14,7 +14,7 @@
 <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
 <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></symbol>
 <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/></symbol>
-<symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol><symbol id="i-swap" viewBox="0 0 24 24"><path d="M4 8h15M15 4l4 4-4 4M20 16H5M9 12l-4 4 4 4"/></symbol>
+<symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol><symbol id="i-swap" viewBox="0 0 24 24"><path d="M4 8h15M15 4l4 4-4 4M20 16H5M9 12l-4 4 4 4"/></symbol><symbol id="i-grid" viewBox="0 0 24 24"><path d="M4 5h16v14H4zM4 10h16M4 14.5h16M9.5 5v14"/></symbol>
 <symbol id="i-back" viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></symbol>
 <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5.5A1.5 1.5 0 0 0 14.5 4h-9A1.5 1.5 0 0 0 4 5.5v9A1.5 1.5 0 0 0 5.5 16H8"/></symbol>
 <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></symbol>
@@ -141,6 +141,7 @@
       <button data-go="req"><svg class="i"><use href="#i-clock"/></svg>Requests<i class="bdg" data-request-badge hidden></i></button>
       <button data-go="shares"><svg class="i"><use href="#i-link"/></svg>Shares</button>
       <button data-go="reset"><svg class="i"><use href="#i-rot"/></svg>Reset</button>
+      <button data-go="relays"><svg class="i"><use href="#i-pc"/></svg>Relays</button>
     </nav>
     <button type="button" class="btn sm ws-grant" data-sec-new aria-haspopup="true"><svg class="i"><use href="#i-plus"/></svg>New<svg class="i"><use href="#i-cdown"/></svg></button>
     </div>
@@ -163,6 +164,7 @@
       <button data-vault-tab="act"><svg class="i"><use href="#i-pulse"/></svg>Activity</button>
       <button data-vault-tab="conf"><svg class="i"><use href="#i-warn"/></svg>Conflicts</button>
       <button data-go="knowledge"><svg class="i"><use href="#i-graph"/></svg>Knowledge</button>
+      <button data-go="vreaders"><svg class="i"><use href="#i-pc"/></svg>Readers</button>
     </nav>
     <nav class="tabs only-m" role="tablist" aria-label="Vault views">
       <button type="button" role="tab" data-vault-tab="contents">Contents</button>
@@ -170,6 +172,7 @@
       <button type="button" role="tab" data-vault-tab="act">Activity</button>
       <button type="button" role="tab" data-vault-tab="conf">Conflicts</button>
       <button type="button" role="tab" data-go="knowledge">Knowledge</button>
+      <button type="button" role="tab" data-go="vreaders">Readers</button>
     </nav>
   </section>
   <section class="workspace-bar" id="auditBar" aria-labelledby="auditTitle" hidden>

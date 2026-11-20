@@ -1,6 +1,6 @@
-# Conclave bridge
+# Standalone file transfer bridge
 
-The bridge runs under the PC user's account and moves files for that PC's authorized jobs. It requires Node.js 24 or later and has no package dependencies. Use the bridge program delivered by your hub so both ends use the same protocol. See [transfer design](../docs/transfers.md).
+For new installations, configure [file transfers in the Conclave connector](../docs/connector.md#file-transfers). This guide covers the older standalone bridge. It moves files within approved local folders, runs under your account, and requires Node.js 24 or later. Use the bridge program supplied by your hub so both sides use the same protocol. [How transfers work](../docs/transfers.md)
 
 ## Install and check
 

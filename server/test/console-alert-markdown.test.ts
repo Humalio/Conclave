@@ -20,7 +20,8 @@ const ctx: Record<string, unknown> = {
   nyKind: () => ['Change note'], nyUntil: () => '', ago: () => '2m',
 };
 vm.createContext(ctx);
-vm.runInContext(`function mdText(t, n) { const s = mdPlain(t); return esc(n ? trunc(s, n) : s); }\n${line('const nySum = ')}\n${line('const nyMeta = ')}\nthis.out = { mdText, nyMeta };`, ctx);
+vm.runInContext(`function mdText(t, n) { const s = mdPlain(t); return esc(n ? trunc(s, n) : s); }\n${line('const nyOffline = ')}
+${line('const nySum = ')}\n${line('const nyMeta = ')}\nthis.out = { mdText, nyMeta };`, ctx);
 const F = ctx.out as Record<string, (...a: any[]) => string>;
 
 describe('console: alert messages show Markdown as plain text', () => {
@@ -46,7 +47,7 @@ describe('console: alert messages show Markdown as plain text', () => {
   });
   it('the Needs you, For awareness and Later rows strip the marks from their titles', () => {
     for (const head of ['const nyRow = ', 'const awRow = ']) expect(line(head)).toContain("title: mdPlain(r.title || '')");
-    expect(js).toContain("title: mdPlain(r.title || ''), meta: [nyKind(r.kind)[0], `Later, ${nyLaterWhen(r.later)}`, r.reason && mdPlain(r.reason)]");
+    expect(js).toContain("title: mdPlain(r.title || ''), meta: [nyKind(r.kind)[0], `Later, ${nyLaterWhen(r.later)}`, r.reason && mdPlain(nyOffline(r, r.reason))]");
   });
   it('the Needs you card prints its title and summary, and the For awareness card its reason, as plain text', () => {
     expect(js).toContain('<h3 class="ny-msg">${mdText(title || \'\')}</h3>');

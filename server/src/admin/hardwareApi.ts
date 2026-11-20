@@ -1,9 +1,10 @@
-/** Admin routes for Hardware (docs/hardware.md#admin-api): machines offered for compute, their waiting lists and flags. */
+/** Admin routes for Hardware (docs/hardware.md#admin-api): machines offered for compute, their waiting lists, flags, pause,
+   allowances, and What ran with its analysis for a period. */
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import type { Actor } from '../audit/audit.js';
 import type { Hardware } from '../hardware/hardware.js';
-import { DAYS } from '../hardware/hardware.js';
+import { DAYS, PERIODS, type Period } from '../hardware/hardware.js';
 
 export interface HardwareApiDeps { hardware: Hardware }
 
@@ -13,13 +14,25 @@ const COMPUTE = z.object({
   memory_gb: z.number().positive().max(100_000).nullable().optional(), cpus: z.number().int().positive().max(100_000).nullable().optional(),
   gpu: z.string().max(120).nullable().optional(), notes: z.string().max(1000).nullable().optional(),
   teams: z.array(z.string().min(1).max(100)).max(100).default([]),
+  shared_with_people: z.boolean().optional(),
+  allowances: z.record(z.string().min(1).max(100), z.number().min(0.25).max(24).nullable()).optional(),
 }).strict();
+const ID = z.string().max(100).optional();
+const QUERY = z.object({
+  period: z.enum(Object.keys(PERIODS) as [Period, ...Period[]]).default('7d'), tz: z.string().max(64).optional(),
+  machine: ID, team: ID, agent: ID, q: z.string().max(200).optional(),
+}).passthrough();
 
 export function registerHardwareApi(api: FastifyInstance, d: HardwareApiDeps, actor: (req: FastifyRequest) => Actor): void {
   const { hardware } = d;
   const param = (req: FastifyRequest, k: string): string => (req.params as Record<string, string>)[k] ?? '';
 
-  api.get('/api/hardware', async () => hardware.overview());
+  api.get('/api/hardware', async (req) => {
+    const q = QUERY.parse(req.query ?? {});
+    return hardware.overview({ period: q.period, tz: q.tz ?? null, filter: { machine: q.machine || null, team: q.team || null, agent: q.agent || null, q: q.q || null } });
+  });
+  api.post('/api/hardware/:pcId/pause', async (req) => { hardware.pause(param(req, 'pcId'), actor(req)); return hardware.overview(); });
+  api.post('/api/hardware/:pcId/resume', async (req) => { hardware.resume(param(req, 'pcId'), actor(req)); return hardware.overview(); });
   api.put('/api/hardware/:pcId', async (req) => {
     hardware.register(param(req, 'pcId'), COMPUTE.parse(req.body ?? {}), actor(req));
     return hardware.overview();

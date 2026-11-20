@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { startProblem } from './codex-wake.mjs';
 
 const WIN = platform() === 'win32';
-const SES = '00000000-0000-7000-8000-000000000000';
+const SES = '019a0000-0000-7000-8000-000000000000';
 const WAKE = fileURLToPath(new URL('./codex-wake.mjs', import.meta.url));
 const SECRET = 'sekret-value-that-must-never-be-printed';
 

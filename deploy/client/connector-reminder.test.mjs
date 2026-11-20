@@ -15,7 +15,13 @@ import { putHub, putAgentKey, caFingerprint } from './connector/keyfile.mjs';
 import { registerFolder, repairFolder } from './connector/register.mjs';
 import { reminderLine, senderName } from './connector/reminder.mjs';
 import { runHook } from './connector/hook.mjs';
-import { HOOK_EVENTS, hookCommand, writeHookEntries, hasHookEntries, hasStrayHook } from './connector/entries.mjs';
+import { startBroker } from './connector/broker.mjs';
+import { approveFolderByConnector } from './connector/approvals.mjs';
+import { resolveFolder } from './connector/registry.mjs';
+process.env.CONCLAVE_KEY_STORE = 'file';
+/** The connector's broker for a test home, with the folder allowed as if the PC user had clicked: hooks and sessions ask it. */
+const connector = (s) => { approveFolderByConnector(s.home, s.folder, resolveFolder(s.home, s.folder).binding); return startBroker({ home: s.home, deps: { renewMs: 3_600_000 } }); };
+import { HOOK_EVENTS, CONTEXT_HOOK_EVENTS, hookCommand, contextHookCommand, writeHookEntries, hasHookEntries, hasContextHookEntries, hasStrayHook } from './connector/entries.mjs';
 import { entries } from './connector/manifest.mjs';
 import { canonicalFolder, WIN } from './connector/paths.mjs';
 
@@ -37,7 +43,11 @@ function stubHub(pki) {
     req.on('data', (c) => { raw += c; });
     req.on('end', () => {
       const json = (s, b) => { res.writeHead(s, { 'content-type': 'application/json' }); res.end(JSON.stringify(b)); };
-      if (req.headers.authorization !== `Bearer ${APP}`) return json(401, { error: 'unauthorized' });
+      if (req.url.startsWith('/connector/v1/turn-tokens')) {
+        if (req.headers.authorization !== `Bearer ${APP}`) return json(401, { error: 'unauthorized' });
+        return json(200, { token: 'tok-1', agent_id: 'agt_1', label: 'Dev', expires_at: Date.now() + 900_000, ok: true });
+      }
+      if (!(req.url === '/mcp' && req.headers['x-agent-hub-session'] === 'tok-1') && req.headers.authorization !== `Bearer ${APP}`) return json(401, { error: 'unauthorized' });
       if (req.url === '/mcp') {
         const m = JSON.parse(raw), tool = m.params?.name;
         const ok = (sc) => json(200, { jsonrpc: '2.0', id: m.id, result: { content: [], structuredContent: sc } });
@@ -112,9 +122,9 @@ describe('the one reminder line', () => {
 });
 
 describe('the Claude Code hook', () => {
-  let pki, hub, s;
-  before(async () => { pki = testCa('Reminder hub CA'); hub = await stubHub(pki); s = setup(pki, hub); });
-  after(() => { for (const x of hub.sockets) x.destroy(); hub.server.close(); });
+  let pki, hub, s, brk;
+  before(async () => { pki = testCa('Reminder hub CA'); hub = await stubHub(pki); s = setup(pki, hub); brk = await connector(s); });
+  after(async () => { await brk.close(); for (const x of hub.sockets) x.destroy(); hub.server.close(); });
 
   test('at prompt submit and at session start it adds the line as context, and only that', async () => {
     for (const name of ['UserPromptSubmit', 'SessionStart']) {
@@ -172,9 +182,9 @@ describe('the Claude Code hook', () => {
 });
 
 describe('Codex gets the line at the start of a woken turn', () => {
-  let pki, hub, s;
-  before(async () => { pki = testCa('Reminder codex CA'); hub = await stubHub(pki); s = setup(pki, hub); });
-  after(() => { for (const x of hub.sockets) x.destroy(); hub.server.close(); });
+  let pki, hub, s, brk;
+  before(async () => { pki = testCa('Reminder codex CA'); hub = await stubHub(pki); s = setup(pki, hub); brk = await connector(s); });
+  after(async () => { await brk.close(); for (const x of hub.sockets) x.destroy(); hub.server.close(); });
   const run = (client) => new Promise((resolve) => {
     const c = spawn(process.execPath, [CLI, 'mcp', s.folder], { env: { ...process.env, CONCLAVE_HOME: s.home } });
     let out = '';
@@ -206,7 +216,9 @@ describe('the hook is installed only in agent folders, one entry at a time', () 
   test('registering a folder adds the two entries to its own project settings and records them; other folders and settings stay as they were', () => {
     const s = setup(pki, hub);
     const j = JSON.parse(readFileSync(join(s.folder, '.claude', 'settings.json'), 'utf8'));
-    assert.deepEqual(Object.keys(j.hooks).sort(), [...HOOK_EVENTS].sort());
+    assert.deepEqual(Object.keys(j.hooks).sort(), [...HOOK_EVENTS, ...CONTEXT_HOOK_EVENTS].sort());
+    assert.equal(hasContextHookEntries(s.folder), true, 'the silent context hook is there too');
+    assert.equal(j.hooks.Stop[0].hooks[0].command, contextHookCommand({ node: process.execPath, connector: join(s.home, 'conclave.mjs'), folder: s.folder }));
     assert.deepEqual(j.enabledMcpjsonServers, ['conclave'], 'the approval is still there');
     const cmd = j.hooks.UserPromptSubmit[0].hooks[0].command;
     assert.equal(cmd, hookCommand({ node: process.execPath, connector: join(s.home, 'conclave.mjs'), folder: s.folder }));
@@ -223,13 +235,14 @@ describe('the hook is installed only in agent folders, one entry at a time', () 
     const p = join(s.folder, '.claude', 'settings.json');
     const j = JSON.parse(readFileSync(p, 'utf8'));
     const own = { matcher: 'Bash', hooks: [{ type: 'command', command: 'echo mine' }] };
-    writeFileSync(p, JSON.stringify({ ...j, model: 'x', hooks: { ...j.hooks, PreToolUse: [own], Stop: [{ hooks: [{ type: 'command', command: 'echo their stop hook' }] }], UserPromptSubmit: [{ hooks: [{ type: 'command', command: 'echo theirs' }] }, ...j.hooks.UserPromptSubmit] } }, null, 2));
+    writeFileSync(p, JSON.stringify({ ...j, model: 'x', hooks: { ...j.hooks, PreToolUse: [own], Stop: [{ hooks: [{ type: 'command', command: 'echo their stop hook' }] }, ...(j.hooks.Stop ?? [])], UserPromptSubmit: [{ hooks: [{ type: 'command', command: 'echo theirs' }] }, ...j.hooks.UserPromptSubmit] } }, null, 2));
     const r1 = writeHookEntries(s.folder, { node: process.execPath, connector: join(s.home, 'conclave.mjs') });
     assert.deepEqual(r1.before, r1.installed, 'already there: no write');
     const k = JSON.parse(readFileSync(p, 'utf8'));
     assert.equal(k.model, 'x'); assert.deepEqual(k.hooks.PreToolUse, [own]);
     assert.equal(k.hooks.UserPromptSubmit.length, 2);
     assert.equal(k.hooks.Stop[0].hooks[0].command, 'echo their stop hook', 'their own Stop hook is theirs: left alone');
+    assert.equal(k.hooks.Stop.length, 2, 'theirs and the silent context hook');
     assert.equal(hasStrayHook(s.folder), false, 'none of ours is anywhere but at the two events');
   });
   test('repair puts back a hook that is gone or names a moved Node, and nothing else', () => {
@@ -251,8 +264,24 @@ describe('the hook is installed only in agent folders, one entry at a time', () 
 });
 
 describe('build gate: no printing Stop hook is ever registered', () => {
-  test('the events are exactly prompt submit and session start', () => {
+  test("the prompt hook's events are exactly prompt submit and session start; the silent context hook's are Stop and PostToolUse", () => {
     assert.deepEqual([...HOOK_EVENTS], ['UserPromptSubmit', 'SessionStart']);
+    assert.deepEqual([...CONTEXT_HOOK_EVENTS], ['Stop', 'PostToolUse']);
+  });
+  test('G1 allows the silent context hook at Stop and PostToolUse, and still refuses the prompt hook there', () => {
+    const base = mk();
+    mkdirSync(join(base, '.claude'));
+    const p = join(base, '.claude', 'settings.json'), node = process.execPath, connector = join(base, 'conclave.mjs');
+    writeHookEntries(base, { node, connector });
+    assert.equal(hasStrayHook(base), false, 'as installed');
+    const j = JSON.parse(readFileSync(p, 'utf8'));
+    const put = (hooks) => writeFileSync(p, JSON.stringify({ ...j, hooks }));
+    put({ ...j.hooks, Stop: [{ hooks: [{ type: 'command', command: hookCommand({ node, connector, folder: base }) }] }] });
+    assert.equal(hasStrayHook(base), true, 'the printing prompt hook at Stop');
+    put({ ...j.hooks, PostToolUse: [{ hooks: [{ type: 'command', command: hookCommand({ node, connector, folder: base }) }] }] });
+    assert.equal(hasStrayHook(base), true, 'the printing prompt hook at PostToolUse');
+    put({ ...j.hooks, PreCompact: [{ hooks: [{ type: 'command', command: contextHookCommand({ node, connector, folder: base }) }] }] });
+    assert.equal(hasStrayHook(base), true, 'the context hook outside its two events');
   });
   test('no connector source registers a hook for Stop, SubagentStop or any other event', () => {
     const dir = join(HERE, 'connector');
@@ -267,8 +296,10 @@ describe('build gate: no printing Stop hook is ever registered', () => {
     mkdirSync(join(base, '.claude'));
     writeFileSync(join(base, '.claude', 'settings.json'), JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'command', command: 'x' }] }] } }));
     const r = writeHookEntries(base, { node: process.execPath, connector: join(base, 'conclave.mjs') });
-    assert.deepEqual(Object.keys(r.installed).sort(), ['SessionStart', 'Stop', 'UserPromptSubmit']);
+    assert.deepEqual(Object.keys(r.installed).sort(), ['PostToolUse', 'SessionStart', 'Stop', 'UserPromptSubmit']);
     assert.equal(r.installed.Stop[0].hooks.length, 1);
+    assert.equal(r.installed.Stop[0].hooks[0].command, 'x', "the user's own Stop hook stays as it was");
+    assert.equal(r.installed.Stop.length, 2, 'ours is its own group beside it');
     assert.equal(hasStrayHook(base), false);
   });
   test('the hook program itself prints nothing at Stop', async () => {

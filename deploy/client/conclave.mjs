@@ -12,9 +12,16 @@
  *                                         moves an old PC to the connector: a plan by default, a rollback after
  *   conclave register --folder <f> --hub-id <id> --ca-sha256 <hex> --agent <label>
  *                                         binds a folder and writes its entry (pairing and setup call this)
+ *   conclave sync add <hub> <folder> [--name n] | list [--json] | pause <name> | resume <name> | remove <name>
+ *                                         a read-only mirror of a vault reader's scope in a folder (docs/vault-sync.md); the code is read from stdin
+ *   conclave destinations [add <folder> [--label t] | remove <id>] [--json]
+ *                                         the folders you approved for a restored team (the hub sees a label, never the path)
+ *   conclave restores                     how to open each agent of the teams restored on this PC
  *   conclave usage [on | off] [--json] [--days n]
  *                                         usage reports: turns them on or off on this PC, or shows what would be sent
  *                                         (numbers only, from the connector's registered worker sessions)
+ *   conclave hardware [on | off]          on a compute machine: measuring its CPU, memory and GPU use for the hub, on or off
+ *                                         (the whole machine, numbers only; docs/hardware.md#measuring)
  *   conclave service install | remove | status
  *                                         the logon service, as the user (no admin rights)
  *   conclave service run                  what the logon entry starts: a supervisor that keeps the worker running
@@ -48,7 +55,7 @@ import { confDir } from './connector/paths.mjs';
 import { runMcp } from './connector/mcpserver.mjs';
 import { runCheck } from './connector/check.mjs';
 import { registerFolder, repairFolder } from './connector/register.mjs';
-import { runHook, lineFor } from './connector/hook.mjs';
+import { runHook, lineFor, runContextHook } from './connector/hook.mjs';
 import { line } from './connector/reasons.mjs';
 import { collectUsage, setUsageOptIn } from './connector/usage.mjs';
 import { CONNECTOR_VERSION } from './connector/version.mjs';
@@ -60,7 +67,7 @@ import { readFileSync } from 'node:fs';
 
 const home = confDir();
 const claudeJson = process.env.CLAUDE_CONFIG_DIR ? join(process.env.CLAUDE_CONFIG_DIR, '.claude.json') : join(homedir(), '.claude.json');
-const usage = (m) => { process.stderr.write(`conclave: ${m}\nusage: conclave mcp <folder> | check [--folder f] [--probe] [--json] | repair [--folder f] [--grant-trust] [--accept-folder-changes] | register --folder f --hub-id id --ca-sha256 hex --agent label | usage [on|off] [--json] [--days n] | service install|remove|status|run | update [--check] | rollback | settings [switch on|off] | setup [schema|request|continue|status|retry] | pair --hub url --check hex | version | uninstall [--json] | disconnect --hub-id id --ca-sha256 hex [--json]\n`); process.exit(2); };
+const usage = (m) => { process.stderr.write(`conclave: ${m}\nusage: conclave mcp <folder> | check [--folder f] [--probe] [--json] | repair [--folder f] [--grant-trust] [--accept-folder-changes] | register --folder f --hub-id id --ca-sha256 hex --agent label | usage [on|off] [--json] [--days n] | destinations [add folder|remove id] | restores | hardware [on|off] | service install|remove|status|run | install-service | uninstall-service | check --hardened | update [--check] | rollback | settings [switch on|off] | setup [schema|request|continue|status|retry] | pair --hub url --check hex | version | uninstall [--json] | disconnect --hub-id id --ca-sha256 hex [--json]\n`); process.exit(2); };
 
 function flags(argv, valued, bool) {
   const out = { _: [] };
@@ -89,12 +96,29 @@ if (cmd === 'mcp') {
     if (out) process.stdout.write(out + '\n');
   } catch { /* nothing to add */ }
   process.exit(0);
+} else if (cmd === 'context-hook') {
+  // The silent context hook (docs/connector.md, Context size): reads numbers at Stop and PostToolUse and prints nothing,
+  // ever, not even on a failure (proof 1: a Stop hook that prints loops the turn). Always exit code 0.
+  try {
+    const i = rest.indexOf('--folder'), folder = i >= 0 ? rest[i + 1] : null;
+    let input = '';
+    if (folder) { process.stdin.setEncoding('utf8'); for await (const c of process.stdin) { input += c; if (input.length > 1_000_000) break; } }
+    if (folder) await runContextHook(home, resolve(folder), input);
+  } catch { /* nothing to record */ }
+  process.exit(0);
 } else if (cmd === 'reminder') {
   // The same line, for the start of a Codex turn: prints it, or nothing; always exit code 0.
   try { const i = rest.indexOf('--folder'), l = await lineFor(home, resolve(i >= 0 && rest[i + 1] ? rest[i + 1] : '.')); if (l) process.stdout.write(l + '\n'); } catch { /* nothing to add */ }
   process.exit(0);
 } else if (cmd === 'check') {
-  const f = flags(rest, ['--folder'], ['--probe', '--json']);
+  const f = flags(rest, ['--folder'], ['--probe', '--json', '--hardened']);
+  if (f.hardened) {
+    const { g6aProbe } = await import('./connector/vaultservice.mjs');
+    const g = await g6aProbe(home);
+    if (f.json) process.stdout.write(JSON.stringify(g) + '\n');
+    else { process.stdout.write(`${g.ok ? 'OK: no process of this user can read a key (G6(a) passes).' : 'PROBLEM: G6(a) does not pass on this PC.'}\n`); for (const s of g.steps) process.stdout.write(`  ${s.ok ? 'ok ' : 'FAIL'} ${s.step}\n`); }
+    process.exit(g.ok ? 0 : 1);
+  }
   const r = await runCheck(home, resolve(f.folder ?? '.'), { claudeJson, probe: !!f.probe });
   if (f.json) process.stdout.write(JSON.stringify(r) + '\n');
   else { process.stdout.write(`${r.ok ? 'OK' : 'PROBLEM'}: ${r.line}\n`); for (const s of r.steps) process.stdout.write(`  ${s.ok ? 'ok ' : 'FAIL'} ${s.step}\n`); }
@@ -109,6 +133,82 @@ if (cmd === 'mcp') {
   const f = flags(rest, ['--folder', '--hub-id', '--ca-sha256', '--agent'], []);
   if (!f.folder || !f['hub-id'] || !f['ca-sha256'] || !f.agent) usage('register needs --folder, --hub-id, --ca-sha256 and --agent');
   try { const r = registerFolder(home, resolve(f.folder), { hubId: f['hub-id'], caSha256: f['ca-sha256'], agent: f.agent, claudeJson }); process.stdout.write(`registered ${r.folder}\n`); } catch (e) { process.stderr.write(`conclave: ${e.message}\n`); process.exit(1); }
+} else if (cmd === 'sync') {
+  // Vault sync (docs/vault-sync.md, "The connector side"): a read-only mirror of a reader's scope. The code comes on stdin.
+  const o = await import('./connector/syncops.mjs');
+  const f = flags(rest, ['--name'], ['--json']);
+  const [sub, a1, a2] = f._;
+  const say = (m) => process.stdout.write(`${m}\n`), err = (m) => { process.stderr.write(`conclave: ${m}\n`); process.exit(1); };
+  if (sub === 'add') {
+    if (!a1 || !a2) usage('sync add needs a hub and a folder; the code comes on stdin');
+    let code = '';
+    process.stdin.setEncoding('utf8');
+    for await (const c of process.stdin) { code += c; if (code.length > 200) break; }
+    const r = await o.syncAdd(home, { hub: a1, folder: a2, name: f.name, code });
+    if (!r.ok) err(r.reason);
+    say(`sync "${r.name}" added: ${r.folder}. It starts with the connector's next check-in.${r.confirmed ? '' : ' (The hub did not confirm the code yet; it is retried by the hub, nothing is lost.)'}`);
+  } else if (sub === 'pause' || sub === 'resume') {
+    if (!a1) usage(`sync ${sub} needs a name`);
+    const r = o.syncSet(home, a1, sub === 'pause' ? 'paused' : 'active');
+    if (!r.ok) err(r.reason);
+    say(`sync "${r.name}" ${sub === 'pause' ? 'paused' : 'resumed'}`);
+  } else if (sub === 'remove') {
+    if (!a1) usage('sync remove needs a name');
+    const r = o.syncRemove(home, a1);
+    if (!r.ok) err(r.reason);
+    say(`sync "${r.name}" removed from this PC. The folder ${r.folder} and its .conclave-trash stay on disk; delete them if you do not want them. The reader stays in the console until the operator removes it there.`);
+  } else if (sub === 'list' || sub === undefined) {
+    const list = await o.syncList(home);
+    if (f.json) say(JSON.stringify(list));
+    else if (!list.length) say('no vault sync on this PC (conclave sync add <hub> <folder>, with the pairing code on stdin)');
+    else {
+      for (const s of list) {
+        say(`${s.name}  [${s.state}]  ${s.folder}`);
+        say(`  hub ${s.hub_id} · ${s.files} files · ${(s.bytes / 1048576).toFixed(1)} MiB · ${s.last_run_at ? `last run ${s.last_run_at}` : 'not run yet'}`);
+        if (s.local_edits) say(`  WARNING: ${s.local_edits} file${s.local_edits === 1 ? ' holds a local edit' : 's hold local edits'}; the next hub change keeps the edit in .conclave-trash and replaces the file`);
+        for (const w of s.warnings ?? []) say(`  WARNING: ${w}`);
+        for (const x of (s.refused ?? []).slice(0, 10)) say(`  refused: ${x.path} (${x.reason})`);
+        if (s.last_error) say(`  ${s.last_error}`);
+      }
+    }
+  } else usage('sync takes add <hub> <folder> [--name n], list [--json], pause <name>, resume <name> or remove <name>');
+  process.exit(0);
+} else if (cmd === 'destinations') {
+  const d = await import('./connector/destinations.mjs');
+  const f = flags(rest, ['--label'], ['--json']);
+  const [sub, arg] = f._;
+  if (sub === 'add') {
+    if (!arg) usage('destinations add needs a folder');
+    const r = d.addDestination(home, resolve(arg), f.label);
+    if (!r.ok) { process.stderr.write(`conclave: ${r.reason}\n`); process.exit(1); }
+    process.stdout.write(`${r.existed ? 'already approved' : 'approved'}: ${r.destination.label} (${r.destination.id}). The hub sees the label only, never the folder.\n`);
+  } else if (sub === 'remove') {
+    if (!arg) usage('destinations remove needs an id');
+    process.stdout.write(d.removeDestination(home, arg) ? 'removed\n' : 'no destination with that id\n');
+  } else if (sub === undefined) {
+    const list = d.listDestinations(home);
+    if (f.json) process.stdout.write(JSON.stringify(list.map(({ id, label }) => ({ id, label }))) + '\n');
+    else if (!list.length) process.stdout.write('no restore destination is approved on this PC (conclave destinations add <folder>)\n');
+    else for (const x of list) process.stdout.write(`${x.id}  ${x.label}  ${x.path}\n`);
+  } else usage('destinations takes add <folder> [--label t], remove <id> or nothing');
+  process.exit(0);
+} else if (cmd === 'restores') {
+  // The start lines of the teams restored on this PC (also on the local screen): one command per agent.
+  const { finishedLines } = await import('./connector/restore.mjs');
+  const { readKeyFile } = await import('./connector/keyfile.mjs');
+  const kf = readKeyFile(home);
+  let any = false;
+  if (kf.ok) for (const k of Object.keys(kf.data.hubs)) for (const r of finishedLines(home, k)) { any = true; process.stdout.write(`restore ${r.checkout_id}:\n`); for (const l of r.lines) process.stdout.write(`  ${l}\n`); }
+  if (!any) process.stdout.write('no restored team on this PC\n');
+  process.exit(0);
+} else if (cmd === 'hardware') {
+  const { readSettings, setSwitch } = await import('./connector/settings.mjs');
+  if (rest.length > 1 || (rest[0] && !['on', 'off'].includes(rest[0]))) usage('hardware takes on, off or nothing');
+  if (rest[0]) setSwitch(home, 'hardware', rest[0] === 'on');
+  const on = readSettings(home).hardware_opt_in === true;
+  process.stdout.write(on ? "measuring is on: a hub that has this PC as a compute machine gets the whole machine's CPU, memory and GPU use once a minute, numbers only\n"
+    : 'measuring is off: nothing is measured or sent; what the hub already has is kept under its retention rule (conclave hardware on turns it on)\n');
+  process.exit(0);
 } else if (cmd === 'usage') {
   const f = flags(rest, ['--days'], ['--json']);
   if (f._.length > 1 || (f._[0] && !['on', 'off'].includes(f._[0]))) usage('usage takes on, off or nothing');
@@ -135,6 +235,29 @@ if (cmd === 'mcp') {
   process.exit(await setupCmd(cmd, rest));
 } else if (cmd === 'version') {
   process.stdout.write(`${CONNECTOR_VERSION}\n`);
+} else if (cmd === 'install-service' || cmd === 'uninstall-service') {
+  // Hardened isolation (docs/connector.md): an administrator's step. This command never changes anything without admin rights.
+  const { installVault, uninstallVault, VAULT_LINES } = await import('./connector/vaultservice.mjs');
+  const f = flags(rest, ['--home'], ['--json']);
+  const here = dirname(fileURLToPath(import.meta.url));
+  // Elevated, the PC user's folder is not this account's: --home, CONCLAVE_HOME or SUDO_USER say whose it is.
+  const { serviceHome } = await import('./connector/vaultservice.mjs');
+  const sh = serviceHome({ flag: f.home });
+  const r = cmd === 'install-service' ? await installVault(sh.home, { appSource: here }) : await uninstallVault(sh.home);
+  if (f.json) process.stdout.write(JSON.stringify(r) + '\n');
+  else if (r.ok) process.stdout.write(cmd === 'install-service'
+    ? `Hardened isolation is on (keys of ${sh.home}): the Conclave key service holds ${r.agents} agent key(s) of ${r.hubs} hub(s), and this PC user can no longer read one. Keys the user could read before this are not changed and still work: if a leak is suspected, rotate the agent keys now. Switch hardened off with: conclave uninstall-service\n`
+    : r.already ? 'This PC already runs at Standard isolation.\n' : `Standard isolation is back: ${r.agents} agent key(s) of ${r.hubs} hub(s) are in your own key file again, none lost, and the key service is removed.\n`);
+  else process.stderr.write(`conclave: ${VAULT_LINES[r.reason] ?? r.reason}${r.detail ? ` (${r.detail})` : ''}${r.rolled_back ? ' Nothing was changed: every agent keeps working as before.' : ''}\n`);
+  process.exit(r.ok ? 0 : 1);
+} else if (cmd === 'vault') {
+  // The key service itself (run by the service manager, as its own account): `conclave vault run --vault D --view V --address A`.
+  const f = flags(rest.slice(1), ['--vault', '--view', '--address'], []);
+  if (rest[0] !== 'run' || !f.vault || !f.view || !f.address) usage('vault run needs --vault, --view and --address');
+  process.env.CONCLAVE_KEY_STORE = 'file';
+  const { startVault } = await import('./connector/vault.mjs');
+  const v = await startVault({ dir: f.vault, view: f.view, address: f.address, log: (m) => process.stderr.write(`${new Date().toISOString()} ${m}\n`) });
+  for (const s of ['SIGINT', 'SIGTERM']) process.once(s, () => v.close().then(() => process.exit(0)));
 } else if (cmd === 'service') {
   const svc = await import('./connector/service.mjs');
   const sub = rest[0];
@@ -160,14 +283,20 @@ if (cmd === 'mcp') {
     process.stdout.write(`${s.installed ? 'installed' : 'not installed'} (${s.place.name})${s.state ? `, ${s.state}` : ''}, ${s.running ? 'running' : 'not running'}\n`);
     process.exit(s.installed ? 0 : 1);
   } else if (sub === 'run') {
-    const { runSupervisor } = await import('./connector/worker.mjs');
-    await runSupervisor({ home });
+    const { runSupervisor, holderText, LOCKED } = await import('./connector/worker.mjs');
+    const r = await runSupervisor({ home });
+    if (r.locked) { process.stderr.write(`conclave: the connector service is already running (${holderText(r.locked)}); this one stops.\n`); process.exit(LOCKED); }
     process.exit(0);
   } else if (sub === 'worker') {
-    const { runWorker, RESTART, NO_HUBS } = await import('./connector/worker.mjs');
+    const { runWorker, holderText, RESTART, NO_HUBS, LOCKED } = await import('./connector/worker.mjs');
     const ac = new AbortController();
     for (const s of ['SIGINT', 'SIGTERM']) process.once(s, () => ac.abort());
     const why = await runWorker({ home, signal: ac.signal, claudeJson });
+    if (why === 'locked') {
+      const { lockHolder } = await import('./connector/processes.mjs');
+      process.stderr.write(`conclave: another connector worker is running (${holderText(lockHolder(svc.workerLockPath(home)))}); this one stops.\n`);
+      process.exit(LOCKED);
+    }
     process.exit(why === 'restart' ? RESTART : why === 'no_hubs' ? NO_HUBS : 0);
   } else usage('service needs install, remove, status or run');
 } else if (cmd === 'update') {

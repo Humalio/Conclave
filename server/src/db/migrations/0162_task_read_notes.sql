@@ -1,0 +1,1 @@
+ALTER TABLE tasks ADD COLUMN read_notes TEXT NOT NULL DEFAULT '[]';

@@ -98,7 +98,7 @@ export class KeyCollections {
     if (!app || this.keys.effectiveStatus(app) !== 'active') return no('app_inactive', `The app key this agent last signed in through on ${pc.name} is not active. Use a key prompt.`, more);
     if (app.machine_id !== pc.id) return no('not_on_pc', `This agent last signed in from another PC than ${pc.name}. Use a key prompt.`, more);
     if (t.pc.status !== 'active') return no('not_on_pc', `The PC ${pc.name} is ${t.pc.status}. Use a key prompt.`, more);
-    if (!t.session_var) return no('no_pc', 'This key has no keys.env variable yet. Use a key prompt.', more);
+    if (!t.session_var) return no('no_pc', 'This key has no session variable yet. Use a key prompt.', more);
     const since = Date.now() - SHARED_WINDOW_MS;
     // A shared app key, from the hub's own login records (another agent's session key logged in through it) or from the
     // wake (it polled for another variable with it). Either way, whoever holds it could collect for this agent.
@@ -172,7 +172,7 @@ export class KeyCollections {
   poll(app: Credential, body: Record<string, unknown>, source: string): { collect_ids: string[]; poll_after_s: number } {
     const instance = body.instance_id, sv = body.session_var;
     if (typeof instance !== 'string' || !INSTANCE_RE.test(instance)) throw new KeyError('invalid_argument', 'instance_id: the Codex wake\'s instance id, 16 to 64 letters, digits, - or _');
-    if (typeof sv !== 'string' || !SESSION_VAR_RE.test(sv)) throw new KeyError('invalid_argument', 'session_var: the entry\'s keys.env variable');
+    if (typeof sv !== 'string' || !SESSION_VAR_RE.test(sv)) throw new KeyError('invalid_argument', 'session_var: the entry\'s session variable');
     if (!app.machine_id) throw new KeyError('invalid_state', 'This app key belongs to no PC.');
     this.sweep();
     const now = Date.now();

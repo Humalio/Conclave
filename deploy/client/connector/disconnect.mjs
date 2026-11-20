@@ -13,9 +13,8 @@
  * An interruption anywhere resumes from the journal; a lost receipt is fetched again with the app key while the order
  * is open. The receipt is held in memory only, never written to disk or a log.
  */
-import https from 'node:https';
 import { readKeyFile, hubKeyOf } from './keyfile.mjs';
-import { connect } from './hubclient.mjs';
+import { connect, send } from './hubclient.mjs';
 import { runRemoval, readJournal, hubsLeft, preferences } from './uninstall.mjs';
 import { left as leftSentences, notice } from './notices.mjs';
 
@@ -25,9 +24,10 @@ export function hubCall(section, method, path, bearer, body) {
   if (!c.ok) return Promise.reject(Object.assign(new Error(c.reason), { reason: c.reason }));
   const data = body === undefined ? null : JSON.stringify(body);
   return new Promise((res, rej) => {
-    const req = https.request(`${c.hub.origin}${path}`, { method, agent: c.hub.agent, timeout: 15_000, rejectUnauthorized: true,
+    const req = send(c.hub, `${c.hub.origin}${path}`, { method, timeout: 15_000,
       headers: { authorization: `Bearer ${bearer}`, ...(data ? { 'content-type': 'application/json', 'content-length': Buffer.byteLength(data) } : {}) } }, (r) => {
       if (r.statusCode >= 300 && r.statusCode < 400) { r.resume(); return rej(Object.assign(new Error('redirect not followed'), { reason: 'hub_unreachable' })); }
+      if (c.hub.relay && r.statusCode === 502 && r.headers['x-conclave-relay']) { r.resume(); return rej(Object.assign(new Error('hub_unreachable'), { reason: 'hub_unreachable' })); }
       let raw = '';
       r.setEncoding('utf8');
       r.on('data', (x) => { raw += x; });

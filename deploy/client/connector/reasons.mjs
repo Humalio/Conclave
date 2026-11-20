@@ -6,11 +6,17 @@
  */
 export const REASONS = {
   keyfile_unreadable: { why: "This PC's Conclave key file cannot be read.", run: 'conclave check' },
+  keystore_unavailable: { why: "This PC's key store did not open the Conclave key file (its secret is gone or the platform store is locked).", run: 'conclave check' },
+  broker_unverified: { why: "Something answered at the connector's local address but could not prove it is this PC's connector, so this session did not trust it.", run: 'conclave service status' },
+  connector_not_running: { why: "The Conclave connector is not running on this PC, so this session cannot get its turn token.", run: 'conclave service status' },
+  needs_click: { why: "This is the first Conclave chat in this folder: the PC's user has to allow it once on the connector's screen.", run: 'conclave setup' },
+  vault_unavailable: { why: "The Conclave key service of this PC (hardened isolation) is not running or cannot be reached.", run: 'conclave check' },
   keyfile_unsafe: { why: "This PC's Conclave key file can be read by other users.", run: 'conclave check' },
   not_registered: { why: "This folder isn't registered with Conclave on this PC (it may be a copy or a clone).", run: 'conclave check' },
   identity_changed: { why: 'This folder was replaced or copied since it was registered, so it gets no identity.', run: 'conclave check' },
   no_hub_key: { why: 'This folder belongs to a hub that this PC has no key for.', run: 'conclave check' },
   ca_changed: { why: "The hub's certificate authority is not the one this PC paired with.", run: 'conclave check' },
+  ca_bundle: { why: "This PC's pinned hub certificate holds more than one certificate, so the connector will not use it. Pair with the hub again.", run: 'conclave check' },
   key_missing: { why: "This PC's key file has no key for this agent.", run: 'conclave check' },
   not_https: { why: "This hub's address is not a pinned https address, so the connector will not use it.", run: 'conclave check' },
   tls_refused: { why: "The hub's certificate does not match what this PC pinned.", run: 'conclave check' },
@@ -20,10 +26,13 @@ export const REASONS = {
   trust_withdrawn: { why: 'Folder trust for this agent was turned off.', run: 'conclave repair' },
   old_layout: { why: 'This folder still uses the old Conclave setup (the headers helper or the Codex bridge); `conclave migrate` moves it to the connector.', run: 'conclave migrate' },
   folder_changed: { why: 'This folder gained or changed agent settings since it was registered.', run: 'conclave repair' },
+  role_file_missing: { why: "This Codex folder's role file (AGENTS.override.md) is missing, so the agent does not get the hub's playbook.", run: 'conclave repair' },
+  role_file_edited: { why: "This Codex folder's role file (AGENTS.override.md) was changed since the connector wrote it.", run: 'conclave repair' },
+  role_file_unmarked: { why: "This Codex folder's AGENTS.override.md was not written by the connector, so the agent reads it instead of the hub's playbook. Move it away first (for an old one from codex.mjs, run conclave migrate).", run: 'conclave repair' },
 };
 
 /** The order in which `conclave check` looks, so it always names one reason. */
-export const ORDER = ['old_layout', 'keyfile_unreadable', 'keyfile_unsafe', 'not_registered', 'identity_changed', 'no_hub_key', 'ca_changed', 'key_missing', 'not_https', 'entry_stale', 'trust_withdrawn', 'folder_changed', 'tls_refused', 'hub_unreachable', 'login_refused'];
+export const ORDER = ['old_layout', 'keyfile_unreadable', 'keystore_unavailable', 'vault_unavailable', 'keyfile_unsafe', 'not_registered', 'identity_changed', 'no_hub_key', 'ca_bundle', 'ca_changed', 'key_missing', 'not_https', 'entry_stale', 'trust_withdrawn', 'folder_changed', 'role_file_unmarked', 'role_file_missing', 'role_file_edited', 'tls_refused', 'hub_unreachable', 'login_refused'];
 
 /** "Why. Run: what" for a reason code, in the fixed words. The commands act on the working folder, so no path is named. */
 export function line(code) {

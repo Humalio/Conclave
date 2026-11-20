@@ -7,11 +7,12 @@
 import type { Db } from '../db/db.js';
 import { tx } from '../db/db.js';
 import type { Audit, Actor } from '../audit/audit.js';
-import { hmacHex, randomToken, safeEqualHex } from '../util/crypto.js';
+import { hmacHex, randomToken, safeEqualHex, sha256Hex } from '../util/crypto.js';
 import { KeyError } from '../keys/keys.js';
 import type { Keys } from '../keys/keys.js';
 import type { LeakGuard } from '../guard/leakGuard.js';
 import { scrub } from '../audit/scrub.js';
+import { Streams } from './stream.js';
 
 export const ONLINE_MS = 90_000;
 /** A fetched order with no result this long after it was fetched expires, so it never blocks its kind for good. */
@@ -23,9 +24,55 @@ const RECEIPT_RE = /^ah_dsc_([a-z2-7]{12})_([a-z2-7]{32})$/;
 export const CLIENTS = ['claude_code', 'claude_desktop', 'codex'] as const;
 /** What a PC may report about its own agents; Waiting for approval and Ready to open are the hub's states. */
 export const PC_REPORTED = ['open', 'repair_connection', 'chat_in_use'] as const;
+
+/** What the console shows of the account profile a PC reported for a running agent: its name, that it is hidden, or nothing. */
+export type PcProfile = { name: string } | { hidden: true } | null;
+export const pcProfileOf = (a: { profile?: unknown; profile_hidden?: unknown } | undefined): PcProfile =>
+  typeof a?.profile === 'string' && a.profile ? { name: a.profile } : a?.profile_hidden === true ? { hidden: true } : null;
 /** At most this many versions wait for approval because PCs reported them. */
 export const MAX_PENDING_REPORTED = 5;
 export const ACTION_KINDS = ['check', 'restore', 'update'] as const;
+/** Notices that need a turn of their agent: only these make a delivery order. A directive change or a pause is shown at the next turn and starts none. */
+export const TURN_NOTICES = new Set(['task_assigned', 'changes_requested', 'review_requested', 'decision', 'task_accepted', 'team_resumed', 'plan_request', 'task_approved', 'task_blocked', 'decision_asked']);
+/** A fetched order is handed out again when its last hand-out is this old and no result has come. */
+export const REHAND_MS = 2 * 60_000;
+/** What a delivery order's result may say when no turn started. */
+export const WAKE_QUIET_MS = 30 * 60_000;
+export const WAKE_STATES = ['running', 'waiting', 'paused_usage', 'needs_approval', 'ended', 'stopped'] as const;
+/** The states of a run that still lives, which Stop can end. */
+const WAKE_LIVE: readonly string[] = ['running', 'waiting', 'paused_usage', 'needs_approval'];
+export const DELIVER_REASONS = ['pc_offline', 'chat_in_use', 'wake_held', 'agent_unknown'] as const;
+/**
+ * The oldest connector that takes each order kind the hub added after 0.9.3 (docs/connector.md, "Delivery orders"). A PC whose
+ * reported version is older is never handed such an order: it waits on the hub, and its items read "connector too old".
+ */
+export const ORDER_MIN_VERSION: Record<string, string> = { deliver: '0.9.4' };
+/** A turn token issued this recently is not counted as a second binding yet: `conclave check --probe` issues one and revokes it at once. */
+export const PROBE_GRACE_MS = 60_000;
+/** Why a delivery order was sent (spec review step 3, change 16): a fixed list, never free text. None stored means item. */
+export const DELIVER_ORDER_REASONS = ['item', 'team_start', 'write_handout', 'resume', 'reset'] as const;
+/** What a reset's result may say: a hand-opened chat the connector cannot clear (the console then shows the person's steps). */
+export const RESET_RESULT_CODES = ['reset_by_hand'] as const;
+/** Context bar levels (design 3c): amber from 60 %, red from 85 %. */
+export const CONTEXT_AMBER = 60, CONTEXT_RED = 85;
+/** Numbers older than this read as stale in the console (a PC that stopped reporting). */
+export const CONTEXT_STALE_MS = 15 * 60_000;
+/** One agent's context as a PC reports it on the check-in: numbers and a model id only. */
+export interface ContextReport {
+  agent_id: string; source: 'connector' | 'chat'; client: string; model: string; context_tokens: number; window: number | null; percent?: number | null;
+  turn_tokens: number; compacted_at: number | null; compacts: number; at: number | null;
+}
+/**
+ * A `deliver` order that is not an item (docs/connector.md, "Reason orders"): its reason says what the turn is for, from a fixed
+ * list and never free text, and it carries no items.
+ */
+export const ORDER_REASONS = ['team_start', 'write_handout', 'resume'] as const;
+export type OrderReason = (typeof ORDER_REASONS)[number];
+/** Notices that make a reason order instead of an item: a move's request asks each agent for its handout. */
+const REASON_NOTICES: Record<string, OrderReason> = { checkout_requested: 'write_handout' };
+/** At most one order per agent per this long from messages that agents wrote (they are L2; the operator's messages are never held back). */
+export const AGENT_MESSAGE_GAP_MS = 10 * 60_000;
+const DELIVER_ITEMS_MAX = 20;
 const OPEN_STATES = ['queued', 'fetched'];
 const DISCONNECT_OPEN = ['access_revoked', 'cleanup_pending'];
 /** A disconnect order still open: no result, not expired into Needs attention, not ended by Re-enrol PC. */
@@ -41,18 +88,31 @@ export interface CheckIn {
   version: string; platform?: string | null; node?: string | null; git?: string | null;
   clients?: { client: (typeof CLIENTS)[number]; version: string | null }[];
   auto_update?: boolean | null; remote_cleanup?: boolean | null; remove_connector_with_last_hub?: boolean | null; usage_opt_in?: boolean | null;
-  agents?: { agent_id: string; state: (typeof PC_REPORTED)[number] }[];
+  /** Measuring on a compute machine (`conclave hardware on|off`, docs/hardware.md#measuring). */
+  hardware_opt_in?: boolean | null;
+  /**
+   * `profile` is the PC user's local account-profile name of a run the connector started on that profile (never a login);
+   * `profile_hidden` says such a run uses a profile whose name the PC user hid. Both absent for a chat opened by hand.
+   */
+  /** How the PC protects its keys: 'standard' (a key file encrypted at rest, no admin) or 'hardened' (a key service under its own account), and where the file's key is held. */
+  isolation?: (typeof ISOLATION)[number] | null; key_store?: (typeof KEY_STORES)[number] | null;
+  agents?: { agent_id: string; state: (typeof PC_REPORTED)[number]; profile?: string; profile_hidden?: true }[];
   /** Restore destinations the PC's user approved on the PC: an id and a label, never a path. */
   destinations?: { id: string; label: string }[];
+  /** How full each agent's context is (design 3c), sent only while the PC's user opted in to usage reports. */
+  context?: ContextReport[];
 }
+export const ISOLATION = ['standard', 'hardened'] as const;
+export const KEY_STORES = ['dpapi', 'keychain', 'secret_service', 'file', 'service'] as const;
 export const DESTINATION_RE = /^dst_[a-z0-9]{6,32}$/;
 interface ReportRow {
   machine_id: string; version: string | null; platform: string | null; node: string | null; git: string | null; clients: string;
-  auto_update: number | null; remote_cleanup: number | null; remove_with_last_hub: number | null; usage_opt_in: number | null;
-  agents: string; destinations: string | null; first_check_in_at: number; last_check_in_at: number;
+  auto_update: number | null; remote_cleanup: number | null; remove_with_last_hub: number | null; usage_opt_in: number | null; hardware_opt_in: number | null;
+  agents: string; destinations: string | null; isolation: string | null; key_store: string | null; first_check_in_at: number; last_check_in_at: number;
 }
 interface ActionRow {
   id: string; machine_id: string; kind: string; state: string; payload: string; result: string | null; created_at: number; created_by: string | null;
+  agent_id: string | null; order_reason: string | null; release_at: number | null; handed_at: number | null;
   fetched_at: number | null; finished_at: number | null; expires_at: number; receipt_key_id: string | null; receipt_verifier: string | null; ended_at: number | null;
 }
 export interface UsageRow { agent_id: string; client: string; model: string; input_tokens: number; output_tokens: number; cache_read_tokens: number; cache_write_tokens: number; sessions: number; turns?: number | null }
@@ -73,7 +133,13 @@ const scrubDeep = (v: unknown): unknown => (typeof v === 'string' ? scrub(v) : A
 export class Connector {
   /** Text from the PC is L2: a key shape is refused (and alerted), other secrets are redacted (docs/connector.md). */
   guard: LeakGuard | null = null;
-  constructor(private db: Db, private keys: Keys, private audit: Audit, private pepper: string, private prices: Record<string, ModelPrice> = {}, private now: () => number = Date.now) {}
+  /** The push stream and the long poll (docs/connector.md, "The push stream"). */
+  readonly streams: Streams;
+  constructor(private db: Db, private keys: Keys, private audit: Audit, private pepper: string, private prices: Record<string, ModelPrice> = {}, private now: () => number = Date.now) {
+    this.streams = new Streams(now);
+    // A second stream from another installation or address may be a copied app key pushing the real connector off: the console alerts.
+    this.streams.onReplaced = (pc, was, to) => this.audit.alert('warning', 'connector_stream_replaced', pc, { pc, was, now: to });
+  }
 
   private pcText<T>(machineId: string, v: T): T {
     if (this.guard?.scan(v)) {
@@ -87,21 +153,283 @@ export class Connector {
     return new Set((this.db.prepare("SELECT DISTINCT agent_id FROM credentials WHERE kind='session_key' AND bound_machine_id=? AND status<>'revoked' AND agent_id IS NOT NULL").all(machineId) as { agent_id: string }[]).map((r) => r.agent_id));
   }
 
+  /** A compute machine's connector is measure-only (docs/hardware.md#measuring): check-in, samples, Update and Disconnect. */
+  /**
+   * The account profile of an agent's running relay, from the newest check-in that reports the agent: its name, `{hidden}`
+   * when the PC user hid the name, or null (not running, or a chat opened by hand). The agent page shows it under State.
+   */
+  agentProfile(agentId: string): PcProfile {
+    const row = this.db.prepare(`SELECT j.value v FROM connector_reports r, json_each(CASE WHEN json_valid(r.agents) THEN r.agents ELSE '[]' END) j
+      WHERE json_extract(j.value, '$.agent_id')=? ORDER BY r.last_check_in_at DESC LIMIT 1`).get(agentId) as { v: string } | undefined;
+    return row ? pcProfileOf(parse(row.v, {} as { profile?: string; profile_hidden?: true })) : null;
+  }
+
+  /** Whether this PC's connector reported a version older than the one an order kind needs (ORDER_MIN_VERSION). A PC that never reported is not. */
+  tooOld(machineId: string, kind: string): boolean {
+    const min = ORDER_MIN_VERSION[kind];
+    if (!min) return false;
+    const v = (this.db.prepare('SELECT version FROM connector_reports WHERE machine_id=?').get(machineId) as { version: string | null } | undefined)?.version ?? null;
+    return v !== null && cmpVersion(v, min) < 0;
+  }
+  private tooOldFail(machineId: string) {
+    const v = (this.db.prepare('SELECT version FROM connector_reports WHERE machine_id=?').get(machineId) as { version: string }).version;
+    return fail('invalid_state', `This PC runs connector ${v}, which is too old for this order. Update the connector to ${ORDER_MIN_VERSION.deliver} or newer first.`);
+  }
+
+  measureOnly(machineId: string): boolean { return !!this.db.prepare('SELECT 1 FROM hw_machines WHERE machine_id=?').get(machineId); }
+
   // ───── the connector's report ─────
-  checkIn(machineId: string, report: CheckIn): { ok: true; orders: number; ignored_agents: number } {
+  checkIn(machineId: string, report: CheckIn): { ok: true; orders: number; ignored_agents: number; measure_only?: true } {
     const r = this.pcText(machineId, report); // every string from the PC passes the leak guard
     const now = this.now(), own = this.ownAgents(machineId);
     const agents = (r.agents ?? []).filter((a) => own.has(a.agent_id));
     tx(this.db, () => {
       const had = this.db.prepare('SELECT 1 FROM connector_reports WHERE machine_id=?').get(machineId);
       const vals = [r.version, r.platform ?? null, r.node ?? null, r.git ?? null, JSON.stringify(r.clients ?? []), toInt(r.auto_update), toInt(r.remote_cleanup),
-        toInt(r.remove_connector_with_last_hub), toInt(r.usage_opt_in), JSON.stringify(agents), r.destinations === undefined ? null : JSON.stringify(r.destinations)];
-      if (had) this.db.prepare('UPDATE connector_reports SET version=?,platform=?,node=?,git=?,clients=?,auto_update=?,remote_cleanup=?,remove_with_last_hub=?,usage_opt_in=?,agents=?,destinations=?,last_check_in_at=? WHERE machine_id=?').run(...vals, now, machineId);
-      else this.db.prepare('INSERT INTO connector_reports(version,platform,node,git,clients,auto_update,remote_cleanup,remove_with_last_hub,usage_opt_in,agents,destinations,first_check_in_at,last_check_in_at,machine_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)').run(...vals, now, now, machineId);
+        toInt(r.remove_connector_with_last_hub), toInt(r.usage_opt_in), toInt(r.hardware_opt_in), JSON.stringify(agents), r.destinations === undefined ? null : JSON.stringify(r.destinations), r.isolation ?? null, r.key_store ?? null];
+      if (had) this.db.prepare('UPDATE connector_reports SET version=?,platform=?,node=?,git=?,clients=?,auto_update=?,remote_cleanup=?,remove_with_last_hub=?,usage_opt_in=?,hardware_opt_in=?,agents=?,destinations=?,isolation=?,key_store=?,last_check_in_at=? WHERE machine_id=?').run(...vals, now, machineId);
+      else this.db.prepare('INSERT INTO connector_reports(version,platform,node,git,clients,auto_update,remote_cleanup,remove_with_last_hub,usage_opt_in,hardware_opt_in,agents,destinations,isolation,key_store,first_check_in_at,last_check_in_at,machine_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').run(...vals, now, now, machineId);
       if (this.noteReported(r.version, machineId)) this.audit.alert('info', 'connector_version_pending', r.version, { version: r.version, pc: machineId });
+      // Context numbers only under the usage opt-in, and only for this PC's own agents; with the opt-in off nothing is kept from this report.
+      if (r.usage_opt_in === true) for (const c of (r.context ?? []).filter((x) => own.has(x.agent_id))) this.putContext(machineId, c, now);
     });
-    this.expire();
-    return { ok: true, orders: (this.db.prepare(`SELECT COUNT(*) n FROM pc_actions WHERE machine_id=? AND state='queued'`).get(machineId) as { n: number }).n, ignored_agents: (r.agents ?? []).length - agents.length };
+    const orders = this.isLocked(machineId) ? 0 : (this.db.prepare(`SELECT COUNT(*) n FROM pc_actions WHERE machine_id=? AND ((state='queued' AND COALESCE(release_at,0)<=?) OR (state='fetched' AND kind<>'disconnect' AND COALESCE(handed_at, fetched_at, 0)<=?))${this.tooOld(machineId, 'deliver') ? " AND kind<>'deliver'" : ''}`).get(machineId, now, now - REHAND_MS) as { n: number }).n;
+    return { ok: true, orders, ignored_agents: (r.agents ?? []).length - agents.length, ...(this.measureOnly(machineId) ? { measure_only: true as const } : {}) };
+  }
+
+  private putContext(machineId: string, c: ContextReport, now: number) {
+    // The window is kept only when it holds the context: a window smaller than what is in it is a wrong table row, so Unknown.
+    const window = c.window !== null && c.window > 0 && c.window >= c.context_tokens ? c.window : null;
+    this.db.prepare(`INSERT INTO agent_context(agent_id,machine_id,source,client,model,context_tokens,window_tokens,turn_tokens,compacted_at,compacts,read_at,reported_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+      ON CONFLICT(agent_id) DO UPDATE SET machine_id=excluded.machine_id, source=excluded.source, client=excluded.client, model=excluded.model, context_tokens=excluded.context_tokens,
+      window_tokens=excluded.window_tokens, turn_tokens=excluded.turn_tokens, compacted_at=excluded.compacted_at, compacts=excluded.compacts, read_at=excluded.read_at, reported_at=excluded.reported_at`)
+      .run(c.agent_id, machineId, c.source, c.client, c.model, c.context_tokens, window, c.turn_tokens, c.compacted_at, c.compacts, c.at, now);
+  }
+
+  /**
+   * How full an agent's context is, for the console (design 3c): `{shared: false, why}` when there is nothing to show
+   * (`no_pc`: no PC holds its key; `not_shared`: the PC's user has usage reports off, "Not shared by this PC";
+   * `not_reported`: nothing reported yet), else the numbers with the percent and the bar's level worked out here.
+   * `hand_opened` is true for a chat a person opened (the connector cannot reset it; the console shows the steps).
+   */
+  contextOf(agentId: string) {
+    const pc = this.pcOfAgent(agentId);
+    const row = this.db.prepare('SELECT * FROM agent_context WHERE agent_id=?').get(agentId) as { machine_id: string; source: string; client: string; model: string; context_tokens: number; window_tokens: number | null; turn_tokens: number; compacted_at: number | null; compacts: number; read_at: number | null; reported_at: number } | undefined;
+    const machine = pc ?? row?.machine_id ?? null;
+    const reset = this.lastReset(agentId);
+    if (!machine) return { shared: false as const, why: 'no_pc' as const, reset };
+    if (this.status(machine).usage_opt_in !== true) return { shared: false as const, why: 'not_shared' as const, reset };
+    if (!row || row.machine_id !== machine) return { shared: false as const, why: 'not_reported' as const, reset };
+    const percent = row.window_tokens ? Math.round((row.context_tokens / row.window_tokens) * 100) : null;
+    return {
+      shared: true as const, source: row.source, hand_opened: row.source === 'chat', client: row.client, model: row.model,
+      context_tokens: row.context_tokens, window: row.window_tokens, percent,
+      level: percent === null ? null : percent >= CONTEXT_RED ? 'red' as const : percent >= CONTEXT_AMBER ? 'amber' as const : 'ok' as const,
+      turn_tokens: row.turn_tokens, compacted_at: row.compacted_at, compacts: row.compacts, read_at: row.read_at, reported_at: row.reported_at,
+      stale: this.now() - row.reported_at > CONTEXT_STALE_MS, reset,
+    };
+  }
+  /** Context for several agents at once (team and task views), by agent id. */
+  contextOfMany(agentIds: string[]) { return Object.fromEntries([...new Set(agentIds)].slice(0, 200).map((id) => [id, this.contextOf(id)])); }
+
+  /** The latest reset asked for an agent: when, its state, and whether the PC answered that a person must clear the chat. */
+  private lastReset(agentId: string) {
+    const a = this.db.prepare("SELECT id, state, result, created_at, finished_at FROM pc_actions WHERE kind='deliver' AND agent_id=? AND order_reason='reset' ORDER BY created_at DESC, rowid DESC LIMIT 1").get(agentId) as { id: string; state: string; result: string | null; created_at: number; finished_at: number | null } | undefined;
+    if (!a) return null;
+    const code = parse(a.result, {} as { code?: string } | null)?.code ?? null;
+    return { order: a.id, state: a.state, asked_at: a.created_at, finished_at: a.finished_at, by_hand: code === 'reset_by_hand' };
+  }
+
+  /**
+   * Reset (design 3c): a `deliver` order with reason "reset" to the agent's PC. A session the connector started closes when its
+   * current turn ends and the next item starts fresh; a chat a person opened is answered "reset_by_hand" and the console shows
+   * the steps. A reset never folds into an item order, and a second one while the first is queued is the same order.
+   * Who may ask is checked by the caller (the operator any agent; a coordinator its own team's, in Teams). Audited.
+   * With no PC holding the agent's key there is no session the hub can reach: the answer is `by_hand` with no order,
+   * and the console shows the person's steps (/clear, or a new session).
+   */
+  resetAgent(agentId: string, actor: Actor): { order: string | null; already: boolean; by_hand: boolean } {
+    const pc = this.pcOfAgent(agentId);
+    if (!pc) {
+      this.audit.event(actor, 'agent.reset', { kind: 'agent', id: agentId }, { action: null, by_hand: true });
+      return { order: null, already: false, by_hand: true };
+    }
+    if (this.keys.machine(pc)?.status !== 'active' || this.disconnected(pc)) throw fail('invalid_state', "This agent's PC is suspended or disconnected, so the reset cannot reach it.");
+    if (this.measureOnly(pc)) throw fail('invalid_state', "This agent's PC is a compute machine; it runs no sessions.");
+    if (this.tooOld(pc, 'deliver')) throw this.tooOldFail(pc);
+    const now = this.now();
+    const r = tx(this.db, () => {
+      const open = this.db.prepare("SELECT id FROM pc_actions WHERE machine_id=? AND kind='deliver' AND state='queued' AND agent_id=? AND order_reason='reset'").get(pc, agentId) as { id: string } | undefined;
+      if (open) return { order: open.id, already: true, by_hand: false };
+      const id = `pca_${randomToken(10)}`;
+      this.db.prepare("INSERT INTO pc_actions(id,machine_id,kind,state,payload,created_at,created_by,expires_at,agent_id,order_reason) VALUES (?,?,'deliver','queued',?,?,?,?,?,'reset')")
+        .run(id, pc, JSON.stringify({ agent_id: agentId, reason: 'reset', items: [] }), now, who(actor), now + ORDER_TTL_MS, agentId);
+      return { order: id, already: false, by_hand: false };
+    });
+    if (!r.already) {
+      this.streams.signal(pc);
+      this.audit.event(actor, 'agent.reset', { kind: 'agent', id: agentId }, { action: r.order, pc });
+    }
+    return r;
+  }
+
+  // ───── turn tokens (docs/connector.md, "Isolation levels") ─────
+  /**
+   * A turn token for one agent's run on this PC, asked for by the connector with the agent's session key. The token covers that agent's tools
+   * only (no keys, no access, no new token) and lives 15 minutes unless the connector renews it. Every issue is audited. Two live
+   * bindings are looked for at the renewal (renewTurn), not here: a probe's token is issued and revoked at once and never renewed.
+   */
+  issueTurn(machineId: string, sessionKey: string, runRef: string): { token: string; agent_id: string; label: string | null; expires_at: number } {
+    const app = this.keys.machineAppCredential(machineId);
+    if (!app) throw fail('forbidden', 'This PC has no active app key.');
+    const { token, credential } = this.keys.login(app, sessionKey, { turn: { runRef } });
+    this.audit.event({ kind: 'system', id: null }, 'connector.turn_token', { kind: 'agent', id: credential.agent_id! }, { pc: machineId, run: runRef });
+    return { token, agent_id: credential.agent_id!, label: credential.label ?? null, expires_at: Date.now() + 15 * 60_000 };
+  }
+  /** Set in app.ts: why an agent's run may not keep its turn token (its team is paused, or a lockdown holds it or its PC), or null. */
+  turnHold: ((agentId: string, machineId: string) => { code: 'paused' | 'lockdown'; message: string } | null) | null = null;
+  /**
+   * Renews a run's turn token for another 15 minutes. A paused team, or a lockdown of the agent or its PC, refuses the renewal and
+   * ends the token at once (docs/connector.md, "Nothing is capped by length"): the connector then ends the run after its current call.
+   */
+  renewTurn(machineId: string, token: string) {
+    const app = this.keys.machineAppCredential(machineId);
+    if (!app) throw fail('forbidden', 'This PC has no active app key.');
+    const agentId = this.keys.turnAgent(app, token);
+    const hold = agentId ? this.turnHold?.(agentId, machineId) ?? null : null;
+    if (hold) {
+      if (this.keys.revokeTurn(app, token, hold.code)) this.audit.event({ kind: 'system', id: null }, 'connector.turn_token_end', { kind: 'agent', id: agentId! }, { pc: machineId, reason: hold.code });
+      throw fail(hold.code, hold.message);
+    }
+    const renewed = this.keys.renewTurn(app, token);
+    this.twoBindings(machineId, app, token);
+    return renewed;
+  }
+  /**
+   * Two live bindings (docs/connector.md, "Both levels"): a renewed run's token while a token of another run of the same agent is live
+   * and older than PROBE_GRACE_MS. One alert per agent, and each pair of runs joins it once (as a short hash, never a run id), so a
+   * renewal every 5 minutes does not repeat it.
+   */
+  private twoBindings(machineId: string, app: NonNullable<ReturnType<Keys['machineAppCredential']>>, token: string) {
+    const me = this.keys.turnInfo(app, token);
+    if (!me?.agent) return;
+    for (const other of this.keys.otherLiveRuns(me.agent, me.run, this.now() - PROBE_GRACE_MS)) {
+      const pair = sha256Hex([me.run ?? '', other].sort().join('|')).slice(0, 16);
+      const known = this.db.prepare("SELECT 1 FROM security_alerts s, json_each(s.details, '$.pairs') j WHERE s.type='agent_two_live_bindings' AND s.subject=? AND j.value=?").get(me.agent, pair);
+      if (!known) this.audit.digest('warning', 'agent_two_live_bindings', me.agent, { agent: me.agent, pc: machineId }, 'pairs', [pair]);
+    }
+  }
+  revokeTurn(machineId: string, token: string, reason: 'turn_ended' | 'leak_found' = 'turn_ended') {
+    const app = this.keys.machineAppCredential(machineId);
+    if (!app) throw fail('forbidden', 'This PC has no active app key.');
+    const t = reason === 'leak_found' ? this.keys.turnInfo(app, token) : null; // read before the revoke: was it still live?
+    const ended = this.keys.revokeTurn(app, token, reason);
+    if (ended) this.audit.event({ kind: 'system', id: null }, 'connector.turn_token_end', { kind: 'pc', id: machineId }, { reason });
+    // A leak is reported whatever the token's state: one that expired or was already ended still had a key in its transcript.
+    if (reason === 'leak_found') {
+      this.audit.alert('critical', 'key_in_transcript', machineId, { pc: machineId, ...(t?.agent ? { agent: t.agent } : {}), turn: t?.live ? 'ended_now' : t ? 'ended_before' : 'unknown',
+        note: 'A long-lived key was found in a session transcript at the end of a turn. Rotate the key of that agent.' });
+    }
+    return { ended };
+  }
+
+  /** The audit entry for each agent folder of this PC that the connector allowed at the upgrade without a click. Agents that are not this PC's are ignored. */
+  foldersGrandfathered(machineId: string, agentIds: string[]) {
+    const own = this.ownAgents(machineId);
+    const ok = [...new Set(agentIds)].filter((a) => own.has(a));
+    for (const a of ok) this.audit.event({ kind: 'system', id: null }, 'connector.folder_grandfathered', { kind: 'agent', id: a }, { pc: machineId });
+    return { audited: ok.length };
+  }
+
+  // ───── the wake (docs/connector.md, "The wake") ─────
+  /** Set in app.ts: the task turns the hub keeps (who each task waits on), read-only, for the completion check. */
+  turns: { held(agentId: string): { task_id: string; phase: string }[]; open(taskId: string): boolean; paused?(agentId: string): boolean } | null = null;
+  /**
+   * What the connector reports about a run it started for one of this PC's agents (docs/connector.md, "The wake"): its state, the task
+   * and session, and when it last did anything. Numbers and fixed words only. One row per agent holds its latest run, and one run is one
+   * clean record: it starts once (`started_at`, one `connector.wake_running` entry), a heartbeat changes nothing but the activity time,
+   * and "waiting" is a field, not a state: an item for another task queued behind the run sets `waiting_on`, the run keeps its state,
+   * start and task, and nothing is audited. A pause or a needed approval is audited once when it begins; a return to running within the
+   * same run is not a new start. A report names its run (`run`; older connectors: its task and session): an end reported for an
+   * earlier run never ends the run that followed it.
+   */
+  wakeReport(machineId: string, b: { agent_id: string; state: (typeof WAKE_STATES)[number]; run?: string; task?: string; session_id?: string; last_activity?: number; resumes_at?: number; waiting_on?: string }) {
+    if (!this.ownAgents(machineId).has(b.agent_id)) throw fail('not_found', 'Agent not found on this PC');
+    const now = this.now();
+    const was = this.db.prepare('SELECT state, run_id, task_id, session_id, waiting_on, started_at FROM wake_runs WHERE agent_id=?').get(b.agent_id) as
+      { state: string; run_id: string | null; task_id: string | null; session_id: string | null; waiting_on: string | null; started_at: number | null } | undefined;
+    const r = this.pcText(machineId, b);
+    const live = !!was && WAKE_LIVE.includes(was.state);
+    // The same run: the same run id when both have one; otherwise the same task and, when both name one, the same session.
+    const same = !!was && (r.run && was.run_id ? r.run === was.run_id
+      : (r.task === undefined || r.task === was.task_id) && (r.session_id === undefined || was.session_id === null || r.session_id === was.session_id));
+    // A late end of an earlier run (the hub already holds a newer one) is dropped.
+    if (was && !same && (r.state === 'ended' || r.state === 'stopped' || r.state === 'needs_approval')) return { ok: true };
+    const write = (row: { state: string; run: string | null; task: string | null; session: string | null; waiting_on: string | null; started_at: number | null }) =>
+      this.db.prepare(`INSERT INTO wake_runs(agent_id,machine_id,state,run_id,task_id,session_id,waiting_on,started_at,last_activity_at,resumes_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(agent_id) DO UPDATE SET machine_id=excluded.machine_id,state=excluded.state,run_id=excluded.run_id,task_id=excluded.task_id,session_id=excluded.session_id,waiting_on=excluded.waiting_on,started_at=excluded.started_at,last_activity_at=excluded.last_activity_at,resumes_at=excluded.resumes_at,updated_at=excluded.updated_at`)
+        .run(r.agent_id, machineId, row.state, row.run, row.task, row.session, row.waiting_on, row.started_at, r.last_activity ?? null, r.resumes_at ?? null, now);
+    const ref = (task: string | null, session: string | null) => ({ pc: machineId, ...(task ? { task } : {}), ...(session ? { session } : {}) });
+    if (r.state === 'waiting') {
+      // An item queued behind the live run: the run keeps its state, task and start; only the field changes. No audit.
+      if (live) { write({ state: was!.state, run: was!.run_id, task: was!.task_id, session: was!.session_id, waiting_on: r.waiting_on ?? was!.task_id, started_at: was!.started_at }); return { ok: true }; }
+      write({ state: 'waiting', run: r.run ?? null, task: r.task ?? null, session: r.session_id ?? null, waiting_on: r.waiting_on ?? r.task ?? null, started_at: null });
+      return { ok: true };
+    }
+    const fresh = !live || !same || was!.started_at === null;
+    const startedAt = WAKE_LIVE.includes(r.state) ? (fresh ? now : was!.started_at) : was?.started_at ?? null;
+    write({ state: r.state, run: r.run ?? (fresh ? null : was!.run_id), task: r.task ?? (fresh ? null : was!.task_id), session: r.session_id ?? (fresh ? null : was!.session_id),
+      waiting_on: r.waiting_on ?? null, started_at: startedAt });
+    const task = r.task ?? (fresh ? null : was!.task_id), session = r.session_id ?? (fresh ? null : was!.session_id);
+    if ((WAKE_LIVE.includes(r.state) && fresh) || (r.state !== 'running' && was?.state !== r.state)) this.audit.event({ kind: 'system', id: null }, `connector.wake_${r.state}`, { kind: 'agent', id: r.agent_id }, ref(task, session));
+    return { ok: true };
+  }
+  /** The completion check after a run: the open turns the agent still holds (a queued one was not acted on) and whether a task is still open. */
+  wakeCheck(machineId: string, agentId: string, task?: string) {
+    if (!this.ownAgents(machineId).has(agentId)) throw fail('not_found', 'Agent not found on this PC');
+    const held = (this.turns?.held(agentId) ?? []).slice(0, 40).map((h) => ({ task: h.task_id, phase: h.phase }));
+    // paused: the agent's team is paused (Stop team), so the wake starts nothing more for it; a turn already running ends as it is.
+    return { held, task_open: task && this.turns ? this.turns.open(task) : null, paused: this.turns?.paused?.(agentId) ?? false };
+  }
+  /** The runs of this PC's agents, for the console: a run with no activity for 30 minutes is flagged (nothing stops by itself). */
+  wakeRuns(machineId: string) {
+    const rows = this.db.prepare('SELECT * FROM wake_runs WHERE machine_id=? ORDER BY updated_at DESC').all(machineId) as unknown as { agent_id: string; state: string; task_id: string | null; session_id: string | null; waiting_on: string | null; started_at: number | null; last_activity_at: number | null; resumes_at: number | null; updated_at: number }[];
+    const now = this.now();
+    return rows.map((w) => ({ agent_id: w.agent_id, state: w.state, task: w.task_id, session_id: w.session_id, waiting_on: w.waiting_on, started_at: w.started_at, last_activity_at: w.last_activity_at, resumes_at: w.resumes_at,
+      no_activity: w.state === 'running' && now - (w.last_activity_at ?? w.updated_at) >= WAKE_QUIET_MS }));
+  }
+
+  /** One agent's woken run, wherever it runs (the agent page's Status card), or null when the connector never reported one. */
+  wakeRunOf(agentId: string) {
+    const w = this.db.prepare('SELECT machine_id FROM wake_runs WHERE agent_id=?').get(agentId) as { machine_id: string } | undefined;
+    if (!w) return null;
+    const r = this.wakeRuns(w.machine_id).find((x) => x.agent_id === agentId)!;
+    const title = r.task ? (this.db.prepare('SELECT title FROM tasks WHERE id=?').get(r.task) as { title: string } | undefined)?.title ?? null : null;
+    return { ...r, pc: w.machine_id, pc_name: this.keys.machine(w.machine_id)?.name ?? null, task_title: title };
+  }
+  /**
+   * The operator's Stop (docs/connector.md, "The wake"): one `deliver` order with reason `stop` and no items, to the PC the run
+   * reported from, audited (`connector.wake_stop`). The connector ends the run after its current tool call and keeps its session;
+   * whatever only the run held (its unsaved files, its unsent words) is lost, the hub's records and git are not. A run that is not
+   * live, or a PC that is suspended or disconnected, is refused.
+   */
+  stopRun(agentId: string, actor: Actor): { order: string } {
+    const w = this.db.prepare('SELECT machine_id, state, task_id FROM wake_runs WHERE agent_id=?').get(agentId) as { machine_id: string; state: string; task_id: string | null } | undefined;
+    if (!w || !WAKE_LIVE.includes(w.state)) throw fail('invalid_state', 'This agent has no woken run to stop.');
+    const pc = w.machine_id;
+    if (this.keys.machine(pc)?.status !== 'active' || this.disconnected(pc)) throw fail('invalid_state', 'The PC of this run has no access now, so it cannot be told to stop.');
+    if (this.tooOld(pc, 'deliver')) throw this.tooOldFail(pc);
+    const now = this.now();
+    return tx(this.db, () => {
+      const open = this.db.prepare("SELECT id FROM pc_actions WHERE machine_id=? AND kind='deliver' AND state IN ('queued','fetched') AND json_extract(payload,'$.agent_id')=? AND json_extract(payload,'$.reason')='stop'").get(pc, agentId) as { id: string } | undefined;
+      if (open) return { order: open.id };
+      const id = `pca_${randomToken(10)}`;
+      this.db.prepare("INSERT INTO pc_actions(id,machine_id,kind,state,payload,created_at,created_by,expires_at) VALUES (?,?,'deliver','queued',?,?,?,?)")
+        .run(id, pc, JSON.stringify({ agent_id: agentId, items: [], reason: 'stop' }), now, who(actor), now + ORDER_TTL_MS);
+      this.audit.event(actor, 'connector.wake_stop', { kind: 'agent', id: agentId }, { pc, order: id, ...(w.task_id ? { task: w.task_id } : {}), run_state: w.state });
+      this.streams.signal(pc);
+      return { order: id };
+    });
   }
 
   /** The PC's connector status, every field null until reported (docs/connector.md, "PC status"). */
@@ -112,7 +440,7 @@ export class Connector {
     const held = this.disconnected(machineId) ? 'disconnected' as const : this.keys.machine(machineId)?.status === 'suspended' ? 'suspended' as const : null;
     if (!r) {
       return { online: false, status: held ?? 'never' as const, first_check_in_at: null, last_check_in_at: null, version: null, platform: null, node: null, git: null, clients: [],
-        auto_update: null, remote_cleanup: null, remove_connector_with_last_hub: null, usage_opt_in: null, destinations: null, version_status: null, update_available: null };
+        auto_update: null, remote_cleanup: null, remove_connector_with_last_hub: null, usage_opt_in: null, hardware_opt_in: null, destinations: null, isolation: null, key_store: null, version_status: null, update_available: null };
     }
     const online = !held && this.now() - r.last_check_in_at < ONLINE_MS;
     const vs = r.version ? (this.db.prepare('SELECT status FROM connector_versions WHERE version=?').get(r.version) as { status: string } | undefined)?.status ?? null : null;
@@ -120,8 +448,8 @@ export class Connector {
     return {
       online, status: held ?? (online ? 'online' as const : 'offline' as const), first_check_in_at: r.first_check_in_at, last_check_in_at: r.last_check_in_at,
       version: r.version, platform: r.platform, node: r.node, git: r.git, clients: parse(r.clients, [] as unknown[]),
-      auto_update: bool(r.auto_update), remote_cleanup: bool(r.remote_cleanup), remove_connector_with_last_hub: bool(r.remove_with_last_hub), usage_opt_in: bool(r.usage_opt_in),
-      destinations: parse(r.destinations, null as { id: string; label: string }[] | null),
+      auto_update: bool(r.auto_update), remote_cleanup: bool(r.remote_cleanup), remove_connector_with_last_hub: bool(r.remove_with_last_hub), usage_opt_in: bool(r.usage_opt_in), hardware_opt_in: bool(r.hardware_opt_in),
+      destinations: parse(r.destinations, null as { id: string; label: string }[] | null), isolation: r.isolation, key_store: r.key_store,
       version_status: vs, update_available: newer.length ? newer[newer.length - 1]! : null,
     };
   }
@@ -131,26 +459,26 @@ export class Connector {
     const pc = this.keys.machine(machineId);
     if (!pc) throw fail('not_found', 'PC not found');
     const st = this.status(machineId);
-    const reported = new Map(parse((this.db.prepare('SELECT agents FROM connector_reports WHERE machine_id=?').get(machineId) as { agents: string } | undefined)?.agents ?? null, [] as { agent_id: string; state: string }[]).map((a) => [a.agent_id, a.state]));
+    const reportedRows = new Map(parse((this.db.prepare('SELECT agents FROM connector_reports WHERE machine_id=?').get(machineId) as { agents: string } | undefined)?.agents ?? null, [] as { agent_id: string; state: string; profile?: string; profile_hidden?: true }[]).map((a) => [a.agent_id, a]));
     const bridge = this.db.prepare("SELECT created_at FROM bridge_keys WHERE machine_id=? AND status<>'revoked' ORDER BY created_at DESC LIMIT 1").get(machineId) as { created_at: number } | undefined;
     const reqs = this.db.prepare("SELECT id, state, body, filed_at, decided_at, collected_at, team_id FROM onboarding_requests WHERE machine_id=? AND state NOT IN ('denied','withdrawn','cancelled') ORDER BY filed_at").all(machineId) as { id: string; state: string; body: string; filed_at: number; decided_at: number | null; collected_at: number | null; team_id: string | null }[];
     const slots = this.db.prepare(`SELECT s.agent_id, s.label, s.status, r.team_id, a.connected_at, a.last_active_at FROM onboarding_slots s JOIN onboarding_requests r ON r.id=s.request_id JOIN agents a ON a.id=s.agent_id
       WHERE r.machine_id=? AND s.status<>'closed' ORDER BY s.created_at`).all(machineId) as { agent_id: string; label: string; status: string; team_id: string | null; connected_at: number | null; last_active_at: number | null }[];
 
     type Next = { action: string; who: 'you' | 'pc_user' | 'agent' } | null;
-    type Agent = { agent_id: string | null; label: string; team_id: string | null; state: 'waiting_for_approval' | 'ready_to_open' | 'connected'; next: Next; connected_at: number | null; last_active_at: number | null; pc_reported: string | null };
+    type Agent = { agent_id: string | null; label: string; team_id: string | null; state: 'waiting_for_approval' | 'ready_to_open' | 'connected'; next: Next; connected_at: number | null; last_active_at: number | null; pc_reported: string | null; pc_profile: PcProfile };
     const agents: Agent[] = [];
     for (const q of reqs.filter((x) => x.state === 'submitted' || x.state === 'needs_changes')) {
       const roles = parse(q.body, {} as { roles?: { name?: string; count?: number }[] }).roles ?? [];
       for (const ro of roles) for (let i = 1; i <= Math.min(Math.max(ro.count ?? 1, 1), 50); i++) {
-        agents.push({ agent_id: null, label: (ro.count ?? 1) > 1 ? `${ro.name ?? 'agent'} ${i}` : String(ro.name ?? 'agent'), team_id: q.team_id, state: 'waiting_for_approval', next: { action: 'Approve the team request', who: 'you' }, connected_at: null, last_active_at: null, pc_reported: null });
+        agents.push({ agent_id: null, label: (ro.count ?? 1) > 1 ? `${ro.name ?? 'agent'} ${i}` : String(ro.name ?? 'agent'), team_id: q.team_id, state: 'waiting_for_approval', next: { action: 'Approve the team request', who: 'you' }, connected_at: null, last_active_at: null, pc_reported: null, pc_profile: null });
       }
     }
     for (const s of slots) {
       // Three states (review v2 §3): keys not collected yet is Ready to open, with the PC user's next step.
       const state = s.connected_at ? 'connected' as const : 'ready_to_open' as const;
       const next: Next = s.connected_at ? null : s.status === 'waiting' ? { action: 'Continue setup on the PC', who: 'pc_user' } : { action: 'Open the agent on the PC', who: 'pc_user' };
-      agents.push({ agent_id: s.agent_id, label: s.label, team_id: s.team_id, state, next, connected_at: s.connected_at, last_active_at: s.last_active_at, pc_reported: reported.get(s.agent_id) ?? null });
+      agents.push({ agent_id: s.agent_id, label: s.label, team_id: s.team_id, state, next, connected_at: s.connected_at, last_active_at: s.last_active_at, pc_reported: reportedRows.get(s.agent_id)?.state ?? null, pc_profile: pcProfileOf(reportedRows.get(s.agent_id)) });
     }
 
     type Step = { step: string; state: 'done' | 'waiting' | 'failed' | 'not_yet'; at: number | null; reason: string | null; next: { action: string; who: 'you' | 'pc_user' | 'agent' } | null };
@@ -184,13 +512,19 @@ export class Connector {
 
   // ───── PC actions ─────
   private view(a: ActionRow) {
-    const { receipt_key_id: _k, receipt_verifier: _v, payload, result, ...rest } = a;
+    const { receipt_key_id: _k, receipt_verifier: _v, payload, result, agent_id: _a, order_reason: _r, release_at: _l, handed_at: _h, ...rest } = a;
     return { ...rest, payload: parse(payload, {}), result: parse(result, null) };
   }
   private expire(): void {
     const now = this.now();
-    this.db.prepare("UPDATE pc_actions SET state='expired', finished_at=? WHERE kind<>'disconnect' AND state='queued' AND expires_at<=?").run(now, now);
-    this.db.prepare("UPDATE pc_actions SET state='expired', finished_at=?, result=? WHERE kind<>'disconnect' AND state='fetched' AND fetched_at<=?")
+    // A restore is a long order: it does not expire by the clock while its checkout is rendered or restoring, and it ends when the checkout does.
+    this.db.prepare(`UPDATE pc_actions SET state='expired', finished_at=?, result=? WHERE kind='restore' AND state IN ('queued','fetched')
+      AND COALESCE((SELECT status FROM checkouts WHERE id=json_extract(pc_actions.payload,'$.checkout_id')),'') NOT IN ('rendered','restoring')`)
+      .run(now, JSON.stringify({ reason: 'The checkout ended (cancelled, replaced or restored), so this restore stopped.' }));
+    // Orders of a locked-down PC wait: they are handed out after the lockdown, so none expires by the clock meanwhile.
+    const held = (this.db.prepare("SELECT DISTINCT machine_id m FROM pc_actions WHERE state='queued'").all() as { m: string }[]).map((r) => r.m).filter((m) => this.isLocked(m));
+    this.db.prepare("UPDATE pc_actions SET state='expired', finished_at=? WHERE kind NOT IN ('disconnect','restore') AND state='queued' AND expires_at<=?" + (held.length ? ` AND machine_id NOT IN (${held.map(() => '?').join(',')})` : '')).run(now, now, ...held);
+    this.db.prepare("UPDATE pc_actions SET state='expired', finished_at=?, result=? WHERE kind NOT IN ('disconnect','restore') AND state='fetched' AND fetched_at<=?")
       .run(now, JSON.stringify({ reason: 'The connector took this order but did not report a result within 24 hours.' }), now - FETCHED_TTL_MS);
     // A disconnect with no result by expires_at needs attention, and its receipt is retired with it.
     const late = this.db.prepare(`SELECT * FROM pc_actions WHERE ${DSC_OPEN_SQL} AND expires_at<=?`).all(now) as unknown as ActionRow[];
@@ -201,13 +535,13 @@ export class Connector {
     }
   }
   actions(machineId: string) {
-    this.expire();
     return (this.db.prepare('SELECT * FROM pc_actions WHERE machine_id=? ORDER BY created_at DESC, rowid DESC LIMIT 50').all(machineId) as unknown as ActionRow[]).map((a) => this.view(a));
   }
   createAction(machineId: string, b: { kind: (typeof ACTION_KINDS)[number]; checkout_id?: string; destination_id?: string; version?: string }, actor: Actor) {
     const pc = this.keys.machine(machineId);
     if (!pc) throw fail('not_found', 'PC not found');
     if (pc.status !== 'active') throw fail('invalid_state', 'This PC is suspended or retired; resume it first.');
+    if (b.kind !== 'update' && this.measureOnly(machineId)) throw fail('invalid_state', 'This PC is a compute machine: its connector only measures it, so it takes Update and Disconnect and nothing else.');
     this.expire();
     let payload: Record<string, unknown> = {};
     if (b.kind === 'restore') {
@@ -230,24 +564,174 @@ export class Connector {
     const id = `pca_${randomToken(10)}`, now = this.now();
     this.db.prepare("INSERT INTO pc_actions(id,machine_id,kind,state,payload,created_at,created_by,expires_at) VALUES (?,?,?,'queued',?,?,?,?)").run(id, machineId, b.kind, JSON.stringify(payload), now, who(actor), now + ORDER_TTL_MS);
     this.audit.event(actor, 'pc.action_create', { kind: 'pc', id: machineId }, { action: id, kind: b.kind, ...payload });
+    this.streams.signal(machineId);
     return this.view(this.db.prepare('SELECT * FROM pc_actions WHERE id=?').get(id) as unknown as ActionRow);
   }
   /** The connector's pinned poll: the PC's queued orders, each moved to fetched (one-time). */
   fetchOrders(machineId: string) {
-    this.expire();
-    const now = this.now();
+    if (this.isLocked(machineId)) return [];
+    const now = this.now(), old = this.tooOld(machineId, 'deliver');
     return tx(this.db, () => {
-      const rows = this.db.prepare(`SELECT * FROM pc_actions WHERE machine_id=? AND kind<>'disconnect' AND state='queued' ORDER BY created_at`).all(machineId) as unknown as ActionRow[];
-      for (const r of rows) this.db.prepare("UPDATE pc_actions SET state='fetched', fetched_at=? WHERE id=?").run(now, r.id);
+      // The queued orders (a held one waits for its release_at), then the fetched ones whose result has not come: they are handed out again
+      // every REHAND_MS, so an order lost in a crash on the PC is never lost for good. The connector skips what it already handled.
+      const rows = this.db.prepare(`SELECT * FROM pc_actions WHERE machine_id=? AND kind<>'disconnect' AND ((state='queued' AND expires_at>? AND COALESCE(release_at,0)<=?)
+        OR (state='fetched' AND COALESCE(handed_at, fetched_at, 0)<=? AND (kind='restore' OR fetched_at>?)))${old ? " AND kind<>'deliver'" : ''} ORDER BY created_at`).all(machineId, now, now, now - REHAND_MS, now - FETCHED_TTL_MS) as unknown as ActionRow[];
+      for (const r of rows) this.db.prepare("UPDATE pc_actions SET state='fetched', fetched_at=COALESCE(fetched_at,?), handed_at=? WHERE id=?").run(now, now, r.id);
       return rows.map((r) => ({ id: r.id, kind: r.kind, payload: parse(r.payload, {}) }));
     });
+  }
+  /** The kind of one order of this PC, by id (never limited to its newest orders). */
+  orderKind(machineId: string, id: string): string | null {
+    return (this.db.prepare('SELECT kind FROM pc_actions WHERE id=? AND machine_id=?').get(id, machineId) as { kind: string } | undefined)?.kind ?? null;
+  }
+  private lastTick = 0;
+  /**
+   * The timer's work (every 30 s, app.ts): the expiry of orders that ran out, and the stream signal for a held order whose release time came.
+   * Not done on every connector request any more.
+   */
+  tick(): void {
+    const now = this.now(), since = this.lastTick || now - 60_000;
+    this.lastTick = now;
+    this.expire();
+    const due = this.db.prepare("SELECT DISTINCT machine_id m FROM pc_actions WHERE kind='deliver' AND state='queued' AND release_at IS NOT NULL AND release_at>? AND release_at<=?").all(since, now) as { m: string }[];
+    for (const d of due) this.streams.signal(d.m);
+  }
+  /** The PC this agent's session key is bound to, when its connector may be told. */
+  private pcOfAgent(agentId: string): string | null {
+    const r = this.db.prepare("SELECT bound_machine_id m FROM credentials WHERE kind='session_key' AND agent_id=? AND status='active' AND bound_machine_id IS NOT NULL ORDER BY created_at DESC LIMIT 1").get(agentId) as { m: string } | undefined;
+    return r?.m ?? null;
+  }
+  /**
+   * The hub's delivery order (docs/connector.md, "Delivery orders"): an item that needs a turn waits on this agent. Ids only. Items for
+   * the same agent fold into the order still queued. Not for a compute machine, a suspended or disconnected PC, or an agent
+   * with no PC. Messages from agents make at most one order per agent per ten minutes; the operator's, none held back.
+   */
+  deliver(agentId: string, item: { notice: string; task?: string; from?: 'agent' | 'operator' }): { order: string; folded: boolean; held?: true } | null {
+    const why = REASON_NOTICES[item.notice];
+    if (why) { const r = this.deliverReason(agentId, why); return r.order ? { order: r.order, folded: r.already } : null; }
+    if (!TURN_NOTICES.has(item.notice) && item.notice !== 'message') return null;
+    const pc = this.pcOfAgent(agentId);
+    if (!pc || this.keys.machine(pc)?.status !== 'active' || this.measureOnly(pc) || this.disconnected(pc)) return null;
+    const now = this.now();
+    const agentMsg = item.notice === 'message' && item.from !== 'operator';
+    const entry = { notice: item.notice, ...(item.task ? { task: item.task } : {}) };
+    // A connector too old for delivery orders is never handed one: the order waits on the hub until the PC reports a newer version,
+    // and the item reads "connector too old".
+    if (this.tooOld(pc, 'deliver')) { try { this.onDelivery?.(agentId, [entry], { delivered: false, reason: 'connector_too_old' }); } catch { /* the console view never blocks the order */ } }
+    return tx(this.db, () => {
+      // An agent's message inside the window of its last wake is held, not dropped: its order is released when the window ends.
+      let release: number | null = null;
+      if (agentMsg) {
+        const last = (this.db.prepare("SELECT MAX(COALESCE(release_at, created_at)) t FROM pc_actions WHERE kind='deliver' AND machine_id=? AND agent_id=? AND json_extract(payload,'$.agent_msg')=1 AND order_reason IS NULL AND state<>'expired'").get(pc, agentId) as { t: number | null }).t;
+        if (last !== null && last + AGENT_MESSAGE_GAP_MS > now) release = last + AGENT_MESSAGE_GAP_MS;
+      }
+      const open = this.db.prepare("SELECT id, payload, release_at FROM pc_actions WHERE machine_id=? AND kind='deliver' AND state='queued' AND agent_id=? AND order_reason IS NULL").get(pc, agentId) as { id: string; payload: string; release_at: number | null } | undefined;
+      if (open) {
+        const p = parse(open.payload, { agent_id: agentId, items: [] as { notice: string; task?: string }[], agent_msg: false });
+        if (!p.items.some((i) => i.notice === entry.notice && i.task === entry.task) && p.items.length < DELIVER_ITEMS_MAX) p.items.push(entry);
+        if (agentMsg) p.agent_msg = true;
+        // Anything but an agent's message (a task, the operator's word) releases a held order now.
+        const held = open.release_at !== null && open.release_at > now;
+        const keep = held && agentMsg ? open.release_at : null;
+        this.db.prepare('UPDATE pc_actions SET payload=?, release_at=? WHERE id=?').run(JSON.stringify(p), keep, open.id);
+        if (held && keep === null) this.streams.signal(pc);
+        return { order: open.id, folded: true, ...(keep !== null ? { held: true as const } : {}) };
+      }
+      const id = `pca_${randomToken(10)}`;
+      this.db.prepare("INSERT INTO pc_actions(id,machine_id,kind,state,payload,created_at,created_by,expires_at,agent_id,release_at) VALUES (?,?,'deliver','queued',?,?,?,?,?,?)")
+        .run(id, pc, JSON.stringify({ agent_id: agentId, items: [entry], ...(agentMsg ? { agent_msg: true } : {}) }), now, 'hub', (release ?? now) + ORDER_TTL_MS, agentId, release);
+      if (release === null) this.streams.signal(pc);
+      return { order: id, folded: false, ...(release !== null ? { held: true as const } : {}) };
+    });
+  }
+  /**
+   * A reason order (Start team, write the handout, resume after a move): one per agent and reason while it is open, so pressing
+   * again gives the same order and a member gets exactly one turn for it. Never folded into an item order, and no item folds
+   * into it. `why` says why none was made: no PC holds the agent's key, or that PC cannot be told.
+   */
+  deliverReason(agentId: string, reason: OrderReason): { order: string; already: boolean } | { order: null; why: 'no_pc' | 'pc_unavailable' } {
+    const pc = this.pcOfAgent(agentId);
+    if (!pc) return { order: null, why: 'no_pc' };
+    if (this.keys.machine(pc)?.status !== 'active' || this.measureOnly(pc) || this.disconnected(pc)) return { order: null, why: 'pc_unavailable' };
+    this.expire();
+    return tx(this.db, () => {
+      const open = this.db.prepare("SELECT id FROM pc_actions WHERE machine_id=? AND kind='deliver' AND state IN ('queued','fetched') AND agent_id=? AND order_reason=?").get(pc, agentId, reason) as { id: string } | undefined;
+      if (open) return { order: open.id, already: true };
+      const id = `pca_${randomToken(10)}`, now = this.now();
+      this.db.prepare("INSERT INTO pc_actions(id,machine_id,kind,state,payload,created_at,created_by,expires_at,agent_id,order_reason) VALUES (?,?,'deliver','queued',?,?,?,?,?,?)")
+        .run(id, pc, JSON.stringify({ agent_id: agentId, items: [], reason }), now, 'hub', now + ORDER_TTL_MS, agentId, reason);
+      this.streams.signal(pc);
+      return { order: id, already: false };
+    });
+  }
+  /** The latest reason order of an agent, for the console: its state and, when no turn started, the PC's code. */
+  reasonOrderOf(agentId: string, reason: OrderReason): { order: string; state: string; code: string | null; created_at: number; finished_at: number | null } | null {
+    this.expire();
+    const r = this.db.prepare("SELECT id, state, result, created_at, finished_at FROM pc_actions WHERE kind='deliver' AND agent_id=? AND order_reason=? ORDER BY created_at DESC, rowid DESC LIMIT 1").get(agentId, reason) as { id: string; state: string; result: string | null; created_at: number; finished_at: number | null } | undefined;
+    if (!r) return null;
+    const code = parse(r.result, {} as { code?: string }).code;
+    return { order: r.id, state: r.state, code: typeof code === 'string' ? code : null, created_at: r.created_at, finished_at: r.finished_at };
+  }
+  /** The wake's latest report for an agent (running, waiting, ended, ...), or null: fixed words and ids only, for Start team. */
+  wakeStateOf(agentId: string): { state: string; task: string | null; updated_at: number } | null {
+    const w = this.db.prepare('SELECT state, task_id, updated_at FROM wake_runs WHERE agent_id=?').get(agentId) as { state: string; task_id: string | null; updated_at: number } | undefined;
+    return w ? { state: w.state, task: w.task_id, updated_at: w.updated_at } : null;
+  }
+  /** Whether an agent's PC is online now (null: no PC holds its key). */
+  pcOnlineOf(agentId: string): boolean | null {
+    const pc = this.pcOfAgent(agentId);
+    return pc ? this.status(pc).online : null;
+  }
+  /**
+   * Move team with no one at the keyboard: a rendered checkout whose target PC's user approved exactly one destination needs no
+   * choice, so Restore is sent at once. With none or several, nothing is sent and the operator picks. An open restore is not doubled.
+   */
+  restoreIfOneDestination(checkoutId: string, actor: Actor): { id: string } | null {
+    const c = this.db.prepare('SELECT status, target_machine_id FROM checkouts WHERE id=?').get(checkoutId) as { status: string; target_machine_id: string | null } | undefined;
+    if (!c?.target_machine_id || c.status !== 'rendered') return null;
+    if (this.db.prepare("SELECT 1 x FROM pc_actions WHERE kind='restore' AND state IN ('queued','fetched') AND json_extract(payload,'$.checkout_id')=?").get(checkoutId)) return null;
+    const dests = this.status(c.target_machine_id).destinations ?? [];
+    return dests.length === 1 ? this.createAction(c.target_machine_id, { kind: 'restore', checkout_id: checkoutId, destination_id: dests[0]!.id }, actor) : null;
+  }
+  /** Set in app.ts: a restore order reported done on its target PC, so the moved agents can be woken to resume. */
+  onRestored: ((checkoutId: string, machineId: string) => void) | null = null;
+  /** Set in app.ts: a delivery order's result, for the items it carried (task ids, and whether decisions are among them). */
+  onDelivery: ((agentId: string, items: { notice: string; task?: string }[], outcome: { delivered: true } | { delivered: false; reason: string | null }) => void) | null = null;
+  /** Access to this PC ended (a key suspended or revoked, Disconnect, retire, lockdown): its stream and any long poll end now. */
+  accessEnded(machineId: string): void { this.streams.close(machineId, 'access_ended'); }
+  /** Whether the PC may still hold a stream. */
+  /** Set in app.ts: whether this PC is locked down (safety/lockdown.ts). While it is, the connector gets no order, its orders wait queued and none expires, and it opens no stream. */
+  locked: ((machineId: string) => boolean) | null = null;
+  isLocked(machineId: string): boolean { return this.locked?.(machineId) === true; }
+  streamAllowed(machineId: string, locked: boolean): boolean {
+    return !locked && this.keys.machine(machineId)?.status === 'active' && !this.disconnected(machineId);
+  }
+  /**
+   * A long order's progress (a restore): one plain line and, once the agents are restored, how to start each. The order stays
+   * fetched; only its own PC may report, and only while it is open. The latest line replaces the one before.
+   */
+  progressOrder(machineId: string, id: string, p: { note: string; start_lines?: string[] }) {
+    const a = this.db.prepare("SELECT * FROM pc_actions WHERE id=? AND machine_id=? AND kind='restore' AND state='fetched'").get(id, machineId) as unknown as ActionRow | undefined;
+    if (!a) throw fail('not_found', 'Order not found');
+    const clean = this.pcText(machineId, p);
+    this.db.prepare('UPDATE pc_actions SET result=? WHERE id=?').run(JSON.stringify({ progress: clean.note, ...(clean.start_lines?.length ? { start_lines: clean.start_lines } : {}) }), id);
+    return { ok: true };
   }
   reportOrder(machineId: string, id: string, state: 'done' | 'failed', result: unknown) {
     const a = this.db.prepare("SELECT * FROM pc_actions WHERE id=? AND machine_id=? AND kind<>'disconnect'").get(id, machineId) as unknown as ActionRow | undefined;
     // One result per order, only from its own PC: anything else is not_found.
     if (!a || a.state !== 'fetched') throw fail('not_found', 'Order not found');
-    const clean = this.pcText(machineId, result ?? null);
+    const clean = a.kind === 'deliver' && state === 'done' ? { delivered_at: this.now() } : this.pcText(machineId, result ?? null);
     this.db.prepare('UPDATE pc_actions SET state=?, result=?, finished_at=? WHERE id=?').run(state, JSON.stringify(clean), this.now(), id);
+    if (a.kind === 'deliver') {
+      const p = parse(a.payload, { agent_id: '', items: [] as { notice: string; task?: string }[] });
+      const code = (clean as { code?: string } | null)?.code;
+      try { this.onDelivery?.(p.agent_id, p.items, state === 'done' ? { delivered: true } : { delivered: false, reason: (DELIVER_REASONS as readonly string[]).includes(code ?? '') ? code! : null }); } catch { /* the console view never blocks the result */ }
+    }
+    if (a.kind === 'restore' && state === 'done') {
+      const p = parse(a.payload, { checkout_id: '' });
+      try { if (p.checkout_id) this.onRestored?.(p.checkout_id, machineId); } catch { /* a wake that cannot be sent leaves the resume to a person */ }
+    }
     this.audit.event({ kind: 'system', id: null }, 'pc.action_report', { kind: 'pc', id: machineId }, { action: id, kind: a.kind, state });
     return { ok: true };
   }

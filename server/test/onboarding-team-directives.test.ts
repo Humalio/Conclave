@@ -18,7 +18,9 @@ import { STANDARD_DIRECTIVES, goalHasRules, standardFor } from '../src/onboardin
 import { MAX_OPEN_REPORTS } from '../src/directives/directives.js';
 import { testConfig, adminLogin } from './hub.js';
 // @ts-expect-error: a plain ES module without types
-import { validateRequest, goalHasRules as clientGoalHasRules, resumeMsg } from '../../deploy/client/setup.mjs';
+import { validateRequest, goalHasRules as clientGoalHasRules } from '../../deploy/client/setup.mjs';
+// @ts-expect-error plain ESM without types
+import { resumeMsg } from '../../deploy/client/connector/restore.mjs';
 // @ts-expect-error plain ESM client script, no types
 import { agentsOverride, resumeMessage, FIRST_CALL } from '../../deploy/client/codex.mjs';
 
@@ -257,8 +259,13 @@ describe('4. the CLAUDE.md points to the directives; the goal stays a goal', () 
     const section = (t: string, h: string) => { const i = t.indexOf(`## ${h}\n`); expect(i, h).toBeGreaterThan(-1); const j = t.indexOf('\n## ', i + 1); return t.slice(i, j < 0 ? undefined : j).trimEnd(); };
     const codex: string = agentsOverride({ label: 'dev', role: 'developer', team: 'T', instructions: md.replace(/\n/g, '\r\n'), playbook: 'ignored' });
     for (const h of ['Directives', 'Writing for the operator', 'Feedback', 'Connection']) expect(section(codex, h)).toBe(section(md, h));
-    expect(section(md, 'Connection')).toContain('codex-bridge.mjs');
-    expect(section(md, 'Connection')).toContain('headers helper');
+    // The Connection section is exactly two lines, the same for both clients, and names no part of the old setup.
+    const conn = section(md, 'Connection').split('\n').slice(1).filter((l) => l.trim()).slice(0, 2);
+    expect(conn).toEqual([
+      'The `conclave` server connects you to the hub through the Conclave connector on this PC; it is logged in for you. Never call session_login, leave session_token out, never read the connector\'s key file, never put a key or token anywhere.',
+      'If the conclave tools are missing, stop and report your client\'s exact error and the output of `conclave check` in this folder.',
+    ]);
+    for (const old of ['keys.env', '.agent-hub.json', 'agent-hub-headers', 'headers helper', 'setup.mjs', 'codex-bridge', 'helper.log', 'session_var']) expect(section(md, 'Connection'), old).not.toContain(old);
   });
   it('both start lines read and confirm the directives first', () => {
     const claude: string = resumeMsg({ label: 'dev', role: 'developer' }, 'T'), codex: string = resumeMessage({ label: 'dev', role: 'developer', team: 'T' });

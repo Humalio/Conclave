@@ -35,6 +35,8 @@ export const KINDS = {
   // git on Windows, the one user environment variable Claude Code reads at start.
   instructions: { in: 'folder', file: 'CLAUDE.md', pointer: null },
   codex_instructions: { in: 'folder', file: 'AGENTS.md', pointer: null },
+  // Restore: a Codex agent's role file (role.mjs). `installed` keeps its text as well, so `conclave repair` can write it back.
+  codex_role: { in: 'folder', file: 'AGENTS.override.md', pointer: null },
   user_env: { in: 'user_env', file: null, pointer: 'CLAUDE_CODE_GIT_BASH_PATH' },
 };
 /** The one place a user_env entry may name: the user's own environment in the registry (no admin rights). */

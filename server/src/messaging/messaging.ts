@@ -29,6 +29,8 @@ export class Messaging {
   private _closed = false;
   /** Set by Teams: fed every stored message so team members get it as a work item. */
   onInsert: ((m: MessageRow) => void) | null = null;
+  /** Set in app.ts: a message an agent wrote, for the connector's delivery orders (they are L2: rate-limited there). */
+  onSent: ((m: MessageRow, recipients: string[]) => void) | null = null;
   constructor(private readonly db: Db, private readonly keys: Keys, private readonly links: Links) { this.em.setMaxListeners(0); }
 
   // ───── permissions ─────
@@ -131,7 +133,7 @@ export class Messaging {
     this.db.prepare("DELETE FROM usage_counters WHERE metric='messages' AND window_start<?").run(w - 2 * H);
     return null;
   }
-  insert(o: { roomId: string; agentId: string; credId: string; kind: string; body: string; replyTo: string | null; clientMsgId: string }): MessageRow {
+  insert(o: { roomId: string; /** null: the operator wrote it */ agentId: string | null; credId: string | null; kind: string; body: string; replyTo: string | null; clientMsgId: string }): MessageRow {
     const m = tx(this.db, () => {
       const seq = (this.db.prepare('SELECT last_seq FROM rooms WHERE id=?').get(o.roomId) as { last_seq: number }).last_seq + 1;
       this.db.prepare('UPDATE rooms SET last_seq=? WHERE id=?').run(seq, o.roomId);
@@ -141,6 +143,7 @@ export class Messaging {
       return this.message(id)!;
     });
     this.onInsert?.(m);
+    try { this.onSent?.(m, this.members(m.room_id).map((x) => x.agent_id).filter((a) => a !== m.sender_agent_id)); } catch { /* delivery never blocks a message */ }
     this.em.emit(`message:${m.room_id}`);
     return m;
   }

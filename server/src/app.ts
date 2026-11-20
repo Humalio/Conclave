@@ -22,13 +22,17 @@ import { OwnerScope } from './policy/ownerScope.js';
 import { Delegations } from './checkout/delegate.js';
 import { Messaging } from './messaging/messaging.js';
 import { Teams } from './teams/teams.js';
+import type { DeliveryReason } from './teams/turns.js';
 import { Blueprint } from './blueprint/blueprint.js';
 import { BlueprintViews } from './blueprint/views.js';
 import { registerBridge } from './bridge/http.js';
 import { Connector } from './connector/connector.js';
 import { registerConnector } from './connector/http.js';
+import { VaultSync } from './vaultsync/vaultSync.js';
+import { Relays, RELAY_SECRET_HEADER, RELAY_CLIENT_HEADER, clientAddress } from './relay/relays.js';
+import { registerVaultSync } from './vaultsync/http.js';
 import { Shares } from './shares/shares.js';
-import { TaskAttachments } from './shares/taskAttachments.js';
+import { TaskAttachments, ATTACH_LIMITS } from './shares/taskAttachments.js';
 import { Channels } from './channels/channels.js';
 import { Access } from './access/access.js';
 import { Lockdown } from './safety/lockdown.js';
@@ -80,17 +84,38 @@ export async function buildApp(config: Config, extras: { demo?: import('./demo/d
   setReserved([`/${vault.alias}/${MIRROR_FOLDER}`]);
   vault.agentSkip = [[MIRROR_FOLDER]];
   store.start({ scanSeconds: config.vaultScanSeconds ?? 60, watch: config.vaultWatch !== false });
-  const guard = new LeakGuard({ isIssued: (k, id, s) => keys.isIssued(k, id, s) });
+  const relays = new Relays(db, config.pepper, audit);
+  const guard = new LeakGuard({ isIssued: (k, id, s) => (k === 'rly' ? relays.isIssued(id, s) : keys.isIssued(k, id, s)) });
   const loginLimit = new RateLimit(db, 10, 10 * 60 * 1000);
   const setup = new Setup(db, config.pepper, audit, keys, config.publicUrl, config.bridgeFile);
   const links = new Links(db, keys, audit);
   const connector = new Connector(db, keys, audit, config.pepper, config.connectorPrices ?? {});
   connector.guard = guard;
+  // Delivery (docs/connector.md, "Delivery orders"): a notice that needs a turn makes one order for its agent's PC; a closed access closes the stream.
+  // The connector's result for a delivery order reaches the items: a task's open turn, and the agent's answered decisions (docs/connector.md, "Delivery orders").
+  connector.onDelivery = (agentId, items, o) => {
+    const now = Date.now();
+    for (const i of items) {
+      if (i.task) { if (o.delivered) teams.turns.delivered(i.task, agentId, now); else if (o.reason) teams.turns.undelivered(i.task, agentId, o.reason as DeliveryReason); }
+      if (i.notice === 'decision' && o.delivered) db.prepare("UPDATE decisions SET delivered_at=? WHERE agent_id=? AND status='answered' AND delivered_at IS NULL").run(now, agentId);
+    }
+  };
+  keys.onNotice = (agentId, kind, ref) => { connector.deliver(agentId, { notice: kind, ...(ref?.kind === 'task' ? { task: ref.id } : {}) }); };
+  keys.onAccessEnded = (e) => { if (e.machine) connector.accessEnded(e.machine); if (e.credential) connector.streams.closeCredential(e.credential); };
   const messaging = new Messaging(db, keys, links);
   // Owner enforcement (docs/authorization.md#owner-enforcement): no ceiling while the setting is off.
   const ownerScope = new OwnerScope(db, vault.alias);
+  // Vault sync (docs/vault-sync.md): the readers, the vault's change feed and the hint on the push stream.
+  const vaultSync = new VaultSync(db, keys, audit, config.pepper, store, vault.alias);
+  vaultSync.ownerScope = ownerScope;
+  vaultSync.hintPc = (pc, reader) => connector.streams.hint(pc, reader);
   messaging.ownerScope = ownerScope;
+  // A message with no sender agent (kind system, written by the hub for the operator) is never held back (docs/connector.md, "Delivery orders"): never held back; an agent's is L2 and capped.
+  messaging.onSent = (m, to) => { for (const a of to) connector.deliver(a, { notice: 'message', from: m.sender_agent_id === null ? 'operator' : 'agent' }); };
   const teams = new Teams(db, keys, links, messaging, audit);
+  // Reset (connector design 3c): a coordinator resets its own team's agents through the connector service, audited there.
+  teams.onAgentReset = (agentId, actor) => connector.resetAgent(agentId, actor);
+  connector.turns = { held: (a) => teams.turns.held(a).map((h) => ({ task_id: h.task_id, phase: h.turn.phase })), open: (t) => teams.turns.current(t) !== null, paused: (a) => teams.pausedTeamOf(a) !== null };
   const users = new Users(db, audit, config);
   // Notices follow the owner, and an owner whose account ends tells their agents at once (docs/authorization.md#owner-enforcement).
   keys.noticeFilter = (agentId, ref) => ownerScope.maySeeNotice(agentId, ref);
@@ -135,8 +160,20 @@ export async function buildApp(config: Config, extras: { demo?: import('./demo/d
     bytesPerHour: config.channelBytesPerHour ?? 50 * 1024 ** 3, bufferBytes: config.channelBufferBytes ?? 8 * 1024 * 1024, tmpDir: join(config.dataDir, 'tmp'), expireMs: 10 * 60_000, idleMs: config.channelIdleMs ?? 2 * 3600_000,
   });
   channels.ownerScope = ownerScope;
+  // The connector's service carries an enrolled PC's transfers; task files from the PC land through TaskAttachments (docs/transfers.md).
+  channels.connectorPc = (pc) => ['online', 'offline'].includes(connector.status(pc).status);
+  channels.taskAttach = { refusal: (c) => taskAttachments.uploadRefusal(c), commit: (c, files) => taskAttachments.commitUpload(c, files), maxBytes: ATTACH_LIMITS.version, fileMax: ATTACH_LIMITS.file };
   const access = new Access(db, keys, audit);
   const lockdown = new Lockdown(db, vault.alias);
+  connector.streams.allowed = (pc) => connector.streamAllowed(pc, lockdown.pc(pc));
+  connector.turnHold = (agentId, pc) => {
+    if (lockdown.agent(agentId) || lockdown.pc(pc)) return { code: 'lockdown', message: 'A lockdown holds this agent or its PC: the turn token ends.' };
+    // A checkout's own pause (reason checkout:<id>) holds the team while its work moves; the resume run it starts keeps its token.
+    const paused = db.prepare("SELECT 1 FROM team_members m JOIN teams t ON t.id=m.team_id WHERE m.agent_id=? AND m.removed_at IS NULL AND t.status='paused' AND (t.paused_reason IS NULL OR t.paused_reason NOT LIKE 'checkout:%') LIMIT 1").get(agentId);
+    return paused ? { code: 'paused', message: 'The team is paused: the turn token ends, and the run with it after its current call.' } : null;
+  };
+  connector.locked = (pc) => lockdown.pc(pc);
+  lockdown.onSet = (kind, id) => { if (kind === 'pc' && id) connector.accessEnded(id); };
   lockdown.onLift = (kind, id, since) => teams.holdLifted(kind, id, since); // the sweep skipped held members: restart their leases
   keyCollections.lockdown = lockdown;
   taskAttachments.lockdown = lockdown;
@@ -160,6 +197,8 @@ export async function buildApp(config: Config, extras: { demo?: import('./demo/d
   channels.lockdown = lockdown;
   // Checkout and handouts (docs/checkout.md): the expiry sweep runs on Teams.tick; the team pause at ready exempts checkout_* tools.
   const checkouts = new Checkouts(db, keys, teams, audit);
+  // Move team with no one at the keyboard (docs/connector.md, "Reason orders"): once the target PC restored the agents, each moved one is woken to resume.
+  connector.onRestored = (checkoutId) => { for (const h of checkouts.handouts(checkoutId)) if (h.new_credential_id && h.status !== 'consumed') connector.deliverReason(h.agent_id, 'resume'); };
   checkouts.seedRepoHosts = config.repoHosts ?? null; // the repo host allowlist until the operator saves one (§8)
   const onboarding = new Onboarding({ db, keys, teams, audit, vault, guard, lockdown, pepper: config.pepper, hubUrl: config.publicUrl, collections: keyCollections });
   // A new team's part, or for a project's only team (FR-PLAN-12) the project-level module or line its kept records go in.
@@ -191,7 +230,7 @@ export async function buildApp(config: Config, extras: { demo?: import('./demo/d
   const alerts = new Alerts(db, audit, keys, vault, config.alerts ? { ...DEFAULT_ALERT_OPTS, ...config.alerts } : DEFAULT_ALERT_OPTS);
   const maintenance = new Maintenance(db, store, access, alerts, config.retention ? { ...DEFAULT_RETENTION, ...config.retention } : DEFAULT_RETENTION);
   if (config.maintenanceSeconds !== 0) maintenance.start((config.maintenanceSeconds ?? 60) * 1000);
-  const upkeep = setInterval(() => { try { teams.tick(true); channels.sweep(); users.sweepExpired(); routing.escalate(); hardware.sweepAll(); keyCollections.sweep(); taskAttachments.sweep(); } catch (e) { fastify.log.error(e); } }, 30_000);
+  const upkeep = setInterval(() => { try { teams.tick(true); channels.sweep(); users.sweepExpired(); routing.escalate(); hardware.sweepAll(); keyCollections.sweep(); taskAttachments.sweep(); connector.tick(); } catch (e) { fastify.log.error(e); } }, 30_000);
   upkeep.unref();
   const pairLimit = new RateLimit(db, 10, 10 * 60 * 1000);
   const sys = { kind: 'system' as const, id: null };
@@ -202,7 +241,7 @@ export async function buildApp(config: Config, extras: { demo?: import('./demo/d
   }
   bootstrapAdmin(db, audit, config);
 
-  const fastify = Fastify({ logger: config.logLevel === 'silent' ? false : { level: config.logLevel, redact: ['req.headers.authorization', 'req.headers.cookie', 'req.headers["x-agent-hub-session"]', 'req.headers["x-conclave-enrol-code"]'] }, bodyLimit: 2 * 1024 * 1024, trustProxy: config.trustProxy ?? 'loopback,linklocal,uniquelocal' });
+  const fastify = Fastify({ logger: config.logLevel === 'silent' ? false : { level: config.logLevel, redact: ['req.headers.authorization', 'req.headers.cookie', 'req.headers["x-agent-hub-session"]', 'req.headers["x-conclave-enrol-code"]', 'req.headers["x-conclave-relay-secret"]'] }, bodyLimit: 2 * 1024 * 1024, trustProxy: config.trustProxy ?? 'loopback' });
   await fastify.register(cookie);
   fastify.addContentTypeParser('application/json', { parseAs: 'string' }, (_req, body, done) => {
     if (body === '') return done(null, undefined);
@@ -216,6 +255,21 @@ export async function buildApp(config: Config, extras: { demo?: import('./demo/d
     if (e.statusCode && e.statusCode < 500) return reply.code(e.statusCode).send({ error: 'bad_request', message: e.message });
     fastify.log.error(err);
     return reply.code(500).send({ error: 'internal_error', message: 'Internal error.' });
+  });
+
+  // A registered relay's own secret makes its client-address header count (docs/relay.md): req.ip becomes the user's address and the
+  // request records the relay as seen. Without the secret, or with a wrong one, the header is ignored and the connection address stays.
+  fastify.decorateRequest('relay', null);
+  fastify.addHook('onRequest', async (req) => {
+    const secret = req.headers[RELAY_SECRET_HEADER];
+    if (typeof secret !== 'string') return;
+    const relay = relays.verify(secret);
+    if (!relay) return;
+    req.relay = relay;
+    const c = req.headers[RELAY_CLIENT_HEADER];
+    const ip = typeof c === 'string' ? clientAddress(c) : null;
+    if (ip) Object.defineProperty(req, 'ip', { value: ip, configurable: true });
+    relays.touch(relay.id, ip ?? req.ip);
   });
 
   fastify.addHook('onSend', async (req, reply, payload) => {
@@ -275,17 +329,19 @@ export async function buildApp(config: Config, extras: { demo?: import('./demo/d
     return reply.type(ext === 'woff2' ? 'font/woff2' : ext === 'woff' ? 'font/woff' : 'font/ttf').header('cache-control', 'public, max-age=86400').send(body);
   });
 
-  const adminRoutes = registerAdminApi(fastify, { ownerScope, users, routing, demo: extras.demo, db, keys, audit, vault, store, config, loginLimit, setup, links, messaging, teams, phase5: { access, lockdown, alerts, shares, channels, maintenance }, graph, feedback, hardware, decisions, directives, onboarding, clientFiles, blueprint, checkouts, checkoutKeys, delegations, mirror, keyCollections, taskAttachments, connector });
-  registerOnboarding(fastify, onboarding, clientFiles);
-  registerConnector(fastify, db, connector, keys, setup, directives);
+  const adminRoutes = registerAdminApi(fastify, { ownerScope, users, routing, demo: extras.demo, db, keys, audit, vault, store, config, loginLimit, setup, links, messaging, teams, phase5: { access, lockdown, alerts, shares, channels, maintenance }, graph, feedback, hardware, decisions, directives, onboarding, clientFiles, blueprint, checkouts, checkoutKeys, delegations, mirror, keyCollections, taskAttachments, connector, vaultSync, relays });
+  registerOnboarding(fastify, onboarding, clientFiles, config.connectorReleaseDir);
+  registerConnector(fastify, db, connector, keys, setup, directives, hardware);
+  registerVaultSync(fastify, { db, keys, audit, sync: vaultSync, vault, store });
   const bridge = registerBridge(fastify, setup, pairLimit, channels, keys);
-  fastify.addHook('preClose', async () => { bridge.releaseAll(); onboarding.releaseAll(); messaging.releaseAll(); teams.releaseAll(); clearInterval(upkeep); maintenance.stop(); });
+  fastify.addHook('preClose', async () => { bridge.releaseAll(); onboarding.releaseAll(); messaging.releaseAll(); teams.releaseAll(); clearInterval(upkeep); maintenance.stop(); vaultSync.stop(); });
 
   // ── MCP (stateless) ──
   const unauthorized = (reply: import('fastify').FastifyReply, msg: string) => reply.code(401).header('www-authenticate', 'Bearer').send({ error: 'unauthorized', message: msg });
   const originOk = (req: import('fastify').FastifyRequest) => {
     const o = req.headers.origin;
-    return o === undefined || config.allowedOrigins.includes(String(o).replace(/[/]+$/, ''));
+    const origin = String(o).replace(/[/]+$/, '');
+    return o === undefined || config.allowedOrigins.includes(origin) || relays.origins().includes(origin);
   };
   // Failed app-key checks are audited, but at most 20 rows per client address per minute: a client looping on a
   // wrong key must not grow the audit table without bound. The first rows are enough to see and alert on it.
@@ -302,11 +358,14 @@ export async function buildApp(config: Config, extras: { demo?: import('./demo/d
     const h = req.headers.authorization;
     const m = typeof h === 'string' ? /^Bearer\s+(\S+)$/i.exec(h) : null;
     const keyId = m ? /^ah_app_([a-z2-7]{12})_/.exec(m[1]!)?.[1] ?? null : null;
-    if (!m) { authFail(req, { subject: 'app_key', outcome: 'invalid', source: req.ip }); return unauthorized(reply, 'Missing app key.'); }
+    // A session holds no app key (docs/connector.md, "Isolation levels"): a call may carry a TURN token alone, and the hub finds the PC from it.
+    const turnOnly = !m && typeof req.headers['x-agent-hub-session'] === 'string' ? req.headers['x-agent-hub-session'].trim() : null;
+    if (!m && !turnOnly) { authFail(req, { subject: 'app_key', outcome: 'invalid', source: req.ip }); return unauthorized(reply, 'Missing app key.'); }
     let app;
-    try { app = keys.verifyKey(m[1]!, 'app_key'); }
+    try { app = m ? keys.verifyKey(m[1]!, 'app_key') : keys.appOfTurnToken(turnOnly!); }
     catch (e) {
       const code = e instanceof KeyError ? e.code : 'invalid';
+      if (!m) return reply.code(401).header('www-authenticate', 'Bearer error="invalid_token"').send({ error: 'login_required', message: 'This turn token is not valid. Ask the connector for a new one.' });
       authFail(req, { subject: 'app_key', keyId, outcome: ['invalid', 'unknown', 'suspended', 'expired', 'revoked'].includes(code) ? code : 'invalid', source: req.ip });
       return unauthorized(reply, 'Invalid app key.');
     }
@@ -336,6 +395,6 @@ export async function buildApp(config: Config, extras: { demo?: import('./demo/d
   fastify.get('/mcp', notAllowed);
   fastify.delete('/mcp', notAllowed);
 
-  return { fastify, users, routing, adminRoutes, connector, onboarding, keyCollections, taskAttachments, checkouts, checkoutKeys, delegations, clientFiles, db, keys, audit, vault, store, config, setup, links, messaging, teams, blueprint, shares, channels, access, lockdown, alerts, maintenance, graph, feedback, hardware, decisions, directives, mirror, close: async () => { await fastify.close(); await mirror.stop(); await store.stop(); db.close(); } };
+  return { fastify, relays, guard, users, routing, adminRoutes, connector, onboarding, keyCollections, taskAttachments, checkouts, checkoutKeys, delegations, clientFiles, db, keys, audit, vault, store, config, setup, links, messaging, teams, blueprint, shares, channels, access, lockdown, alerts, maintenance, graph, feedback, hardware, decisions, directives, mirror, close: async () => { await fastify.close(); await mirror.stop(); await store.stop(); db.close(); } };
 }
 export type App = Awaited<ReturnType<typeof buildApp>>;

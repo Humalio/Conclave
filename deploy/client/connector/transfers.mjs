@@ -1,11 +1,13 @@
 // The connector's file-transfer loop (docs/transfers.md). The connector's service runs it per hub, with the PC's app key over
 // its pinned HTTPS connection (`runLoop`). Single file, no dependencies.
-// The loop never touches a path outside the folders the hub reports as approved.
+// The loop never touches a path outside the folders the hub reports as approved. Run by the connector, a send reads only
+// from the sending agent's own registered folder instead (agentPathRefusal).
 import { constants, promises as fs } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import { homedir, platform } from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
+import { confDir } from './paths.mjs';
 
 export const VERSION = '0.4.0';
 const CONFIG_DIR = process.env.AGENT_HUB_HOME ? path.resolve(process.env.AGENT_HUB_HOME) : path.join(homedir(), '.agent-hub');
@@ -82,13 +84,47 @@ async function realOrParent(p) {
   }
 }
 
-let configReal; // realpath of CONFIG_DIR, resolved once
-/** Does `target` reach the bridge configuration folder under any spelling (8.3 short name, case variant, link)? */
+/** The folders no transfer may read or write: the connector's own (keys, builds, launcher) and the old bridge's. */
+export const protectedDirs = () => [confDir(), CONFIG_DIR];
+const realOf = new Map(); // folder -> its real path, once resolved
+/**
+ * Does `target` reach the connector's folder or the old bridge folder under any spelling (8.3 short name, case variant,
+ * link)? Both the path as given and its real path are compared with both the folders as given and their real paths.
+ */
 export async function inConfigDir(target) {
-  if (isInside(target, CONFIG_DIR)) return true;
-  configReal ??= realOrParent(CONFIG_DIR);
-  return isInside(await realOrParent(target), await configReal);
+  const dirs = protectedDirs();
+  if (dirs.some((d) => isInside(target, d))) return true;
+  const real = await realOrParent(target);
+  for (const d of dirs) {
+    if (!realOf.has(d)) realOf.set(d, await realOrParent(d));
+    if (isInside(real, realOf.get(d)) || isInside(target, realOf.get(d))) return true;
+  }
+  return false;
 }
+
+/**
+ * Files a receive job never writes, whatever folder it lands in: each makes an agent or git run something
+ * (hooks, git settings, agent settings and MCP servers, the Codex settings, an override of an agent's instructions).
+ * `null` or the reason, for a path relative to the folder being written or an absolute one.
+ */
+export function protectedFileReason(p) {
+  const parts = String(p).split(/[\\/]+/).filter(Boolean).map((x) => x.normalize('NFC').toLowerCase().replace(/[. ]+$/, ''));
+  const name = parts.at(-1) ?? '';
+  const parent = parts.at(-2) ?? '';
+  if (parts.some((x, i) => x === '.git' && parts[i + 1] === 'hooks' && i + 1 < parts.length - 1)) return 'a git hook';
+  if (parts.some((x) => x === 'git~1')) return 'a git folder under its short name';
+  if (name === 'config' && parent === '.git') return 'git settings';
+  if (name === 'settings.json' && parent === '.claude') return 'Claude settings';
+  if (name === 'settings.local.json' && parent === '.claude') return 'Claude settings';
+  if (name === '.mcp.json') return 'MCP server settings';
+  if (name === 'config.toml' && parent === '.codex') return 'Codex settings';
+  if (name === 'agents.override.md') return 'an override of agent instructions';
+  return null;
+}
+const refuseProtected = (p) => {
+  const why = protectedFileReason(p);
+  if (why) throw new Fatal(`refused: a received file may not replace ${why} (${path.basename(p)})`);
+};
 
 const logLine = (...a) => console.log(new Date().toISOString(), ...a);
 const log = logLine;
@@ -148,14 +184,44 @@ export function parseIgnore(text) {
   };
 }
 
-const ALWAYS_SKIP_DIRS = new Set(['.git', 'node_modules']);
+const ALWAYS_SKIP_DIRS = new Set(['.git', '.codex', 'node_modules']);
+/** The role files the connector writes or reads at the root of an agent's folder. */
+const ROLE_FILES = new Set(['claude.md', 'agents.md', 'agents.override.md']);
+const AGENT_RE = /^[A-Za-z0-9][A-Za-z0-9 ._-]{0,99}$/;
+export const AGENT_FROM = 'Files may come only from inside your own folder on this PC (the folder the connector registered for you), not from .git, .codex, your role file or the connector\'s folders.';
+
+/**
+ * Why the connector will not send `target` for an agent whose registered folders are `folders`, or null. The real path
+ * counts (links and junctions followed, so a link out of the folder is refused): it must lie inside one of the folders'
+ * real paths, not in a `.git` or `.codex` folder on the way, not be a role file at the folder's root, and not reach the
+ * connector's own folders (`refusedDirs`, and the bridge configuration folder) under any spelling.
+ */
+export async function agentPathRefusal(target, folders, refusedDirs = [], os = platform()) {
+  if (typeof target !== 'string' || !path.isAbsolute(target) || target.includes('\0')) return 'not an absolute path';
+  let real;
+  try { real = await fs.realpath(target); } catch (e) { return e?.code === 'ENOENT' ? 'no such file' : 'the path cannot be read'; }
+  if (await inConfigDir(real).catch(() => true)) return 'inside the connector\'s own folder';
+  for (const d of refusedDirs) {
+    const r = await realOrParent(d).catch(() => null);
+    if (isInside(real, d, os) || (r && isInside(real, r, os))) return 'inside the connector\'s own folder';
+  }
+  for (const f of folders ?? []) {
+    const root = await fs.realpath(f).catch(() => null);
+    if (!root || !isInside(real, root, os)) continue;
+    const parts = path.relative(root, real).split(path.sep).filter(Boolean).map((s) => s.toLowerCase());
+    if (parts.some((s) => s === '.git' || s === '.codex')) return 'inside .git or .codex';
+    if (parts.length === 1 && ROLE_FILES.has(parts[0])) return 'a role file';
+    return null;
+  }
+  return 'outside your own folder';
+}
 const isEnvFile = (n) => /^\.env(?:\.|$)/i.test(n);
 
 export async function requirePath(target, allowed) {
   // Compare real paths: a lexical check misses C:\Users\X\AGENT-~1 or ~/.AGENT-HUB and would expose the bridge key.
   // An error while resolving counts as inside (fail closed).
   if (await inConfigDir(target).catch(() => true) || !(await checkPath(target, allowed()))) {
-    throw new Fatal('path outside the allowed folders or inside bridge configuration');
+    throw new Fatal("path outside the allowed folders or inside the connector's own folder");
   }
 }
 
@@ -300,7 +366,16 @@ async function sendJob(job, ctx) {
   checkJobResponse(st0);
   if (!st0.ok) throw new Error(`state answered ${st0.status}`);
   if (st.status !== 'open' || st.sender_done) throw new Gone();
-  const check = (p) => requirePath(p, allowed);
+  let check = (p) => requirePath(p, allowed);
+  if (ctx.agentFolders) {
+    // The connector: only the sending agent's own folder, whatever folders the hub approved for the PC.
+    const folders = job.agent ? ctx.agentFolders(job.agent) : [];
+    if (!folders.length) throw new Fatal(`This PC has no folder registered for ${job.agent ? 'you' : 'the sender'} on this hub. ${AGENT_FROM}`);
+    check = async (p) => {
+      const why = await agentPathRefusal(p, folders, ctx.refusedDirs ?? []);
+      if (why) throw new Fatal(`${path.basename(String(p))}: ${why}. ${AGENT_FROM}`);
+    };
+  }
   const plan = await buildPlan(paths, raw, check);
   const resume = st.received_offset ?? 0;
   if (!Number.isSafeInteger(resume) || resume < 0 || resume > plan.total) throw new Fatal('invalid resume offset or source changed');
@@ -349,6 +424,7 @@ async function receiveJob(job, ctx) {
   const target = job.save_to;
   const check = (p) => requirePath(p, allowed);
   await check(target);
+  if (raw) refuseProtected(target);
   const dir = raw ? path.dirname(target) : target;
   const part = raw ? `${target}.ah-${job.channel_id}.part` : path.join(target, `.ah-${job.channel_id}.part`);
   await check(part);
@@ -511,6 +587,7 @@ export async function extract(file, dest, allowed, signal) {
       if (!safeEntry(h?.p) || !Number.isSafeInteger(h.s) || h.s < 0 || h.s > size - pos) throw new Fatal('invalid stream entry');
       const parts = h.p.split('/');
       if (parts.some((p) => /^\.ah-/i.test(p))) throw new Fatal('reserved transfer path');
+      refuseProtected(path.join(dest, ...parts));
       const key = platform() === 'linux' ? h.p : h.p.normalize('NFC').toLowerCase();
       if (files.has(key) || dirs.has(key)) throw new Fatal('duplicate or conflicting entry path');
       files.add(key);
@@ -573,14 +650,17 @@ function validJob(job) {
     ['send', 'receive'].includes(job.kind) && job.id === `${job.channel_id}:${job.kind}` &&
     ['raw', 'tar'].includes(job.framing) &&
     (job.kind === 'receive' ? typeof job.save_to === 'string' :
-      Array.isArray(job.local_paths) ? job.local_paths.length > 0 && job.local_paths.every((p) => typeof p === 'string') : typeof job.local_path === 'string');
+      (job.agent === undefined || (typeof job.agent === 'string' && AGENT_RE.test(job.agent))) &&
+      (Array.isArray(job.local_paths) ? job.local_paths.length > 0 && job.local_paths.every((p) => typeof p === 'string') : typeof job.local_path === 'string'));
 }
 
 /**
  * The poll and transfer loop for one hub. `key` is the bridge key, or the PC's app key when the connector's service runs
- * it; `fetch` is then the connector's pinned fetch, which reaches only that hub over its pinned CA.
+ * it; `fetch` is then the connector's pinned fetch, which reaches only that hub over its pinned CA. The connector also gives
+ * `agentFolders(label)`, the folders registered for that agent on this hub, and `refusedDirs`, its own folders: a send
+ * then reads only from the sending agent's folder (agentPathRefusal).
  */
-export async function runLoop({ hub, key, signal, fetch: fetchImpl = fetch, log = logLine }) {
+export async function runLoop({ hub, key, signal, fetch: fetchImpl = fetch, log = logLine, agentFolders = null, refusedDirs = [] }) {
   const cfg = { hub, bridge_key: key };
   let allowed = [];
   let failures = 0;
@@ -611,7 +691,7 @@ export async function runLoop({ hub, key, signal, fetch: fetchImpl = fetch, log 
         for (const job of data.jobs ?? []) {
           if (running.size >= 4) break;
           if (!validJob(job) || running.has(job.id)) continue;
-          const work = runJob(job, { api, allowed: () => allowed, log, signal })
+          const work = runJob(job, { api, allowed: () => allowed, log, signal, agentFolders, refusedDirs })
             .catch((e) => { if (!signal.aborted) log(`job ${job.id} crashed: ${e.message}`); })
             .finally(() => running.delete(job.id));
           running.set(job.id, work);

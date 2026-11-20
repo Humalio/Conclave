@@ -1,7 +1,8 @@
 /**
- * A worker takes back a task that lapsed from it (docs/specification.md "Task turns and deadlines", docs/mcp.md task_claim):
- * a silent member's tasks go back to open and record who they lapsed from; that worker may claim each back within 24
- * hours, in the status it held, unless the coordinator assigned it meanwhile, the worker left the team or the window passed.
+ * A worker takes back a task that lapsed from it (docs/mcp.md task_claim). Since one delivery model (migration 0153) no task
+ * lapses: a silent member keeps its work. A task that lapsed before the upgrade still records who it lapsed from; that
+ * worker may claim it back within 24 hours, in the status it held, unless the coordinator assigned it meanwhile, the
+ * worker left the team or the window passed. The tests seed such a lapse as the previous release's sweep left it.
  * Also: a resubmission while in review returns the hand-off with the reviewer's wake line, as the first submission does.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
@@ -85,7 +86,10 @@ beforeAll(async () => {
 });
 afterAll(async () => { await app.close(); });
 
-/** W1 holds the task in `status`, then goes silent past the lease: the sweep releases it. */
+/**
+ * W1 holds the task in `status` and goes silent past the old lease: the task stays with W1 (one delivery model). Then the
+ * lapse the previous release's sweep would have made is seeded: open, no assignee, lapsed_from W1, its turn closed.
+ */
 async function lapsed(X: T, status: 'assigned' | 'in_progress' | 'changes_requested', claimable = false) {
   const t = await mkTask(X, { claimable });
   await X.C('task_assign', { task_id: t.id, agent_id: X.w1.id });
@@ -96,6 +100,11 @@ async function lapsed(X: T, status: 'assigned' | 'in_progress' | 'changes_reques
   }
   silence(X.tid, X.w1.id, 31 * 60_000);
   app.teams.tick();
+  expect(app.teams.task(t.id)).toMatchObject({ status, assignee_agent_id: X.w1.id, lapsed_from: null });
+  const now = Date.now();
+  app.db.prepare("UPDATE tasks SET status='open', assignee_agent_id=NULL, lease_expires_at=NULL, progress_until=NULL, overdue_at=NULL, lapsed_from=?, lapsed_at=?, lapsed_status=?, version=version+1, updated_at=? WHERE id=?")
+    .run(X.w1.id, now, status, now, t.id);
+  app.db.prepare("UPDATE task_turns SET closed_at=?, close_reason='released' WHERE task_id=? AND closed_at IS NULL").run(now, t.id);
   const k = app.teams.task(t.id)!;
   expect(k).toMatchObject({ status: 'open', assignee_agent_id: null, lapsed_from: X.w1.id, lapsed_status: status });
   return k;
@@ -103,13 +112,11 @@ async function lapsed(X: T, status: 'assigned' | 'in_progress' | 'changes_reques
 const claim = (c: Call, k: { id: string; version: number }) => c('task_claim', { task_id: k.id, version: k.version });
 
 describe('taking back a task that lapsed', () => {
-  it('the worker it lapsed from holds it again in the status it lapsed from, and the notices say until when', async () => {
+  it('the worker it lapsed from holds it again in the status it lapsed from', async () => {
     const X = await team();
     const k = await lapsed(X, 'in_progress');
-    // The notices name the way back and its end.
-    const body = (agent: string) => (app.db.prepare("SELECT body FROM agent_notices WHERE agent_id=? AND kind='lease_expired' ORDER BY rowid DESC LIMIT 1").get(agent) as { body: string }).body;
-    expect(body(X.w1.id)).toMatch(/You can take it back with task_claim until \d{4}-\d\d-\d\dT\d\d:\d\dZ/);
-    expect(body(X.c.id)).toContain('may take it back with task_claim until');
+    // No task lapses any more, so no lease_expired notice is sent.
+    expect(app.db.prepare("SELECT COUNT(*) n FROM agent_notices WHERE kind='lease_expired'").get()).toEqual({ n: 0 });
     // An hour later, still open: W1 claims it back, started, with a fresh clock.
     app.db.prepare('UPDATE tasks SET lapsed_at=lapsed_at-3600000 WHERE id=?').run(k.id);
     const r = await claim(X.W1, k);
@@ -187,7 +194,6 @@ describe('taking back a task that lapsed', () => {
 describe('a resubmission while in review', () => {
   it('returns the hand-off with the reviewer\'s wake line, as the first submission does', async () => {
     const X = await team();
-    expect((await api('PATCH', `/teams/${X.tid}`, { delivery_mode: 'on_demand' })).status).toBe(200);
     const t = await mkTask(X);
     await X.C('task_assign', { task_id: t.id, agent_id: X.w1.id });
     await X.W1('task_start', { task_id: t.id });

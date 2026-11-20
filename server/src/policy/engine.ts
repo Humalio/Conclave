@@ -65,7 +65,7 @@ function ceilingRefusal(cap: Cap, action: string, resource: string): { layer: Ow
 export function ownerAllows(cap: Cap, action: string, resource: string): boolean { return !ceilingRefusal(cap, action, resource); }
 
 /**
- * Reserved folders (docs/vault.md, "99 Conclave"): path prefixes such as "/vicomtech/99 Conclave" that only the hub
+ * Reserved folders (docs/vault.md, "99 Conclave"): path prefixes such as "/team/99 Conclave" that only the hub
  * writes. Every fs.* write under one is refused for every key; any other action under one needs an allow rule whose
  * own path pattern names the folder (its segments up to the folder are literal). A wildcard such as /<alias>/** does
  * not count. Set once at boot (app.ts); the engine stays a function of its inputs and this list.

@@ -50,6 +50,18 @@ test('an invalid later frame cannot publish an earlier file', async (t) => {
   }
 });
 
+test('a received folder holding a git hook or agent settings is refused before anything is written', async (t) => {
+  const root = mkdtempSync(path.join(tmpdir(), 'ahb-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const stream = path.join(root, 'transfer');
+  const out = path.join(root, 'out');
+  for (const bad of ['.git/hooks/pre-commit', '.git/config', '.claude/settings.json', '.mcp.json', '.codex/config.toml', 'AGENTS.override.md']) {
+    writeFileSync(stream, Buffer.concat([frameHeader('ok.txt', 2), Buffer.from('ok'), frameHeader(bad, 2), Buffer.from('x\n'), Buffer.alloc(4)]));
+    await assert.rejects(() => extract(stream, out, [root]), /may not replace/);
+    assert.equal(existsSync(path.join(out, 'ok.txt')), false);
+  }
+});
+
 test('publishing replaces the destination entry without writing through a hard link', async (t) => {
   const root = mkdtempSync(path.join(tmpdir(), 'ahb-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));

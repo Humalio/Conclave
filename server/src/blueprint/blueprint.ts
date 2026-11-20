@@ -11,6 +11,7 @@
  * §4, §2.6: `write` is the operator's (or the hub's own) and trusts its caller; agents go through `submit`, which
  * checks each op against the rights matrix (rights.ts) and applies the batch or files it as one proposal for the operator.
  */
+import { l2 } from '../notices/l2.js';
 import { NOT_ALLOWED } from '../policy/engine.js';
 import type { Db } from '../db/db.js';
 import { tx } from '../db/db.js';
@@ -23,7 +24,7 @@ import { questions, blockingCount, type Questions } from './questions.js';
 import { claimSupport, paperReadiness, contradicts, decided, type Support, type ClaimState } from './support.js';
 import { glossaryOf, findCodes, termWords, resolve, splitBody, leadingCode, acceptanceEmpty, isNoiseCode, citedSources, citedRefs, classifySource, warn, issueText, type Known, type TermRef, type Warning, type PlainCheck } from './plain.js';
 import { opRight, batchVerdict, type BpRole, type Verdict } from './rights.js';
-import { STATUS_FORMAT, openRequest, openRequests, answerRequests, type RequestScope } from './requests.js';
+import { STATUS_FORMAT, openRequest, openRequests, answerRequests, openRefine, requestById, refineKeys, refineChecks, type RequestScope, type RequestRow, type RefineChecks } from './requests.js';
 import { scanRefs, RefError } from '../util/refs.js';
 import type { Keys } from '../keys/keys.js';
 import type { Audit, Actor } from '../audit/audit.js';
@@ -45,6 +46,8 @@ export interface BpActor { kind: BpActorKind; id: string | null }
 export interface ProjectRow {
   id: string; key: string; name: string; kind: 'implementation' | 'research'; status: string; version: number;
   created_by_kind: string; created_by_id: string | null; created_at: number; updated_at: number;
+  /** The project's fixed task-tag list: a JSON array of {tag, name}, at most 7; '[]' means free tags (teams.ts). */
+  task_tags?: string;
   /** Whether this project's tasks need review: required (default), per_task (the task creator decides) or none. */
   review_policy: 'required' | 'per_task' | 'none';
   /** Where agents' new tasks land: in the operator's backlog (default) or open at once. */
@@ -113,10 +116,12 @@ export type Op =
        * Hub-only (§4.2): an op of a restore plan. It may bring back a deleted key, replaces the fields as a whole and
        * names the writer. bp_write strips unknown op fields and POST …/ops refuses them, so only restorePlan sets it.
        */
-      restore?: { by?: BpActor; claimed?: BpActor | null } }
-  | { op: 'remove'; key: string; rev?: number }
-  | { op: 'link' | 'unlink'; from: string; to: string; rel: string }
-  | { op: 'move'; key: string; parent_key?: string | null; position?: number; rev?: number };
+      restore?: { by?: BpActor; claimed?: BpActor | null };
+      /** Why this op (at most 200 characters, L2 text), and an optional group: ops of one group are applied together. */
+      reason?: string; group?: string }
+  | { op: 'remove'; key: string; rev?: number; reason?: string; group?: string }
+  | { op: 'link' | 'unlink'; from: string; to: string; rel: string; reason?: string; group?: string }
+  | { op: 'move'; key: string; parent_key?: string | null; position?: number; rev?: number; reason?: string; group?: string };
 
 export type ProposalStatus = 'open' | 'applied' | 'rejected' | 'withdrawn' | 'stale';
 export interface Proposal {
@@ -126,6 +131,10 @@ export interface Proposal {
   type: 'ops' | 'replan'; replan_id: string | null;
   /** The delegate the proposing agent ran for when it proposed (contributor mode, docs/checkout.md §9.1). */
   via?: string;
+  /** The refine request it answers, the ops the operator left out of a partial apply (index and key), and how many were written. */
+  request_id: number | null; declined: { index: number; key: string | null }[] | null; applied_ops: number | null;
+  /** Per op: the indices of the ops it needs (parent staged in the batch, link to a new key, same group, earlier op on the same key). */
+  needs?: number[][];
 }
 /** Kinds a re-plan may reset, and the default set. Decisions, reports, papers and claims are kept by default. */
 export const REPLAN_KINDS = ['fr', 'nfr', 'ac', 'milestone', 'release', 'risk', 'issue', 'term', 'hypothesis', 'question'];
@@ -335,7 +344,8 @@ function atomic<T>(db: Db, fn: () => T): T {
 
 const parse = <T>(s: string | null | undefined, d: T): T => { try { return s ? JSON.parse(s) as T : d; } catch { return d; } };
 const toItem = (r: ItemRow): Item => ({ ...r, fields: parse(r.fields, {}) });
-const toProposal = (r: any): Proposal => ({ ...r, ops: parse(r.ops, []), revs: parse(r.revs, {}), type: r.type ?? 'ops', replan_id: r.replan_id ?? null });
+const toProposal = (r: any): Proposal => ({ ...r, ops: parse(r.ops, []), revs: parse(r.revs, {}), type: r.type ?? 'ops', replan_id: r.replan_id ?? null,
+  request_id: r.request_id ?? null, declined: parse(r.declined, null), applied_ops: r.applied_ops ?? null });
 /** The kinds, in section order (§1): bp_read lists items in this order, and errors name them. */
 export const KIND_ORDER: string[] = Object.values(SECTION_KINDS).flat();
 /** The SQL order of bp_items: section, then position and key. */
@@ -911,6 +921,67 @@ export class Blueprint {
       if (p) this.reviewRequestEvent(p, teamId, actor, note, now);
     });
   }
+  /**
+   * Refine requirements with the coordinator (docs/blueprint.md): a plan request that carries the keys it covers (frozen
+   * now) and the checks asked for. Asking again edits the open request until a proposal exists; then only Send back
+   * reopens it. Returns the request id.
+   */
+  requestRefine(teamId: string, a: { note: string; keys: string[]; checks: RefineChecks }, actor: BpActor): { id: number; edited: boolean } {
+    const p = this.projectOfTeam(teamId);
+    if (!p) throw err('invalid_state', 'The team is not in a project.');
+    const live = new Set(this.items(p.id).map((i) => i.key));
+    const keys = [...new Set(a.keys)].filter((k) => live.has(k));
+    if (!keys.length) throw err('invalid_argument', 'Pick at least one requirement that exists.');
+    const note = a.note.trim();
+    if (!note || note.length > 2000) throw err('invalid_argument', 'Say what should change, in 1 to 2000 characters.');
+    return atomic(this.db, () => {
+      const r = openRefine(this.db, { teamId, note, keys, checks: a.checks, by: actor });
+      if (!r) throw err('invalid_state', 'The coordinator has already proposed changes for this request. Review them, or send them back with a note, before asking again.');
+      if (!r.edited) this.reviewRequestEvent(p, teamId, actor, note, Date.now());
+      return r;
+    });
+  }
+  /** The team's open refine request, if any. */
+  openRefineOf(teamId: string): RequestRow | undefined {
+    return openRequests(this.db, teamId, 'plan').find((r) => r.scope_keys !== null);
+  }
+  /**
+   * A refine proposal's rules (enforced at filing): only the request's own team may answer it; every op says why (at most
+   * 200 characters); nothing is deleted (a requirement is dropped by status); an op touches only keys in the request's
+   * scope or items it adds; existing acceptance criteria are never edited; new ones only when that check was asked for.
+   */
+  private checkRefine(p: ProjectRow, team: { id: string }, role: BpRole, req: RequestRow, ops: Op[]): void {
+    if (role !== 'coordinator') throw err('denied', 'Only the coordinator of the team answers a refine request.');
+    if (req.team_id !== team.id || req.answered_at !== null) throw err('invalid_state', 'That request is not open for your team.');
+    if (req.proposal_id) throw err('invalid_state', 'The request already has a proposal; the operator reviews it or sends it back first.');
+    const scope = new Set(refineKeys(req) ?? []), checks = refineChecks(req);
+    const live = new Map(this.items(p.id).map((i) => [i.key, i]));
+    const added = new Set<string>();
+    const inScope = (k: string) => scope.has(k) || added.has(k);
+    ops.forEach((o, i) => {
+      const at = `op ${i + 1}`;
+      if (!o.reason?.trim()) throw err('invalid_argument', `${at}: a refine proposal gives a reason on every op (at most 200 characters).`);
+      if (o.reason.length > 200) throw err('invalid_argument', `${at}: the reason is at most 200 characters.`);
+      if (o.op === 'remove') throw err('denied', `${at}: a refine proposal never deletes. Drop a requirement with an upsert of status dropped (for a merge, name the target in the reason).`);
+      if (o.op === 'upsert') {
+        const cur = live.get(o.key);
+        if (cur) {
+          if (cur.kind === 'ac' || o.kind === 'ac') throw err('denied', `${at}: ${o.key} is an existing acceptance criterion, or would become one; a refine proposal may add criteria but never edit them.`);
+          if (!scope.has(o.key)) throw err('denied', `${at}: ${o.key} is outside the requirements this request covers.`);
+        } else {
+          added.add(o.key);
+          if (o.kind === 'ac') {
+            if (!checks.missing_ac) throw err('denied', `${at}: the missing acceptance criteria check was not asked for, so no criteria may be added.`);
+            if (!inScope(o.parent_key ?? '')) throw err('denied', `${at}: a new criterion goes under a requirement this request covers.`);
+          }
+        }
+      } else if (o.op === 'move') {
+        if (!scope.has(o.key)) throw err('denied', `${at}: ${o.key} is outside the requirements this request covers.`);
+      } else if (!inScope(o.from) && !inScope(o.to)) {
+        throw err('denied', `${at}: neither ${o.from} nor ${o.to} is in the requirements this request covers.`);
+      }
+    });
+  }
   private reviewRequestEvent(p: ProjectRow, teamId: string | null, actor: BpActor, note: string | null, at: number): void {
     this.db.prepare("INSERT INTO bp_events(project_id,team_id,kind,version,actor_kind,actor_id,items,note,created_at) VALUES (?,?,'review_request',?,?,?,?,?,?)")
       .run(p.id, teamId, this.project(p.id)!.version, actor.kind, actor.id, this.liveCount(p.id), note, at);
@@ -1129,6 +1200,14 @@ export class Blueprint {
     return max;
   }
 
+  /** Evidence never names past work recorded as done: nobody reviewed it (docs/teams.md, "Record past work"). */
+  private checkRecordedEvidence(v: string): void {
+    for (const r of scanRefs(v)) {
+      if (r.kind !== 'task') continue;
+      const t = this.db.prepare('SELECT recorded_at FROM tasks WHERE id=?').get(r.id) as { recorded_at: number | null } | undefined;
+      if (t?.recorded_at) throw err('invalid_argument', `Field evidence: task:${r.id} was recorded as done without review, so it cannot be evidence. Name reviewed work instead.`);
+    }
+  }
   private checkFields(kind: string, given: Record<string, unknown>, checkRefs = false, ext: { allowed: readonly string[] | null; kept: ExternalRef[] } = { allowed: null, kept: [] }): Record<string, unknown> {
     const spec = KINDS[kind]!;
     const out: Record<string, unknown> = {};
@@ -1147,7 +1226,7 @@ export class Blueprint {
       else if (t === 'objs') { if (!Array.isArray(v) || v.some((x) => !x || typeof x !== 'object' || Array.isArray(x))) throw bad(); }
       else if (t === 'obj') { if (typeof v !== 'object' || Array.isArray(v)) throw bad(); }
       // Evidence holds outside pointers (F-18): every reference in it must parse, and another item is a link, not a field.
-      if (k === 'evidence' && checkRefs && typeof v === 'string') checkEvidence(v);
+      if (k === 'evidence' && checkRefs && typeof v === 'string') { checkEvidence(v); this.checkRecordedEvidence(v); }
       out[k] = v;
     }
     return out;
@@ -1780,7 +1859,7 @@ export class Blueprint {
    * at once; any that needs the operator → the whole batch becomes one proposal; any the caller may not even propose →
    * refused. Lockdown, a paused or ended team and a paused or closed project refuse writes and proposals alike.
    */
-  submit(projectId: string, a: { version: number; ops: Op[]; reason?: string | null; team_id?: string | null }, agentId: string): SubmitResult {
+  submit(projectId: string, a: { version: number; ops: Op[]; reason?: string | null; team_id?: string | null; request_id?: number }, agentId: string): SubmitResult {
     const p = this.project(projectId);
     if (!p) throw err('not_found', 'No such project.');
     const { team, role } = this.seat(p.id, agentId, a.team_id);
@@ -1788,6 +1867,9 @@ export class Blueprint {
     if (!Number.isInteger(a.version)) throw err('invalid_argument', 'Pass the project version you read.');
     this.checkBatch(a.ops);
     this.noRestoreMarker(a.ops);
+    const req = a.request_id !== undefined ? requestById(this.db, a.request_id) : undefined;
+    if (a.request_id !== undefined && !req) throw err('not_found', 'No such request.');
+    if (req) this.checkRefine(p, team, role, req, a.ops);
     const reason = a.reason?.trim().slice(0, 2000) || null;
     const { rights, verdict, replan } = this.rightsOf(p, team.id, role, a.ops, agentId);
     if (verdict === 'deny') {
@@ -1799,7 +1881,8 @@ export class Blueprint {
       throw err('denied', `Not yours to change: ${[...new Set(rights.filter((r) => r.verdict === 'deny').map((r) => r.why))].join('; ')}. ${RIGHTS_RULE}`);
     }
     const actor: BpActor = { kind: 'agent', id: agentId };
-    if (verdict === 'apply') {
+    // A write with a refine request's id is always a proposal, even where the coordinator could write directly.
+    if (verdict === 'apply' && !req) {
       const r = atomic(this.db, () => {
         const decided = a.ops.flatMap((o, i) => (rights[i]!.decided && 'key' in o ? [o.key] : []));
         const ruled = this.ruledOf(a.ops, rights);
@@ -1818,7 +1901,7 @@ export class Blueprint {
       const rule = this.ruledOf(a.ops, rights)?.rule;
       return { status: 'applied', ...r, ...(rule ? { rule } : {}) };
     }
-    const proposal = this.propose(p, team, agentId, a.ops, a.version, reason);
+    const proposal = this.propose(p, team, agentId, a.ops, a.version, reason, false, req?.id);
     return { status: 'proposed', proposal, why: [...new Set(rights.filter((r) => r.verdict === 'propose').map((r) => r.why))] };
   }
 
@@ -2021,7 +2104,38 @@ export class Blueprint {
   /** The person who steered an agent when it wrote at `at`: a delegate whose delegation covered that moment. */
   private viaAt(agentId: string | null, at: number): string | null { return delegateAt(this.db, agentId, at); }
   /** A proposal with its "via <delegate>" label, when its agent proposed it while delegated. */
-  private withVia(p: Proposal): Proposal { const via = this.viaAt(p.agent_id, p.created_at); return via ? { ...p, via } : p; }
+  private withVia(p: Proposal): Proposal {
+    const via = this.viaAt(p.agent_id, p.created_at);
+    const q = p.type === 'ops' && p.status === 'open' && p.ops.length > 1 ? { ...p, needs: this.opNeeds(p.project_id, p.ops) } : p;
+    return via ? { ...q, via } : q;
+  }
+  /**
+   * What each op of a proposal needs, by index (docs/blueprint.md §2.6), worked out by the hub and never taken from the
+   * agent's text: the op that adds the parent it sits under, the op that adds a key it links to, an earlier op on the
+   * same key, and every other op of its `group` (the agent's group only adds to these).
+   */
+  opNeeds(projectId: string, ops: Op[]): number[][] {
+    const adds = new Map<string, number>(); // key → the op that adds it (an upsert of a key that is not live)
+    ops.forEach((o, i) => { if (o.op === 'upsert' && !adds.has(o.key) && !this.liveRow(projectId, o.key)) adds.set(o.key, i); });
+    const keyOf = (o: Op) => ('key' in o ? o.key : null);
+    const out = ops.map((o, i) => {
+      const n = new Set<number>();
+      const add = (k: string | null | undefined) => { const j = k ? adds.get(k) : undefined; if (j !== undefined && j !== i) n.add(j); };
+      if (o.op === 'upsert' || o.op === 'move') add(o.parent_key);
+      if (o.op === 'link' || o.op === 'unlink') { add(o.from); add(o.to); }
+      const k = keyOf(o);
+      if (k) for (let j = 0; j < i; j++) if (keyOf(ops[j]!) === k) n.add(j);
+      if (o.group) ops.forEach((x, j) => { if (j !== i && x.group === o.group) n.add(j); });
+      return n;
+    });
+    return out.map((n) => [...n].sort((a, b) => a - b));
+  }
+  /** The op indices a choice needs in all: the choice and everything it needs, transitively. */
+  private closure(needs: number[][], pick: number[]): number[] {
+    const seen = new Set<number>(), todo = [...pick];
+    while (todo.length) { const i = todo.pop()!; if (seen.has(i)) continue; seen.add(i); todo.push(...(needs[i] ?? [])); }
+    return [...seen].sort((a, b) => a - b);
+  }
   /** The restore marker is the hub's own (§4.2): an agent's ops never carry one, even if a caller other than the tools passes it. */
   private noRestoreMarker(ops: Op[]): void {
     if (ops.some((o) => (o as { restore?: unknown }).restore !== undefined)) throw err('invalid_argument', 'restore is not an op field. To restore from an export, use bp_write {restore: {text}} instead of ops.');
@@ -2343,7 +2457,7 @@ export class Blueprint {
     return { status: 'proposed', plan, proposal: this.propose(p, team, agentId, plan.ops, a.version, reason, true) };
   }
 
-  private propose(p: ProjectRow, team: { id: string; name: string }, agentId: string, ops: Op[], version: number, reason: string | null, force = false): Proposal {
+  private propose(p: ProjectRow, team: { id: string; name: string }, agentId: string, ops: Op[], version: number, reason: string | null, force = false, requestId?: number): Proposal {
     const id = `bpp_${randomToken(10)}`;
     atomic(this.db, () => {
       const full = this.proposalRoom(p, agentId);
@@ -2355,13 +2469,14 @@ export class Blueprint {
         const k = o.op === 'upsert' || o.op === 'remove' || o.op === 'move' ? o.key : null;
         if (typeof k === 'string' && !k.endsWith('*')) revs[k] = this.liveRow(p.id, k)?.rev ?? null;
       }
-      this.db.prepare("INSERT INTO bp_proposals(id,project_id,team_id,agent_id,ops,base_version,reason,status,created_at,revs) VALUES (?,?,?,?,?,?,?,'open',?,?)")
-        .run(id, p.id, team.id, agentId, JSON.stringify(ops), version, reason, Date.now(), JSON.stringify(revs));
+      this.db.prepare("INSERT INTO bp_proposals(id,project_id,team_id,agent_id,ops,base_version,reason,status,created_at,revs,request_id) VALUES (?,?,?,?,?,?,?,'open',?,?,?)")
+        .run(id, p.id, team.id, agentId, JSON.stringify(ops), version, reason, Date.now(), JSON.stringify(revs), requestId ?? null);
+      if (requestId !== undefined) this.db.prepare('UPDATE bp_report_requests SET proposal_id=? WHERE id=?').run(id, requestId);
     });
     const pr = this.proposal(id)!, who = this.label(agentId), keys = this.opKeys(ops);
     // Hub-written text only: the agent's reason is L2 and is read with the proposal, never carried in a notice.
     this.notify(this.coordinators(team.id).filter((c) => c !== agentId), 'bp_proposal',
-      `${who} proposed a blueprint change in ${p.key} (${id}, ${ops.length} op${ops.length === 1 ? '' : 's'}: ${keys}). The operator applies or rejects it.`);
+      `${who} proposed a blueprint change in ${p.key} (${id}, ${ops.length} op${ops.length === 1 ? '' : 's'}: ${l2(keys, 300)}). The operator applies or rejects it.`);
     this.deps.audit?.alert('info', 'bp_proposal', id, { project: p.key, team: team.name, agent: who, ops: ops.length, keys });
     this.deps.audit?.event({ kind: 'agent', id: agentId }, 'blueprint.propose', { kind: 'bp_proposal', id }, { project: p.key, ops: ops.length });
     return pr;
@@ -2406,22 +2521,40 @@ export class Blueprint {
    * The operator applies a proposal: its ops replay against the current version. If an item it writes changed since it
    * was filed, or an op no longer fits, nothing is written and the proposal turns stale; the agent is told to re-propose.
    */
-  applyProposal(id: string, actor: BpActor, note?: string | null): { proposal: Proposal; result: WriteResult | null; stale: string | null } {
-    return atomic(this.db, () => this.applyOpen(this.mustOpen(id), actor, note));
+  applyProposal(id: string, actor: BpActor, note?: string | null, pick?: number[]): { proposal: Proposal; result: WriteResult | null; stale: string | null } {
+    return atomic(this.db, () => this.applyOpen(this.mustOpen(id), actor, note, pick));
   }
-  private applyOpen(pr: Proposal, actor: BpActor, note?: string | null): { proposal: Proposal; result: WriteResult | null; stale: string | null } {
-    if (pr.type === 'replan') return this.applyReplan(pr, actor, note);
-    const id = pr.id;
+  private applyOpen(pr0: Proposal, actor: BpActor, note?: string | null, pick?: number[]): { proposal: Proposal; result: WriteResult | null; stale: string | null } {
+    if (pr0.type === 'replan') {
+      if (pick) throw err('invalid_argument', 'A re-plan is applied as a whole; choose items in its review instead.');
+      return this.applyReplan(pr0, actor, note);
+    }
+    // Partial apply (§2.6): the chosen ops must carry what they need; the rest are recorded as declined.
+    let pr = pr0, declined: Proposal['declined'] = null;
+    if (pick) {
+      const all = pr0.ops, idx = [...new Set(pick)].sort((a, b) => a - b);
+      if (!idx.length || idx.some((i) => !Number.isInteger(i) || i < 0 || i >= all.length)) throw err('invalid_argument', `Choose op numbers between 1 and ${all.length}.`);
+      const needs = this.opNeeds(pr0.project_id, all), full = this.closure(needs, idx);
+      const miss = full.filter((i) => !idx.includes(i));
+      if (miss.length) throw err('invalid_argument', `The ops you chose need op ${miss.map((i) => i + 1).join(', ')} too.`, { needs: miss.map((i) => i + 1) });
+      if (idx.length < all.length) {
+        const keyOf = (o: Op) => ('key' in o ? o.key : null);
+        declined = all.flatMap((o, i) => (idx.includes(i) ? [] : [{ index: i + 1, key: keyOf(o) }]));
+        const keys = new Set(idx.map((i) => keyOf(all[i]!)).filter((k): k is string => !!k));
+        pr = { ...pr0, ops: idx.map((i) => all[i]!), revs: Object.fromEntries(Object.entries(pr0.revs).filter(([k]) => keys.has(k))) };
+      }
+    }
+    const id = pr.id, total = pr0.ops.length;
     const moved = Object.entries(pr.revs).filter(([k, rev]) => (this.liveRow(pr.project_id, k)?.rev ?? null) !== rev).map(([k]) => k);
     let stale: string | null = moved.length ? `${moved.join(', ')} changed since it was proposed` : null, result: WriteResult | null = null;
     if (!stale) {
       // The operator decides, but the text is the proposer's: items keep the agent as their writer, so their trust stays L1 or L2 (F-23).
       // A restore's proposal (§4.2) is applied as one restore write: not held to ops_per_write, one revision per item.
       const restore = pr.ops.some((o) => o.op === 'upsert' && !!o.restore);
-      try { result = this.apply(pr.project_id, pr.ops, actor, { note: pr.reason ?? (restore ? RESTORE_NOTE : null), teamId: pr.team_id, proposalId: pr.id, ...(pr.agent_id ? { author: { kind: 'agent', id: pr.agent_id } } : {}), ...(restore ? { force: true, restoring: this.restoreOpts(pr.ops, null, null).restoring! } : {}) }); }
+      try { result = this.apply(pr.project_id, pr.ops, actor, { note: declined ? `${pr.ops.length} of ${total} applied${pr.reason ? ': ' + pr.reason : ''}` : pr.reason ?? (restore ? RESTORE_NOTE : null), teamId: pr.team_id, proposalId: pr.id, ...(pr.agent_id ? { author: { kind: 'agent', id: pr.agent_id } } : {}), ...(restore ? { force: true, restoring: this.restoreOpts(pr.ops, null, null).restoring! } : {}) }); }
       catch (e) { if (e instanceof KeyError && OPERATOR_ERRORS.has(e.code)) stale = e.message; else throw e; }
     }
-    this.decide(pr, stale ? 'stale' : 'applied', actor, stale ?? (note?.trim() || null));
+    this.decide(pr0, stale ? 'stale' : 'applied', actor, stale ?? (note?.trim() || null), stale ? undefined : { declined, applied: pr.ops.length });
     // A question the proposal answered offers its decision to the proposer, who would have had it in a direct write (§4).
     // The notice is hub words and keys only (no agent text in notices): the op is built from the question, which bp_read gives.
     const answered = (result?.offers ?? []).map((x) => String(x.op.fields?.['source'] ?? '').slice(3)).filter(Boolean);
@@ -2431,6 +2564,7 @@ export class Blueprint {
     }
     // The coordinator's own plan change, applied by the operator, answers the team's open plan review requests too (§6).
     if (result && pr.team_id && pr.agent_id && this.coordinators(pr.team_id).includes(pr.agent_id) && (result.added.length || result.changed.length || result.removed.length)) answerRequests(this.db, pr.team_id, 'plan', 'bp_write');
+    if (result && pr.request_id !== null) this.db.prepare("UPDATE bp_report_requests SET answered_at=?, answered_by='refine' WHERE id=? AND answered_at IS NULL").run(Date.now(), pr.request_id);
     return { proposal: this.proposal(id)!, result, stale };
   }
   rejectProposal(id: string, actor: BpActor, note?: string | null): Proposal {
@@ -2445,14 +2579,19 @@ export class Blueprint {
     this.mustOpen(id);
     const r = this.db.prepare("UPDATE bp_proposals SET status='withdrawn', decided_by=?, decided_at=? WHERE id=? AND status='open'").run(agentId, Date.now(), id);
     if (!r.changes) throw err('invalid_state', 'The proposal was decided meanwhile.');
+    // A refine request stays open when its proposal is withdrawn: the link is cleared so the coordinator can file again.
+    if (pr.request_id !== null) this.db.prepare('UPDATE bp_report_requests SET proposal_id=NULL WHERE id=? AND proposal_id=?').run(pr.request_id, pr.id);
     this.deps.audit?.settle('bp_proposal', id);
     if (pr.team_id && pr.type === 'ops') this.onProposalClosed?.(pr.team_id, id, 'withdrawn');
     return this.proposal(id)!;
   }
 
-  private decide(pr: Proposal, status: 'applied' | 'rejected' | 'stale', actor: BpActor, note: string | null): void {
+  private decide(pr: Proposal, status: 'applied' | 'rejected' | 'stale', actor: BpActor, note: string | null, part?: { declined: Proposal['declined']; applied: number }): void {
     // Only an open proposal is decided: a second decision (or a withdrawal in between) is refused, and the caller's transaction rolls back.
     const r = this.db.prepare("UPDATE bp_proposals SET status=?, decided_by=?, decided_at=?, note=? WHERE id=? AND status='open'").run(status, actor.id, Date.now(), note, pr.id);
+    if (part) this.db.prepare('UPDATE bp_proposals SET declined=?, applied_ops=? WHERE id=?').run(part.declined ? JSON.stringify(part.declined) : null, part.applied, pr.id);
+    // A refine request stays open when its proposal is sent back or goes stale: the link is cleared so the operator can ask again.
+    if (status !== 'applied' && pr.request_id !== null) this.db.prepare('UPDATE bp_report_requests SET proposal_id=NULL WHERE id=? AND proposal_id=?').run(pr.request_id, pr.id);
     if (!r.changes) throw err('invalid_state', `The proposal is already ${this.proposal(pr.id)?.status ?? 'gone'}.`);
     this.deps.audit?.settle('bp_proposal', pr.id); // its alert in Log → Alerts has nothing left to ask
     // Tasks that named keys this proposal writes keep them, live, only if it was applied (inside the caller's transaction).
@@ -2460,6 +2599,7 @@ export class Blueprint {
     const p = this.project(pr.project_id)!, who = pr.agent_id ? this.label(pr.agent_id) : 'an agent';
     const mine = pr.type === 'replan' && status === 'rejected' ? `The operator sent back your re-plan submission ${pr.id} (re-plan ${pr.replan_id}) in ${p.key}${note ? `: ${note}` : '.'} The re-plan stays open: revise its items, then submit again with bp_proposals {action: "submit_replan"}.`
       : pr.type === 'replan' && status === 'stale' ? `Your re-plan submission ${pr.id} in ${p.key} could not be applied: ${note}. The re-plan stays open: check its items and submit again.`
+      : status === 'applied' && part?.declined ? `The operator applied ${part.applied} of ${pr.ops.length} ops of your blueprint proposal ${pr.id} in ${p.key} (now version ${p.version}). Left out: ${part.declined.map((d) => `op ${d.index}${d.key ? ` (${l2(d.key, 80)})` : ''}`).join(', ')}.${note ? ` Operator's note: ${note}` : ''}`
       : status === 'applied' ? `The operator applied your blueprint proposal ${pr.id} in ${p.key} (now version ${p.version}).`
       : status === 'rejected' ? `The operator rejected your blueprint proposal ${pr.id} in ${p.key}${note ? `: ${note}` : '.'}`
       : `Your blueprint proposal ${pr.id} in ${p.key} could not be applied: ${note}. Read the blueprint again and propose anew.`;
@@ -2528,7 +2668,7 @@ export class Blueprint {
     const to = r.team_id ? this.coordinators(r.team_id) : [];
     const who = to.length ? to : this.projectCoordinators(p.id);
     if (!who.length) throw err('invalid_state', `No team in ${p.key} has a coordinator to ask.`);
-    this.notify(who, 'unclear_ask', `The operator asks what is unclear in ${key} ("${r.title.slice(0, 120)}"). Ask them with one team_ask that names ${key} in refs, then write unclear: true with unclear_ask set to that question's id.`);
+    this.notify(who, 'unclear_ask', `The operator asks what is unclear in ${key} (${l2(r.title, 120)}). Ask them with one team_ask that names ${key} in refs, then write unclear: true with unclear_ask set to that question's id.`);
     return { notified: who.length };
   }
 

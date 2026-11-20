@@ -15,3 +15,8 @@ docs
 eval/out
 **/node_modules
 **/dist
+# Local tool and run state never enters the image.
+.dev
+.claude
+.restart-pack
+*.log

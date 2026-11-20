@@ -3,7 +3,7 @@ export const RESTORE_TEMPLATE = `Restore team "{{TEAM_NAME}}" (checkout {{CHECKO
 
 Hub: {{HUB_URL}}
 Hub CA certificate SHA-256: {{CA_SHA256}}
-setup.mjs SHA-256: {{SETUP_SHA256}}{{CODE_LINE}}
+setup.mjs SHA-256: {{SETUP_SHA256}}
 This prompt expires {{EXPIRES_AT}}.
 
 Push before you run it:

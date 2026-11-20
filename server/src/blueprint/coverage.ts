@@ -32,7 +32,7 @@ function taskRefs(db: Db, projectId: string, seen: Exclude<TasksSeen, null>): Se
   if (teams && !teams.length) return new Set();
   const rows = db.prepare(`SELECT DISTINCT j.value k FROM tasks k JOIN teams t ON t.id=k.team_id,
       json_each(CASE WHEN json_valid(k.plan_refs) THEN k.plan_refs ELSE '[]' END) j
-    WHERE t.project_id=? AND k.status NOT IN (SELECT value FROM json_each(?))${teams ? ' AND k.team_id IN (SELECT value FROM json_each(?))' : ''}`)
+    WHERE t.project_id=? AND k.recorded_at IS NULL AND k.status NOT IN (SELECT value FROM json_each(?))${teams ? ' AND k.team_id IN (SELECT value FROM json_each(?))' : ''}`)
     .all(...[projectId, JSON.stringify(NOT_COUNTED), ...(teams ? [JSON.stringify(teams)] : [])]) as { k: unknown }[];
   return new Set(rows.map((r) => String(r.k)));
 }

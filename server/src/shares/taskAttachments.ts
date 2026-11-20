@@ -50,8 +50,10 @@ const REFUSED_NAME = /(^|\/)(\.env(\..*)?|keys\.env|id_(rsa|dsa|ecdsa|ed25519)(\
 /** An attachment's entry: a share entry plus the type sniffed from its bytes (never from the name). */
 export type AttachEntry = Entry & { type: string };
 export interface AttachFile { path: string; content: string; encoding?: 'utf8' | 'base64' }
-/** Files ready to commit: blobs stored, the quota charged (refund undoes it), and the copy's source if any. */
-export interface Staged { entries: AttachEntry[]; copiedFrom: string | null; bytes: number; refund: () => void }
+/** Files ready to commit: blobs stored, the quota charged (refund undoes it), the copy's source if any, and the upload's channel. */
+export interface Staged { entries: AttachEntry[]; copiedFrom: string | null; bytes: number; refund: () => void; channel?: string }
+/** A task upload from the PC as its channel recorded it (channels.ts, TaskAttachHook). */
+export interface TaskUpload { id?: string; target: string; from_agent_id: string; from_credential_id: string; from_machine_id: string | null }
 /** Who attaches: an agent of the task's team, or the operator (who acts through the console). */
 export interface Attacher { agentId: string | null; credId: string | null; machineId?: string | null; actor: Actor }
 export interface SetView {
@@ -112,7 +114,9 @@ export class TaskAttachments {
     if (!t.team_id || CLOSED.includes(t.status)) return false;
     const role = this.teams.roleOf(t.team_id, agentId);
     if (!role) return false;
-    return role === 'coordinator' || t.created_by_agent === agentId || t.assignee_agent_id === agentId || t.reviewer_agent_id === agentId;
+    if (role === 'coordinator' || t.created_by_agent === agentId) return true;
+    // The assignee and the reviewer read while the task is live: once it is done their access ends (specification, "Task read access").
+    return t.status !== 'done' && (t.assignee_agent_id === agentId || t.reviewer_agent_id === agentId);
   }
   /** The task rule for a task-bound share (Shares.canAccess delegates here): an open set and a reader of its task. */
   canRead(sh: ShareRow, agentId: string): boolean {
@@ -338,9 +342,65 @@ export class TaskAttachments {
       this.db.prepare("INSERT INTO share_versions(share_id,version,note,manifest,total_bytes,upload_kind,status,created_at,added_by,copied_from) VALUES (?,?,?,?,?,'inline','published',?,?,?)")
         .run(sh.id, v, role === 'submission' ? `Round ${v}` : null, JSON.stringify(list), total, now, by, staged.copiedFrom);
       this.db.prepare('UPDATE shares SET updated_at=? WHERE id=?').run(now, sh.id);
-      this.audit.event(w.actor, 'task.attach', { kind: 'task', id: t.id }, { role, version: v, files: list.map((e) => e.path), total_bytes: total, copied_from: staged.copiedFrom, share: sh.id });
+      this.audit.event(w.actor, 'task.attach', { kind: 'task', id: t.id }, { role, version: v, files: list.map((e) => e.path), total_bytes: total, copied_from: staged.copiedFrom, share: sh.id, ...(staged.channel ? { channel: staged.channel } : {}) });
       return { share_id: sh.id, version: v };
     });
+  }
+
+  // ───── files from the PC (docs/transfers.md, "Task files from the PC") ─────
+  /** A task upload's target: `<task id>#<role>`. */
+  static uploadTarget(taskId: string, role: AttachRole): string { return `${taskId}#${role}`; }
+  private uploadOf(c: TaskUpload): { t: TaskRow | null; role: AttachRole; w: Attacher } {
+    const [taskId, role] = c.target.split('#') as [string, AttachRole];
+    return { t: this.teams.task(taskId), role: role === 'submission' ? 'submission' : 'brief', w: { agentId: c.from_agent_id, credId: c.from_credential_id, machineId: c.from_machine_id, actor: { kind: 'agent', id: c.from_agent_id } } };
+  }
+  /**
+   * May a task upload from the PC still land? The same checks as an inline attachment, for the agent who started it: the
+   * task has not ended and the agent may still change that set, no lockdown stops it and its team is not paused. Checked
+   * before each chunk is staged and again as the files land. Returns the channel's failure reason and message, or null.
+   */
+  uploadRefusal(c: TaskUpload): { reason: string; message: string } | null {
+    const { t, role, w } = this.uploadOf(c);
+    if (!t) return { reason: 'denied', message: 'The task no longer exists.' };
+    try { this.mayChange(t, role, w); } catch (e) { if (e instanceof KeyError) return { reason: e.code, message: e.message }; throw e; }
+    const locked = this.lockdown?.blocks('share_upload', w.agentId!, w.machineId ?? null) ?? null;
+    if (locked) return { reason: 'lockdown', message: locked };
+    if (this.teams.pausedTeamOf(w.agentId!)) return { reason: 'paused', message: 'Your team is paused: the files were not attached.' };
+    return null;
+  }
+  /**
+   * The files of a task upload, complete and scanned by the channel: the inline rules apply (names, types sniffed from the
+   * bytes, sizes, the set's, task's and team's limits), then commit writes the set's next version and audits it with the
+   * channel. A submission's files make a new round; when the task is in review on that submission, it names that round.
+   */
+  async commitUpload(c: TaskUpload, files: { path: string; bytes: Buffer }[]): Promise<{ task_id: string; role: AttachRole; share_id: string; version: number; files: number; total_bytes: number }> {
+    const { t, role, w } = this.uploadOf(c);
+    if (!t) throw err('denied', 'The task no longer exists.');
+    if (!files.length) throw err('invalid_argument', 'The upload held no files.');
+    const entries: AttachEntry[] = [];
+    let bytes = 0;
+    for (const f of files) {
+      this.checkName(f.path);
+      const p = safeRel(f.path)!;
+      const type = sniff(f.bytes);
+      this.checkSize(p, f.bytes.length, type);
+      const r = await this.store.putBlob(f.bytes, ATTACH_LIMITS.file);
+      entries.push({ path: p, blob_hash: r.hash, size: f.bytes.length, is_text: isText(f.bytes), stored: r.stored, type });
+      bytes += f.bytes.length;
+    }
+    return tx(this.db, () => {
+      const cur = this.teams.task(t.id)!;
+      const set = this.commit(cur, role, { entries, copiedFrom: null, bytes, refund: () => {}, ...(c.id ? { channel: c.id } : {}) }, w);
+      if (role === 'submission' && cur.status === 'in_review' && cur.assignee_agent_id === w.agentId) {
+        // The submission names its files' round; the task's version stays, so a verdict already being written still lands.
+        this.db.prepare('UPDATE tasks SET share_id=?, share_version=?, updated_at=? WHERE id=?').run(set.share_id, set.version, Date.now(), cur.id);
+      }
+      return { task_id: cur.id, role, share_id: set.share_id, version: set.version, files: entries.length, total_bytes: bytes };
+    });
+  }
+  /** The call that starts a task upload: who, which task and set, the channel and how many paths (never the paths). */
+  noteUpload(w: Attacher, taskId: string, role: AttachRole, channelId: string, paths: number): void {
+    this.audit.event(w.actor, 'task.attach_local', { kind: 'task', id: taskId }, { role, channel: channelId, paths, machine: w.machineId ?? null });
   }
 
   /**

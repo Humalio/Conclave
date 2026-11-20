@@ -83,6 +83,8 @@ export class Maintenance {
       AND NOT EXISTS (SELECT 1 FROM files f WHERE f.id=i.file_id AND f.current_revision=i.revision) LIMIT ?)`, days(90));
     out.job_results = this.batched('DELETE FROM kg_job_results WHERE rowid IN (SELECT rowid FROM kg_job_results WHERE created_at<? LIMIT ?)', days(30));
     out.jobs = this.batched("DELETE FROM kg_jobs WHERE id IN (SELECT j.id FROM kg_jobs j WHERE j.state='done' AND j.updated_at<? AND NOT EXISTS (SELECT 1 FROM kg_job_results r WHERE r.job_id=j.id) LIMIT ?)", days(30));
+    // PC orders: finished ones after 30 days; a disconnect only once Re-enrol PC ended it (an open one decides whether the PC is disconnected).
+    out.pc_actions = this.batched("DELETE FROM pc_actions WHERE rowid IN (SELECT rowid FROM pc_actions WHERE state IN ('done','failed','expired','removed','needs_attention') AND finished_at<? AND (kind<>'disconnect' OR ended_at IS NOT NULL) LIMIT ?)", days(30));
     out.counters = this.batched('DELETE FROM usage_counters WHERE rowid IN (SELECT rowid FROM usage_counters WHERE window_start<? LIMIT ?)', days(30));
     return out;
   }

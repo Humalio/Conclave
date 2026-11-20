@@ -10,6 +10,7 @@ import { grantTrust as grantTrustFlag, applyTrust } from './trust.mjs';
 import { record, entries } from './manifest.mjs';
 import { canonicalFolder, trustKeys } from './paths.mjs';
 import { readKeyFile, findHub } from './keyfile.mjs';
+import { repairOverride } from './role.mjs';
 
 const folderCtx = (home, claudeJson) => ({ claudeJson, folders: [], home });
 function ctxWith(home, claudeJson, folder) { return { ...folderCtx(home, claudeJson), folders: [folder] }; }
@@ -18,11 +19,12 @@ function ctxWith(home, claudeJson, folder) { return { ...folderCtx(home, claudeJ
  * Binds the folder, writes the connector's MCP entry and its approval, grants folder trust (the user approved this
  * folder at setup) and records each change. `hubId` and `caSha256` must name a section that exists in the key file.
  */
-export function registerFolder(home, folderArg, { hubId, caSha256, agent, claudeJson, node, connector, win }) {
+export function registerFolder(home, folderArg, { hubId, caSha256, agent, claudeJson, node, connector, win, held = false, provider = null, team = null }) {
   const folder = canonicalFolder(folderArg);
   if (!folder) throw new Error('the folder does not exist');
   const kf = readKeyFile(home);
-  if (!kf.ok || !findHub(kf.data, hubId, caSha256).ok) throw new Error('no key-file section for that hub and CA yet; pair first');
+  const found = kf.ok ? findHub(kf.data, hubId, caSha256) : null;
+  if (!found?.ok) throw new Error('no key-file section for that hub and CA yet; pair first');
   const cx = ctxWith(home, claudeJson, folder);
   const entry = mcpEntry({ node: nodePath(node), connector: connectorPath(home, connector), folder });
   const e1 = writeMcpEntry(folder, entry);
@@ -32,12 +34,13 @@ export function registerFolder(home, folderArg, { hubId, caSha256, agent, claude
   try { e3 = writeHookEntries(folder, { node: nodePath(node), connector: connectorPath(home, connector) }); } catch { e3 = null; }
   const target = (f) => join(folder, f);
   // The registry and the manifest are written after the files they describe: the settings hash is of the finished folder.
-  const binding = bindFolder(home, folder, { hubId, caSha256, agent });
+  const binding = bindFolder(home, folder, { hubId, caSha256, agent, held, provider, team, origin: found.section.origin });
   record(home, { kind: 'mcp_entry', target: target('.mcp.json'), folder, pointer: `mcpServers.${SERVER_NAME}`, before: e1.before, installed: e1.installed }, cx);
   record(home, { kind: 'mcp_approval', target: target('.claude/settings.json'), folder, pointer: 'enabledMcpjsonServers', before: e2.before, installed: true }, cx);
   if (e3) record(home, { kind: 'hook', target: target('.claude/settings.json'), folder, pointer: 'hooks', before: e3.before, installed: e3.installed }, cx);
-  const t = grantTrustFlag(claudeJson, folder, { win });
-  record(home, { kind: 'trust_flag', target: claudeJson, folder, pointer: `projects.${trustKeys(folder, win)[0]}.hasTrustDialogAccepted`, before: t.before === 'absent' ? null : t.before === 'true', installed: true }, cx);
+  // A held folder (restore found agent config in it) is registered without trust: its user grants it (repair --grant-trust).
+  const t = held ? null : grantTrustFlag(claudeJson, folder, { win });
+  if (t) record(home, { kind: 'trust_flag', target: claudeJson, folder, pointer: `projects.${trustKeys(folder, win)[0]}.hasTrustDialogAccepted`, before: t.before === 'absent' ? null : t.before === 'true', installed: true }, cx);
   record(home, { kind: 'registry_entry', target: join(home, 'registry.json'), pointer: `folders.${folder}`, before: null, installed: { hub_id: hubId, agent } }, cx);
   return { folder, binding };
 }
@@ -62,7 +65,7 @@ export function repairFolder(home, folderArg, { claudeJson, node, connector, win
     actions.push(st === 'stale' ? 'entry_rewritten' : 'entry_added');
     if (unchanged) rerecord(home, folder); // the connector's own change is not a change by someone else; any other change stays visible
   } else if (st === 'foreign') asked.push('entry_foreign');
-  // The folder hook: put back if it is missing or names a Node or connector that moved. Only ever at its two events.
+  // The folder hooks: put back if missing or naming a Node or connector that moved. The prompt hook only at its two events, the silent context hook only at Stop and PostToolUse.
   try {
     const h = writeHookEntries(folder, { node: want.node, connector: want.connector });
     if (JSON.stringify(h.before) !== JSON.stringify(h.installed)) {
@@ -71,6 +74,11 @@ export function repairFolder(home, folderArg, { claudeJson, node, connector, win
       if (unchanged) rerecord(home, folder);
     }
   } catch { /* the hook is optional */ }
+  // A Codex folder's role file: the recorded text goes back over a missing or edited one; an unmarked one is never replaced.
+  if (r.binding.provider === 'codex') {
+    const o = repairOverride(home, folder, cx);
+    if (o.action) { actions.push(o.action); if (unchanged) rerecord(home, folder); } else if (o.asked) asked.push(o.asked);
+  }
   if (acceptChanges) { rerecord(home, folder); actions.push('settings_accepted'); }
   const fresh = resolveFolder(home, folder);
   const t = applyTrust(claudeJson, folder, fresh.binding, { win });

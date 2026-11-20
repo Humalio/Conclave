@@ -72,7 +72,7 @@ function trimToken(t: string): string {
   return s;
 }
 
-/** A path ("Projects/TWINARK/03", "src/app.ts") is not a code: it names a place the reader can open. */
+/** A path ("Projects/EXAMPLE/03", "src/app.ts") is not a code: it names a place the reader can open. */
 function isCode(t: string): boolean {
   if (t.includes('/')) return false;
   if (VERSION.test(t) || UNIT.test(t) || DATE.test(t)) return false;

@@ -245,7 +245,7 @@ describe('the program end to end', () => {
     const exe = join(home, process.platform === 'win32' ? 'codex.exe' : 'codex');
     copyFileSync(process.execPath, exe);
     const cfg = join(conf, 'codex-wake.json');
-    writeFileSync(cfg, JSON.stringify({ agents: [{ name: 'rowan', keys_file: keysFile, session_var: 'ROWAN_SESSION_KEY', workspace: ws, codex_session: '00000000-0000-7000-8000-000000000000', codex_exe: exe }] }), { mode: 0o600 });
+    writeFileSync(cfg, JSON.stringify({ agents: [{ name: 'rowan', keys_file: keysFile, session_var: 'ROWAN_SESSION_KEY', workspace: ws, codex_session: '019a0000-0000-7000-8000-000000000000', codex_exe: exe }] }), { mode: 0o600 });
     const c = spawn(process.execPath, [join(resolve('../deploy/client'), 'codex-wake.mjs'), 'run', '--config', cfg], { env: { ...process.env, HOME: home, USERPROFILE: home }, stdio: ['ignore', 'ignore', 'pipe'] });
     let err = '';
     c.stderr!.setEncoding('utf8').on('data', (d: string) => { err += d; });

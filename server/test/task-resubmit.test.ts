@@ -7,6 +7,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { buildApp, type App } from '../src/app.js';
 import { intakeOpen } from './intake.js';
 import { KeyError } from '../src/keys/keys.js';
+import { plainNotice } from '../src/notices/l2.js';
 import { testConfig } from './hub.js';
 
 const sys = { kind: 'system' as const, id: null };
@@ -106,7 +107,7 @@ describe('replacing a pending submission (task_submit in review)', () => {
     expect(pendingReviews(f.reviewer.id, f.task.id)).toBe(1);
     expect(notices(f.reviewer.id, 'submission_updated')).toBe(0);
     // The replacement re-opens the review turn: the reviewer has not seen the new submission (§8.4).
-    expect(r1.data.handoff).toEqual({ to: f.reviewer.id, to_label: 'reviewer', phase: 'review', on_demand: false, seen: false });
+    expect(r1.data.handoff).toEqual({ to: f.reviewer.id, to_label: 'reviewer', phase: 'review', on_demand: true, seen: false, wake_text: `review ${r1.data.task.id}` });
     const item = await nextNonNotice(f.reviewer);
     expect(item.data.item).toMatchObject({ kind: 'review_requested', trust: 'L1' });
     expect(item.data.item.review.summary).toBe('Second round: commit bbb222');
@@ -116,7 +117,7 @@ describe('replacing a pending submission (task_submit in review)', () => {
     expect(r2.data.task.version).toBe(f.v1 + 2);
     expect(notices(f.reviewer.id, 'submission_updated')).toBe(1);
     const body = (app.db.prepare("SELECT body FROM agent_notices WHERE agent_id=? AND kind='submission_updated'").get(f.reviewer.id) as { body: string }).body;
-    expect(body).toMatch(/^Submission updated for "Review this change"/);
+    expect(plainNotice(body)).toMatch(/^Submission updated for "Review this change"/);
     expect(body).not.toContain('ccc333');
     const hist = app.db.prepare("SELECT from_status, to_status, note FROM task_events WHERE task_id=? AND tool='task_submit' ORDER BY id").all(f.task.id) as { from_status: string; to_status: string; note: string }[];
     expect(hist.map((h) => `${h.from_status}>${h.to_status}`)).toEqual(['in_progress>in_review', 'in_review>in_review', 'in_review>in_review']);
@@ -155,7 +156,7 @@ describe('replacing a pending submission (task_submit in review)', () => {
     expect((await f.worker.call('task_unblock', { task_id: f.task.id })).data.error).toBe('denied');
     const ub = await f.coord.call('task_unblock', { task_id: f.task.id, note: 'Audit done' });
     expect(ub.data.task).toMatchObject({ status: 'in_review', reviewer: f.reviewer.id, blocked_reason: null, blocked_from: null });
-    expect(ub.data.handoff).toMatchObject({ to: f.reviewer.id, phase: 'review', on_demand: false, seen: false });
+    expect(ub.data.handoff).toMatchObject({ to: f.reviewer.id, phase: 'review', on_demand: true, seen: false });
     expect((await f.coord.call('task_unblock', { task_id: f.task.id })).data.error).toBe('invalid_state');
     expect(pendingReviews(f.reviewer.id, f.task.id)).toBeGreaterThanOrEqual(1);
     // A team_ask from in review no longer resets the task to assigned: the answer brings it back to review.
@@ -184,7 +185,7 @@ describe('replacing a pending submission (task_submit in review)', () => {
     expect(JSON.stringify(stale.data)).toContain('The submission changed; re-read it with task_list.');
     const ok = await f.reviewer.call('task_review', { task_id: f.task.id, decision: 'request_changes', comments: 'One more test', version: v2 });
     expect(ok.data.task).toMatchObject({ status: 'changes_requested', review_rounds: 1 });
-    expect(ok.data.handoff).toMatchObject({ to: f.worker.id, phase: 'queued', on_demand: false });
+    expect(ok.data.handoff).toMatchObject({ to: f.worker.id, phase: 'queued', on_demand: true });
     // Round two, a reviewer that passes no version: as before.
     await f.worker.call('task_start', { task_id: f.task.id });
     await f.worker.call('task_submit', { task_id: f.task.id, summary: 'Fixed' });

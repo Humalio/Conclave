@@ -1,9 +1,8 @@
 /**
  * Two items of the 10 Nov code review's "Unverified" list:
  * 1. A download in progress stops when the reader's grant is revoked or its key suspended, and ends with a clear status.
- * 2. A fellow member's direct message to a member of a polling team in draft or paused is held as that team's work item
- *    until it runs (read-only in message_read meanwhile; nothing is lost if it never starts). An outsider's direct message
- *    is never held: message_read delivers it (decision dec_j4guppnimlpv3mo5).
+ * 2. One delivery model (migration 0153): no direct message is held as a team's work item any more; a member's and an
+ *    outsider's direct messages reach the member through message_read whatever the team's state, and nothing is lost.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
@@ -125,112 +124,61 @@ describe('1. downloads after a permission revoke', () => {
   });
 });
 
-describe('2. direct messages to a member of a draft or paused polling team', () => {
-  /** Next work item that is not a notice (notices are acked on the way), or the status when there is none. */
-  async function next(W: Call): Promise<any> {
-    for (let i = 0; i < 30; i++) {
-      const r = (await W('work_next', { wait_seconds: 0 })).structuredContent;
-      if (r.status === 'item' && r.item.kind === 'notice') { await W('work_ack', { item_id: r.item.item_id }); continue; }
-      return r;
-    }
-    throw new Error('too many notices');
-  }
+describe('2. direct messages to a team member, in one delivery model', () => {
   const send = (S: Call, to: string, body: string) => S('message_send', { to, body, client_msg_id: `c${++cid}` });
   const queued = (agentId: string) => app.db.prepare("SELECT team_id FROM work_items WHERE agent_id=? AND kind='message' AND acked_at IS NULL").all(agentId) as { team_id: string | null }[];
-  async function pollTeam(label: string) {
+  async function mkTeam(label: string) {
     const c = await mk(`${label}-coord`, [...TOOLS, ...MSG]), w = await mk(`${label}-worker`, [...TOOLS, ...MSG]), o = await mk(`${label}-outsider`, [...TOOLS, ...MSG]);
     const res = await api('POST', '/teams', { name: label, goal: 'g', grant_messaging: true, members: [{ agent_id: c.id, role: 'coordinator' }, { agent_id: w.id, role: 'worker' }] });
-    expect(res.body.team).toMatchObject({ status: 'draft', delivery_mode: 'poll' });
+    expect(res.body.team.status).toBe('draft');
+    expect(res.body.team).not.toHaveProperty('delivery_mode');
     return { c, w, o, tid: res.body.team.id as string };
   }
-  /** message_read delivers it (consumed, not read-only), it acknowledges, and a second read is empty. */
-  async function readsOutsider(w: Awaited<ReturnType<typeof mk>>, body: string) {
+  /** message_read delivers them (consumed, not read-only), it acknowledges, and a second read is empty. */
+  async function reads(w: Awaited<ReturnType<typeof mk>>, bodies: string[]) {
     const r = (await w.call('message_read')).structuredContent;
     expect(r.read_only).toBeUndefined();
-    expect(r.messages.map((m: any) => m.content)).toEqual([body]);
+    expect(r.messages.map((m: any) => m.content)).toEqual(bodies);
     expect((await w.call('message_ack', { cursor: r.next_cursor })).structuredContent.acked_rooms).toBe(1);
     expect((await w.call('message_read')).structuredContent.messages).toEqual([]);
   }
+  /** work_next has no message for the member: only notices, if anything. */
+  async function noMessageWork(W: Call) {
+    for (let i = 0; i < 30; i++) {
+      const r = (await W('work_next', { wait_seconds: 0 })).structuredContent;
+      if (r.status === 'item' && r.item.kind === 'notice') { await W('work_ack', { item_id: r.item.item_id }); continue; }
+      expect(r.status === 'item' ? r.item.kind : r.status).not.toBe('message');
+      return;
+    }
+    throw new Error('too many notices');
+  }
 
-  it('a team member\'s DM is held until the team runs, read-only in message_read meanwhile, and held again while paused', async () => {
-    const { c, w, tid } = await pollTeam('held');
-    await send(c.call, w.id, 'from the coordinator');
-    expect(queued(w.id)).toEqual([{ team_id: tid }]);
-    expect(await next(w.call)).toMatchObject({ status: 'idle', note: 'The team has not started yet.' });
-    const peek = (await w.call('message_read')).structuredContent;
-    expect(peek.read_only).toBe(true);
-    expect(peek.messages.map((m: any) => m.content)).toEqual(['from the coordinator']);
-    expect((await w.call('message_read')).structuredContent.messages.length).toBe(1);
+  it('a member\'s and an outsider\'s DMs reach the member through message_read whether the team is in draft, running or paused', async () => {
+    const { c, w, o, tid } = await mkTeam('one');
+    await send(c.call, w.id, 'draft, member');
+    await send(o.call, w.id, 'draft, outsider');
+    expect(queued(w.id)).toEqual([]);
+    const draft = (await w.call('message_read')).structuredContent;
+    expect(draft.read_only).toBeUndefined();
+    expect(draft.messages.map((m: any) => m.content).sort()).toEqual(['draft, member', 'draft, outsider']);
+    await w.call('message_ack', { cursor: draft.next_cursor });
 
     await api('POST', `/teams/${tid}/start`);
-    const it1 = await next(w.call);
-    expect(it1.item.message.content).toBe('from the coordinator');
-    await w.call('work_ack', { item_id: it1.item.item_id });
-    expect((await next(w.call)).status).toBe('idle');
+    await send(c.call, w.id, 'running');
+    expect(queued(w.id)).toEqual([]);
+    await reads(w, ['running']);
+    await noMessageWork(w.call);
 
     await api('POST', `/teams/${tid}/pause`);
-    await send(c.call, w.id, 'while paused');
-    expect((await next(w.call)).status).toBe('paused');
-    await api('POST', `/teams/${tid}/resume`);
-    expect((await next(w.call)).item.message.content).toBe('while paused');
-  });
-
-  it('an outsider\'s DM to a member of a draft team flows through message_read and never appears in work_next', async () => {
-    const { w, o, tid } = await pollTeam('draft-out');
-    await send(o.call, w.id, 'from outside, draft');
+    await send(c.call, w.id, 'paused');
     expect(queued(w.id)).toEqual([]);
-    await readsOutsider(w, 'from outside, draft');
-    await api('POST', `/teams/${tid}/start`);
-    expect((await next(w.call)).status).toBe('idle');
+    await reads(w, ['paused']);
   });
 
-  it('an outsider\'s DM to a member of a paused team flows through message_read and never appears in work_next', async () => {
-    const { w, o, tid } = await pollTeam('paused-out');
-    await api('POST', `/teams/${tid}/start`);
-    await api('POST', `/teams/${tid}/pause`);
-    await send(o.call, w.id, 'from outside, paused');
-    expect(queued(w.id)).toEqual([]);
-    await readsOutsider(w, 'from outside, paused');
-    await api('POST', `/teams/${tid}/resume`);
-    expect((await next(w.call)).status).toBe('idle');
-  });
-
-  it('while the team runs, an outsider\'s DM reaches a work_next loop too, and is delivered once whichever reads it first', async () => {
-    const { w, o, tid } = await pollTeam('running-out');
-    await api('POST', `/teams/${tid}/start`);
-    // work_next first: message_read does not repeat it.
-    await send(o.call, w.id, 'via work_next');
-    expect(queued(w.id)).toEqual([{ team_id: null }]);
-    const it1 = await next(w.call);
-    expect(it1.item.message.content).toBe('via work_next');
-    await w.call('work_ack', { item_id: it1.item.item_id });
-    expect((await w.call('message_read')).structuredContent.messages).toEqual([]);
-    // message_read first: work_next skips it.
-    await send(o.call, w.id, 'via message_read');
-    await readsOutsider(w, 'via message_read');
-    expect((await next(w.call)).status).toBe('idle');
-  });
-
-  it('with two polling teams, a DM is held only for the team the sender shares with the recipient', async () => {
-    const a = await pollTeam('two-a');
-    const bc = await mk('two-b-coord', [...TOOLS, ...MSG]);
-    const b = (await api('POST', '/teams', { name: 'two-b', goal: 'g', grant_messaging: true, members: [{ agent_id: bc.id, role: 'coordinator' }, { agent_id: a.w.id, role: 'worker' }] })).body.team.id as string;
-    await api('POST', `/teams/${b}/start`);
-    await send(a.c.call, a.w.id, 'from team A');
-    expect(queued(a.w.id)).toEqual([{ team_id: a.tid }]); // held: team A is still in draft
-    await send(bc.call, a.w.id, 'from team B');
-    expect(queued(a.w.id).map((q) => q.team_id).sort()).toEqual([a.tid, b].sort());
-    expect((await next(a.w.call)).item.message.content).toBe('from team B');
-  });
-
-  it('a team member\'s DMs are not lost when a draft team is stopped without starting: message_read then delivers them', async () => {
-    const { c, w, tid } = await pollTeam('never');
+  it('nothing is lost when a draft team is stopped without starting', async () => {
+    const { c, w, tid } = await mkTeam('never');
     await send(c.call, w.id, 'before the stop');
-    expect((await w.call('message_read')).structuredContent.read_only).toBe(true);
     await api('POST', `/teams/${tid}/stop`);
-    const after = (await w.call('message_read')).structuredContent;
-    expect(after.read_only).toBeUndefined();
-    expect(after.messages.map((m: any) => m.content)).toEqual(['before the stop']);
-    expect((await w.call('message_read')).structuredContent.messages).toEqual([]);
+    await reads(w, ['before the stop']);
   });
 });

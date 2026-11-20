@@ -16,6 +16,7 @@ import { existsSync, rmSync, readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { atomicWrite, pathKey, readJson } from './paths.mjs';
 import { alive } from './run.mjs';
+import { lockHolder, killTree } from './processes.mjs';
 
 export const serviceId = (home) => createHash('sha256').update(pathKey(home)).digest('hex').slice(0, 8);
 const POWERSHELL = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
@@ -50,7 +51,8 @@ export function serviceSpec(home, { platform = process.platform, node = process.
       `$a = New-ScheduledTaskAction -Execute ${psq(CONHOST)} -Argument ${psq(args)} -WorkingDirectory ${psq(home)}`,
       `$t = New-ScheduledTaskTrigger -AtLogOn -User ${me}`,
       `$p = New-ScheduledTaskPrincipal -UserId ${me} -LogonType Interactive -RunLevel Limited`,
-      '$s = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero)',
+      // Task Scheduler starts the service again when it dies (a crash, or a process ended from Task Manager): every minute, up to RESTART_COUNT times.
+      `$s = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount ${RESTART_COUNT} -RestartInterval (New-TimeSpan -Minutes ${RESTART_INTERVAL_MIN})`,
       `Register-ScheduledTask -TaskName ${psq(place.name)} -TaskPath '\\' -Action $a -Trigger $t -Principal $p -Settings $s -Description 'Conclave connector: checks in with the hub, runs transfers and approved updates.' -Force | Out-Null`,
       `Start-ScheduledTask -TaskName ${psq(place.name)} -TaskPath '\\'`,
     ].join('; ');
@@ -112,8 +114,13 @@ export const execDefault = (cmd, args) => { const r = spawnSync(cmd, args, { enc
 /** True if this Linux user has a systemd user session. */
 export const hasSystemd = (exec = execDefault) => exec('systemctl', ['--user', 'show-environment']).status === 0;
 
-/** The supervisor's process id file, so `remove` can stop what it started (and nothing else). */
+/** How often, and how many times, Task Scheduler starts a Windows service again after it died (the shortest interval it allows is a minute). */
+export const RESTART_COUNT = 999, RESTART_INTERVAL_MIN = 1;
+
+/** The supervisor's lock (its process id and start time), so a second one stops and `remove` can stop the one running. */
 export const servicePidPath = (home) => join(home, 'run', 'service.json');
+/** The worker's lock: one worker per installation (worker.mjs). */
+export const workerLockPath = (home) => join(home, 'run', 'worker.json');
 
 /** Installs (or replaces) the logon entry and starts it. `{ok, place}` or `{ok: false, reason, detail}`. */
 export function installService(home, o = {}) {
@@ -143,9 +150,15 @@ export function removeService(home, o = {}) {
     for (const [cmd, args] of spec.after_remove ?? []) exec(cmd, args);
     removed.push(spec.place);
   }
-  const s = readJson(servicePidPath(home), null);
-  if (s && alive(s.pid) && s.pid !== process.pid && !o.noKill) { try { process.kill(s.pid); } catch { /* already gone */ } }
-  rmSync(servicePidPath(home), { force: true });
+  // The supervisor first, so it does not start the worker again, then the worker it recorded; each only while the lock
+  // still names that very process (same id and start time), never a process that reused the id.
+  // The supervisor gets a plain stop (its own tree may include the process calling this); the worker's tree is ended.
+  // A lock is removed only once its holder is gone or was ended here, so `noKill` never frees a live worker's lock.
+  for (const [p, stop] of [[servicePidPath(home), (pid) => { try { process.kill(pid); } catch { /* already gone */ } }], [workerLockPath(home), o.killTree ?? killTree]]) {
+    const h = lockHolder(p, o.lockDeps);
+    if (h && h.pid !== process.pid && !o.noKill) stop(h.pid);
+    if (!h || (h.pid !== process.pid && !o.noKill)) rmSync(p, { force: true });
+  }
   return { ok: true, removed };
 }
 

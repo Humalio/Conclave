@@ -67,7 +67,7 @@ describe('a backlog card', () => {
   });
   it('leaves the filter chips and the relayed row alone', () => {
     expect(line(/^function tagChips\(/m)).toBeTruthy();
-    expect(js).toContain('tagChips(\'home\', S.bl?.tags || [], tag) + L.slice(0, BL_N).map((k) => backlogRow(');
+    expect(js).toContain('tagChips(\'home\', S.bl?.tags || [], tag, true) + L.slice(0, BL_N).map((k) => backlogRow(');
     expect(js).toContain('Back to backlog: ${esc(k.title)}');
   });
 });

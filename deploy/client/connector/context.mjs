@@ -9,7 +9,7 @@ import { connect } from './hubclient.mjs';
 import { readToken, writeToken, invalidate } from './tokens.mjs';
 import { callTool } from './hubclient.mjs';
 
-/** `{ok: true, folder, binding, hubKey, hub, appKey, sessionKey}`, or `{ok: false, reason}`. */
+/** `{ok: true, folder, binding, hubKey, hub, caPem, appKey, sessionKey}`, or `{ok: false, reason}`. */
 export function resolveContext(home, folderArg) {
   const kf = readKeyFile(home);
   if (!kf.ok) return { ok: false, reason: kf.reason };
@@ -21,7 +21,7 @@ export function resolveContext(home, folderArg) {
   if (!sessionKey) return { ok: false, reason: 'key_missing' };
   const c = connect(h.section);
   if (!c.ok) return c;
-  return { ok: true, folder: r.folder, binding: r.binding, hubKey: h.hubKey, hub: c.hub, appKey: h.section.app_key, sessionKey };
+  return { ok: true, folder: r.folder, binding: r.binding, hubKey: h.hubKey, hub: c.hub, caPem: h.section.ca_pem, appKey: h.section.app_key, sessionKey };
 }
 
 /**
@@ -36,7 +36,7 @@ export async function signIn(home, ctx, fresh = false) {
       const t = readToken(home, ctx.hubKey, label, ctx.sessionKey);
       if (t) {
         const r = await callTool(ctx.hub, 'session_whoami', {}, { ...auth, 'X-Agent-Hub-Session': t });
-        if (r.status === 200 && !r.data.error) return { ok: true, token: t, agentId: typeof r.data.agent_id === 'string' ? r.data.agent_id : null };
+        if (r.status === 200 && !r.data.error) return { ok: true, token: t, agentId: typeof r.data.agent_id === 'string' ? r.data.agent_id : null, label: typeof r.data.label === 'string' ? r.data.label : null };
         invalidate(home, ctx.hubKey, label);
       }
     }
@@ -44,7 +44,7 @@ export async function signIn(home, ctx, fresh = false) {
     const token = typeof r.data.session_token === 'string' ? r.data.session_token : null;
     if (r.status !== 200 || !token) return { ok: false, reason: 'login_refused' };
     try { writeToken(home, ctx.hubKey, label, ctx.sessionKey, token); } catch { /* usable this time without the cache */ }
-    return { ok: true, token, agentId: typeof r.data.agent_id === 'string' ? r.data.agent_id : null };
+    return { ok: true, token, agentId: typeof r.data.agent_id === 'string' ? r.data.agent_id : null, label: typeof r.data.label === 'string' ? r.data.label : null };
   } catch (e) {
     return { ok: false, reason: e.reason ?? 'hub_unreachable' };
   }

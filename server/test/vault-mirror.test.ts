@@ -509,20 +509,20 @@ describe('folders follow the project (fix 9)', () => {
   });
 
   it('a team moved to another project, then that project renamed: the hub\'s pages move each time, links follow, other files stay', async () => {
-    const t = team(1, { name: 'TwinArk Stakeholders' });
+    const t = team(1, { name: 'Harbor Stakeholders' });
     app.checkouts.start(t.id, admin);
     handIn(t.workers[0]!);
     await app.mirror.idle();
     await app.mirror.sweep();
     const oldTeam = pathOf('team', t.id)!, oldFolder = oldTeam.replace(/\/Team\.md$/, '');
-    expect(oldFolder).toBe(`${F}/TwinArk Stakeholders/TwinArk Stakeholders`);
+    expect(oldFolder).toBe(`${F}/Harbor Stakeholders/Harbor Stakeholders`);
     const handout = rowsOf('handout').find((r) => r.path.startsWith(`${oldFolder}/`))!;
     writeFileSync(join(vaultDir, oldFolder, 'Operator notes.md'), 'Mine, not the hub\'s.');
 
     const p = app.blueprint.createProject({ key: 'TD', name: 'Twin demo' }, op);
     app.blueprint.assignTeam(t.id, p.id, [], op);
     await app.mirror.idle();
-    const moved = `${F}/Twin demo/TwinArk Stakeholders`;
+    const moved = `${F}/Twin demo/Harbor Stakeholders`;
     expect(pathOf('team', t.id)).toBe(`${moved}/Team.md`);
     const hp = pathOf('handout', handout.ref_id)!;
     expect(hp.startsWith(`${moved}/Checkouts/`)).toBe(true);
@@ -535,14 +535,14 @@ describe('folders follow the project (fix 9)', () => {
     expect(existsSync(join(vaultDir, oldFolder, 'Checkouts'))).toBe(false);
     expect(existsSync(join(vaultDir, oldFolder, 'Sessions'))).toBe(false);
 
-    app.blueprint.updateProject(p.id, { name: 'TwinArk' }, op);
+    app.blueprint.updateProject(p.id, { name: 'Harbor' }, op);
     await app.mirror.idle();
-    const renamed = `${F}/TwinArk/TwinArk Stakeholders`;
+    const renamed = `${F}/Harbor/Harbor Stakeholders`;
     expect(pathOf('team', t.id)).toBe(`${renamed}/Team.md`);
     expect(pathOf('handout', handout.ref_id)!.startsWith(`${renamed}/Checkouts/`)).toBe(true);
     expect(existsSync(join(vaultDir, F, 'Twin demo'))).toBe(false);
     const readme = page(`${F}/README.md`);
-    expect(readme).toContain(`[[${renamed}/Team|TwinArk Stakeholders]]`);
+    expect(readme).toContain(`[[${renamed}/Team|Harbor Stakeholders]]`);
     expect(readme).not.toContain('Twin demo');
     expect(app.db.prepare("SELECT COUNT(*) n FROM audit_events WHERE action='vault.mirror_move' AND target_id=?").get(t.id)).toEqual({ n: 2 });
   });

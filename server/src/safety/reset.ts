@@ -26,8 +26,8 @@ export const RESET_PARTS: ResetPart[] = [
   { key: 'agents', label: 'Agents, keys and permissions', detail: 'Agents, session and app keys, logins, rules and versions, links, notices, access requests and temporary grants.',
     // Only key policies: their rules and versions follow through foreign keys. Permission templates are configuration and stay.
     seeds: [...ALL(['agents', 'credentials', 'session_tokens', 'agent_links', 'agent_notices', 'access_requests', 'temporary_grants', 'directive_acks', 'directive_reports']), { table: 'permission_policies', where: "kind='credential'" }] },
-  { key: 'devices', label: 'PCs and bridges', detail: 'Registered PCs, bridge pairings, setup codes and approved folders, with the app keys issued to them, and the machines offered for compute with their waiting lists and flags.',
-    seeds: ALL(['machines', 'machine_folders', 'bridge_keys', 'setup_keys', 'hw_machines', 'hw_machine_teams', 'hw_queue', 'hw_flags']) },
+  { key: 'devices', label: 'PCs and bridges', detail: 'Registered PCs, bridge pairings, setup codes and approved folders, with the app keys issued to them, and the machines offered for compute with their waiting lists, flags and measured use.',
+    seeds: ALL(['machines', 'machine_folders', 'bridge_keys', 'setup_keys', 'hw_machines', 'hw_machine_teams', 'hw_queue', 'hw_flags', 'hw_holds', 'hw_samples', 'hw_hold_use', 'hw_use_days']) },
   { key: 'shares', label: 'Shares and transfers', detail: 'Shares with their versions, recipients and feedback, promotions, and file transfer channels.',
     seeds: ALL(['shares', 'share_versions', 'share_recipients', 'share_feedback', 'share_promotions', 'data_channels']) },
   { key: 'vault', label: 'Vault history and index', detail: 'File index, revisions, conflicts, pending writes and the knowledge graph. Notes on disk stay; the hub rescans them on start.',

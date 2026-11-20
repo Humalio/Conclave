@@ -30,6 +30,9 @@ import { KeyError } from '../keys/keys.js';
 import { questions } from '../blueprint/questions.js';
 import { hubShortSummary } from '../teams/shortSummary.js';
 import type { TaskAttachments } from '../shares/taskAttachments.js';
+import { deliveryWhy, deliveryLine } from '../connector/deliveryWhy.js';
+/** The statuses a task can be reassigned from (Teams.adminReassign); review rows outside them open the task. */
+const REASSIGN_FROM = ['assigned', 'changes_requested', 'in_progress'];
 
 /** One resolving action: the source workflow's own route. `input` actions need the source screen (a choice, a text). */
 /** noteAs: the body field the source workflow reads the operator's note from (an answer's text), when not `note`. */
@@ -58,6 +61,8 @@ export interface NeedsRow {
   detail?: NeedsDetail;
   /** A paused team's end time (epoch ms), shown in the viewer's own clock. */
   until?: number | null;
+  /** An undelivered item's PC went offline at this time (epoch ms): the console adds "since hh:mm" in the viewer's own clock. */
+  offline_since?: number | null;
   /** This viewer had set it aside with Later, and its time passed or its version changed. */
   back_from_later?: boolean;
   /** The context to decide, in one sentence (a checkout's current step), and who acts after it, by agent label. */
@@ -100,10 +105,10 @@ const beforeRecords = (s: string) => s.split(/\n#{2,3}[ \t]*Records[ \t]*(?:\n|$
 const inShort = (k: { short_summary: string | null; description: string | null }) => k.short_summary || hubShortSummary(k.description);
 const CO_STEP: Record<string, string> = {
   leftovers: 'Leftovers to review', handouts_missing: 'Handouts missing', handouts_complete: 'Choose the target and keys',
-  approve_pc: 'New PC waiting for your approval', prompt_expiring: 'Restore prompt not run yet',
+  prompt_expiring: 'Restore prompt not run yet',
 };
 /** The checkout step's action (checkout/step.ts) that belongs to each Needs you row kind. */
-const CO_ACTION: Record<string, string> = { leftovers: 'Review the leftovers', handouts_complete: 'Choose the target and keys', approve_pc: 'Approve the new PC' };
+const CO_ACTION: Record<string, string> = { leftovers: 'Review the leftovers', handouts_complete: 'Choose the target and keys' };
 
 /** A question's options as stored ([{key,label,effect}]), tolerant of a bad row. */
 const qOptions = (raw: string): { key: string; label: string; effect: string | null }[] => {
@@ -236,12 +241,13 @@ export class NeedsYou {
 
     // Blueprint proposals routed to this viewer. A re-plan is reviewed on its screen (its diff), never applied in one click.
     if (want('proposal')) for (const p of this.d.bpRouting.needsYou(v.id, v.isAdmin)) {
-      const replan = (this.db.prepare('SELECT type FROM bp_proposals WHERE id=?').get(p.id) as { type: string } | undefined)?.type === 'replan';
+      const row = this.db.prepare('SELECT type, request_id FROM bp_proposals WHERE id=?').get(p.id) as { type: string; request_id: number | null } | undefined;
+      const replan = row?.type === 'replan', refine = row?.request_id != null;
       out.push({
         id: `proposal:${p.id}`, kind: 'proposal', source: { kind: 'bp_proposal', id: p.id, version: 'open' }, scope: { project_id: p.project_id, team_id: p.route },
-        title: p.reason || (replan ? 'Start over submitted' : `Blueprint change, ${p.ops} edit${p.ops === 1 ? '' : 's'}`), reason: `Blueprint ${replan ? 'start over' : 'change'} by ${this.agentName(p.agent_id)}`,
+        title: refine ? `Refined requirements, ${p.ops} change${p.ops === 1 ? '' : 's'}` : p.reason || (replan ? 'Start over submitted' : `Blueprint change, ${p.ops} edit${p.ops === 1 ? '' : 's'}`), reason: refine ? `Proposed by ${this.agentName(p.agent_id)} for your refine request` : `Blueprint ${replan ? 'start over' : 'change'} by ${this.agentName(p.agent_id)}`,
         open: { kind: 'proposal', id: p.id, team_id: p.route, project_id: p.project_id },
-        actions: replan ? [{ id: 'review', label: 'Review', path: `/api/proposals/${enc(p.id)}/apply`, input: true }, { id: 'reject', label: 'Reject', path: `/api/proposals/${enc(p.id)}/reject`, tone: 'bad' }]
+        actions: replan || refine ? [{ id: 'review', label: 'Review', path: `/api/proposals/${enc(p.id)}/apply`, input: true }, refine ? { id: 'send_back', label: 'Send back', path: `/api/proposals/${enc(p.id)}/reject`, input: true } : { id: 'reject', label: 'Reject', path: `/api/proposals/${enc(p.id)}/reject`, tone: 'bad' }]
           : [{ id: 'apply', label: 'Apply', path: `/api/proposals/${enc(p.id)}/apply`, tone: 'ok' }, { id: 'reject', label: 'Reject', path: `/api/proposals/${enc(p.id)}/reject`, tone: 'bad' }],
         at: p.created_at, detail: { kind: 'proposal', ops: this.propOps(p.id, p.project_id) }, by: this.agentName(p.agent_id), summary: null,
       });
@@ -250,8 +256,46 @@ export class NeedsYou {
     return out.sort((a, b) => a.at - b.at || a.id.localeCompare(b.id));
   }
 
+  /**
+   * One delivery model (migration 0153): nothing returns to open by itself, so the operator sees what waits on an agent that
+   * has not reached it (not delivered and not seen, past the team's pickup_minutes) and started work past its check-in time
+   * (flagged overdue, still held). Each row says where delivery stands and offers Reassign (POST …/reassign, a sheet in the
+   * console). Running teams only: a paused team's work waits by design.
+   */
+  private deliveryRows(out: NeedsRow[], scope: (t: string | null) => { project_id: string | null; team_id: string | null }) {
+    type W = { id: string; team_id: string; title: string; version: number; status: string; overdue_at: number | null; holder: string; phase: string;
+      opened_at: number; seen_at: number | null; delivered_at: number | null; delivery_reason: string | null; pickup: number };
+    const now = Date.now();
+    const rows = this.db.prepare(`SELECT k.id, k.team_id, k.title, k.version, k.status, k.overdue_at, u.holder_agent_id AS holder, u.phase, u.opened_at,
+        u.seen_at, u.delivered_at, u.delivery_reason, t.pickup_minutes AS pickup
+      FROM task_turns u JOIN tasks k ON k.id=u.task_id JOIN teams t ON t.id=u.team_id
+      WHERE u.closed_at IS NULL AND t.status='running'
+        AND ((k.status='in_progress' AND k.overdue_at IS NOT NULL)
+          OR (u.seen_at IS NULL AND u.delivered_at IS NULL AND u.opened_at + t.pickup_minutes*60000 < ?))`).all(now) as unknown as W[];
+    for (const k of rows) {
+      const overdue = k.status === 'in_progress' && k.overdue_at !== null, who = this.agentName(k.holder);
+      const why = k.delivered_at || k.seen_at ? null : deliveryWhy(this.db, k.holder, k.id, now);
+      const state = k.delivered_at ? 'Delivered' : why ? deliveryLine(why, k.delivery_reason) : null;
+      const doing = k.phase === 'review' ? 'review' : 'work on';
+      const base = `/api/teams/${enc(k.team_id)}/tasks/${enc(k.id)}`, canRe = REASSIGN_FROM.includes(k.status);
+      out.push({
+        id: `delivery:${k.id}`, kind: overdue ? 'overdue' : 'undelivered',
+        source: { kind: 'task', id: k.id, version: `${k.version}:${k.opened_at}:${k.delivered_at ?? ''}:${k.delivery_reason ?? ''}` }, scope: scope(k.team_id),
+        title: k.title,
+        reason: overdue ? `Past its check-in time · ${who} still holds it` : `${state} · waiting for ${who} to ${doing} it`,
+        open: { kind: 'task', id: k.id, team_id: k.team_id },
+        actions: canRe ? [{ id: 'reassign', label: 'Reassign', path: `${base}/reassign`, input: true }] : [],
+        at: overdue ? k.overdue_at! : k.opened_at + k.pickup * 60000,
+        by: who, offline_since: why && !why.waiting_behind ? why.pc_offline_since : null,
+        summary: overdue ? `${who} has not checked in on it${state ? ` · ${state.charAt(0).toLowerCase()}${state.slice(1)}` : ''}. It stays with them until you reassign it.`
+          : `${state}. It stays with ${who} until it reaches them or you reassign it.`,
+      });
+    }
+  }
+
   /** The admin's own queues: the active backlog, onboarding, checkout steps, teams paused by the operator or a limit, directives, feedback, vault conflicts and unclear requirements. */
   private async adminRows(out: NeedsRow[], scope: (t: string | null) => { project_id: string | null; team_id: string | null }, want: (src: string) => boolean) {
+    if (want('task')) this.deliveryRows(out, scope);
     type B = { id: string; team_id: string; title: string; version: number; created_at: number; short_summary: string | null; description: string | null; created_by_agent: string | null };
     if (want('backlog')) for (const k of this.db.prepare("SELECT id, team_id, title, version, created_at, short_summary, description, created_by_agent FROM tasks WHERE status='backlog' AND postponed_at IS NULL").all() as B[]) {
       const base = `/api/teams/${enc(k.team_id)}/tasks/${enc(k.id)}`;
@@ -459,6 +503,12 @@ export class NeedsYou {
         out.push({ id: `claim:${p.id}:${c.key}`, kind: 'claim_not_supported', record: `claim:${p.id}:${c.key}`, episode: `${c.support}:${c.updated_at}`, scope: { project_id: p.id, team_id: c.team_id },
           title: `${c.key} is ${c.support === 'contradicted' ? 'contradicted' : c.support === 'weak' ? 'weakly supported' : 'not supported'}`, reason: c.title, open: { kind: 'item', id: c.key, project_id: p.id, team_id: c.team_id }, at: c.updated_at });
       }
+    }
+    // A refine request the coordinator has not answered yet: awareness only, the coordinator's proposal is what needs the operator.
+    for (const r of this.db.prepare("SELECT r.id, r.requested_at, r.team_id, t.project_id, t.name FROM bp_report_requests r JOIN teams t ON t.id=r.team_id WHERE r.kind='plan' AND r.scope_keys IS NOT NULL AND r.answered_at IS NULL AND r.proposal_id IS NULL").all() as { id: number; requested_at: number; team_id: string; project_id: string | null; name: string }[]) {
+      if (!v.isAdmin && !(r.project_id && v.can(r.project_id, 'blueprint'))) continue;
+      out.push({ id: `refine:${r.id}`, kind: 'refine_waiting', record: `refine:${r.id}`, episode: String(r.requested_at), scope: { project_id: r.project_id, team_id: r.team_id },
+        title: 'Refining requirements · waiting for the coordinator', reason: `The coordinator of ${r.name}`, open: { kind: 'team', id: r.team_id, team_id: r.team_id }, at: r.requested_at });
     }
     // Blocking work (docs/blueprint.md §6): one row per project and part whose open issues or questions block an open item.
     // Only blocking items come here, never every open question, and never Needs you: an outside answer is not the operator's

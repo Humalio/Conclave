@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Connector releases, run by Bruno on his own PC (docs/connector-release.md). The private release key never enters the
+ * Connector releases, run by the maintainer on their own PC (docs/connector-release.md). The private release key never enters the
  * repository, the hub or a log: this script reads it from the path given and prints only public values.
  *
  *   node deploy/release/connector-release.mjs keygen --out <folder outside the repository>

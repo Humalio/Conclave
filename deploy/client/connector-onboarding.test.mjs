@@ -14,9 +14,24 @@ import { testCa } from '../../server/test/test-ca.mjs';
 import { pair, checkHub, normalizeCheck, PAIR_LINES } from './connector/pairing.mjs';
 import { readKeyFile } from './connector/keyfile.mjs';
 import { startScreen } from './connector/screen.mjs';
-import { fileRequest, advance, agentRows, retryAgent, loadSetup, openWays, pending } from './connector/onboard.mjs';
+import { fileRequest, advance as advanceRaw, agentRows, retryAgent, loadSetup, openWays, pending } from './connector/onboard.mjs';
 import { installPrivateGit, gitState, GIT_OFFER, CODEX_GIT, MINGIT } from './connector/git.mjs';
 import { entries } from './connector/manifest.mjs';
+import { resolveFolder } from './connector/registry.mjs';
+import { OVERRIDE_MARKER, overrideState, roleFileProblem } from './connector/role.mjs';
+import { trustStatus } from './connector/trust.mjs';
+import { runCheck } from './connector/check.mjs';
+import { commitFiles } from './connector/commit.mjs';
+import { pendingList, approvePickup } from './connector/approvals.mjs';
+process.env.CONCLAVE_KEY_STORE = 'file';
+/** Setup as the PC's user drives it: when a key pickup waits for the click on the screen, click it and go on. */
+async function advance(home, hubKey, o) {
+  const r = await advanceRaw(home, hubKey, o);
+  if (!r.pickup_click) return r;
+  for (const k of pendingList(home).pickups) approvePickup(home, k.key);
+  return advanceRaw(home, hubKey, o);
+}
+import { spawnSync } from 'node:child_process';
 
 const CODE = 'cnv_enrol_' + 'a'.repeat(26);
 const APP_KEY = 'ah_app_aaaabbbbcccc_' + 'x'.repeat(30);
@@ -129,6 +144,49 @@ describe('pairing checks the hub before it sends the code', () => {
     assert.equal(hub.st.codes.length, before);
   });
 
+  test('a hub that serves two certificates is refused before anything is sent', async () => {
+    const sent = hub.st.codes.length;
+    const m = await mitm(evilPki, hub.origin, { serveCa: hubPki.caPem + evilPki.caPem });
+    const r = await pair(tmp('bundle'), { origin: m.origin, check: check16(hubPki.caSha256), code: CODE });
+    assert.deepEqual(r, { ok: false, reason: 'ca_bundle' });
+    assert.ok(PAIR_LINES.ca_bundle);
+    assert.deepEqual(m.seen.map((x) => x.path), ['/onboard/ca.crt']);
+    assert.equal(hub.st.codes.length, sent);
+    m.server.close();
+  });
+
+  test('only one certificate is ever pinned: a key-file entry holding a second one is refused, so a server of that CA is not trusted', async () => {
+    const { caFingerprint, singleCaPem, findHub, putHub } = await import('./connector/keyfile.mjs');
+    const { connect, request } = await import('./connector/hubclient.mjs');
+    const bundle = hubPki.caPem + evilPki.caPem;
+    assert.equal(caFingerprint(bundle), null);
+    assert.equal(singleCaPem(bundle), null);
+    assert.equal(caFingerprint(hubPki.caPem), hubPki.caSha256);
+    assert.throws(() => putHub(tmp('put'), { hubId: 'hub-aaaabbbbcccc', origin: hub.origin, caPem: bundle, appKey: 'k' }), /exactly one/);
+    // A section written before this check: the first certificate's fingerprint, both certificates in the text.
+    const evil = await stubHub(evilPki);
+    const section = { hub_id: 'hub-aaaabbbbcccc', origin: evil.origin, ca_sha256: hubPki.caSha256, ca_pem: bundle, app_key: 'k', agents: {} };
+    assert.deepEqual(connect(section), { ok: false, reason: 'ca_bundle' });
+    assert.deepEqual(findHub({ hubs: { [`hub-aaaabbbbcccc@${hubPki.caSha256}`]: section } }, 'hub-aaaabbbbcccc', hubPki.caSha256), { ok: false, reason: 'ca_bundle' });
+    // Pinned to the hub's one certificate, the other CA's server is refused by TLS.
+    const one = connect({ ...section, ca_pem: hubPki.caPem });
+    assert.equal(one.ok, true);
+    await assert.rejects(request(one.hub, 'GET', '/connector/v1/hub', { timeoutMs: 5000 }), (e) => e.reason === 'tls_refused');
+    evil.server.close();
+  });
+
+  test('the key file stores the certificate itself, not the text around it', async () => {
+    const { putHub } = await import('./connector/keyfile.mjs');
+    const home = tmp('canon');
+    const k = putHub(home, { hubId: 'hub-aaaabbbbcccc', origin: hub.origin, caPem: `a note before
+${hubPki.caPem}
+and after
+`, appKey: 'k' });
+    const s = readKeyFile(home).data.hubs[k];
+    assert.ok(!s.ca_pem.includes('note') && !s.ca_pem.includes('after'));
+    assert.equal(s.ca_sha256, hubPki.caSha256);
+  });
+
   test('a known hub whose CA changed needs the user to confirm', async () => {
     const home = tmp('known');
     assert.equal((await pair(home, { origin: hub.origin, check: check16(hubPki.caSha256), code: CODE })).ok, false); // the stub's code is spent; seed the section directly
@@ -228,6 +286,10 @@ describe('setup with the connector', () => {
     const devDir = join(root, 'Atlas', 'developer-1');
     mkdirSync(join(root, 'Atlas'), { recursive: true });
     writeFileSync(devDir, 'not a folder');
+    // At standard isolation the key pickup waits for the PC user's click on the screen: nothing is picked up before it.
+    const waiting = await advanceRaw(home, hubKey, opts());
+    assert.deepEqual([waiting.phase, waiting.pickup_click, hub.st.pickups], ['waiting', true, 0]);
+    assert.equal(pendingList(home).pickups.length, 1);
     const r = await advance(home, hubKey, opts());
     assert.equal(r.phase, 'set_up');
     assert.deepEqual(r.built, ['coordinator']);
@@ -240,7 +302,12 @@ describe('setup with the connector', () => {
     const coord = join(root, 'Atlas', 'coordinator');
     assert.ok(existsSync(join(coord, '.mcp.json')));
     assert.equal(readFileSync(join(coord, 'CLAUDE.md'), 'utf8'), '# You are the coordinator\n');
+    assert.equal(existsSync(join(coord, 'AGENTS.override.md')), false, 'a Claude Code agent gets no Codex role file');
+    assert.equal(resolveFolder(home, coord).binding.provider, undefined, 'and its folder is not marked Codex (no commit tool)');
+    assert.deepEqual([resolveFolder(home, coord).binding.team, resolveFolder(home, coord).binding.team_name], ['team_1', 'Grants'], 'the team from the pickup is recorded, for Bind team');
     assert.ok(entries(home).some((e) => e.kind === 'instructions' && e.target === join(coord, 'CLAUDE.md') && e.installed?.sha256 === createHash('sha256').update('# You are the coordinator\n').digest('hex')), 'recorded with the hash of what setup wrote, so uninstall can tell an edit');
+    const ck = await runCheck(home, coord, opts());
+    assert.equal(ck.ok, true, 'check is clean right after setup: ' + ck.line);
     let rows = await agentRows(home, hubKey);
     assert.deepEqual(rows.agents.map((a) => [a.label, a.state]), [['coordinator', 'ready_to_open'], ['developer-1', 'failed']]);
     assert.ok(rows.agents[1].error);
@@ -264,6 +331,86 @@ describe('setup with the connector', () => {
     assert.match(w.desktop.line, /start a new Code session in this folder/);
     const p = openWays("/home/a'b/x", { label: 'x', role: 'dev' }, 'T', false);
     assert.match(p.terminal, /^cd '\/home\/a'\\''b\/x' && claude '/);
+  });
+});
+
+const hasGit = spawnSync('git', ['--version']).status === 0;
+
+describe('setup with the connector, for Codex agents (the layout a restored Codex agent gets)', () => {
+  let hubPki, hub, home, hubKey, claudeJson, root;
+  const opts = () => ({ claudeJson, gitBin: hasGit ? 'git' : null, node: process.execPath, connector: join(home, 'conclave.mjs') });
+  before(async () => {
+    hubPki = testCa('Codex setup hub CA');
+    hub = await stubHub(hubPki);
+    home = tmp('cxsetup'); root = tmp('cxroot');
+    claudeJson = join(home, 'claude.json');
+    writeFileSync(join(home, 'conclave.mjs'), '// launcher\n');
+    hubKey = (await pair(home, { origin: hub.origin, check: check16(hubPki.caSha256), code: CODE })).hubKey;
+  });
+  after(() => hub.server.close());
+  const request = { kind: 'new_team', project: { name: 'Atlas', existing: false }, team: { name: 'Grants', goal: 'Keep the grant calendar.' },
+    roles: [{ name: 'coordinator', team_role: 'coordinator', count: 1, job: 'Plans.' }, { name: 'developer', team_role: 'worker', count: 1, job: 'Builds.' }],
+    prompt: 'a small team', client: { app: 'codex', os: 'windows' } };
+
+  test('an override from someone else stops that agent before anything is written; the other gets the marked override, excluded, a Codex binding, and an AGENTS.md left as it is', async () => {
+    assert.equal((await fileRequest(home, hubKey, request, { root })).request_id, 'obr_1');
+    hub.st.state = 'approved';
+    const coord = join(root, 'Atlas', 'coordinator'), dev = join(root, 'Atlas', 'developer-1');
+    mkdirSync(coord, { recursive: true }); mkdirSync(dev, { recursive: true });
+    writeFileSync(join(coord, 'AGENTS.md'), 'project conventions\n'); // the project's own file: never touched
+    writeFileSync(join(dev, 'AGENTS.override.md'), 'my own rules\n'); // not the connector's: never overwritten
+    const r = await advance(home, hubKey, opts());
+    assert.equal(r.phase, 'set_up');
+    assert.deepEqual(r.built, ['coordinator']);
+    assert.equal(r.failed[0].label, 'developer-1');
+    assert.match(r.failed[0].error, /AGENTS\.override\.md that Conclave did not write/);
+    assert.equal(readFileSync(join(dev, 'AGENTS.override.md'), 'utf8'), 'my own rules\n');
+    assert.equal(existsSync(join(dev, '.mcp.json')), false, 'nothing was written into the refused folder');
+    assert.equal(resolveFolder(home, dev).ok, false, 'and it was not registered');
+
+    assert.equal(readFileSync(join(coord, 'AGENTS.md'), 'utf8'), 'project conventions\n', 'the AGENTS.md there is left as it is');
+    assert.equal(overrideState(coord), 'ours');
+    const role = readFileSync(join(coord, 'AGENTS.override.md'), 'utf8');
+    assert.equal(role.split('\n')[0], OVERRIDE_MARKER);
+    assert.match(role, /`commit` tool of the `conclave` server/);
+    assert.match(role, /# You are the coordinator\n/);
+    assert.ok(entries(home).some((e) => e.kind === 'codex_role' && e.target === join(coord, 'AGENTS.override.md')), 'recorded, so repair can write it back');
+    assert.ok(!entries(home).some((e) => e.kind === 'codex_instructions'), 'setup no longer writes an AGENTS.md of its own');
+    assert.ok(existsSync(join(coord, '.codex', 'config.toml')));
+    const b = resolveFolder(home, coord);
+    assert.equal(b.binding.provider, 'codex', 'the folder is marked Codex, so its local server offers the commit tool');
+    assert.equal(roleFileProblem(home, coord), null, 'check finds the role file as the connector wrote it');
+    const ck = await runCheck(home, coord, opts());
+    assert.equal(ck.ok, true, 'check is clean right after setup: ' + ck.line);
+    assert.notEqual(trustStatus(claudeJson, coord, b.binding).reason, 'folder_changed', 'and the folder settings as recorded');
+    if (hasGit) {
+      const ex = readFileSync(join(coord, '.git', 'info', 'exclude'), 'utf8').split(/\r?\n/);
+      for (const line of ['*', 'AGENTS.override.md', '.codex/', '.claude/', '.mcp.json']) assert.ok(ex.includes(line), `${line} is excluded`);
+      const st = spawnSync('git', ['-C', coord, 'status', '--porcelain', '--untracked-files=all'], { encoding: 'utf8' });
+      assert.equal(st.stdout.trim(), '');
+      // A new file in this scratch-built folder (excluded by *) is committed through the connector; the refusals hold.
+      const author = { name: 'Conclave Coordinator', email: 'coordinator@agents.conclave.invalid' };
+      writeFileSync(join(coord, 'notes.txt'), 'new file\n');
+      const c = commitFiles({ home, folder: coord, paths: ['notes.txt'], message: 'Add notes', author });
+      assert.equal(c.ok, true, c.reason);
+      const tree = spawnSync('git', ['-C', coord, 'ls-tree', '-r', '--name-only', 'HEAD'], { encoding: 'utf8' }).stdout.split(/\r?\n/);
+      assert.deepEqual(tree.filter(Boolean), ['notes.txt']);
+      assert.equal(spawnSync('git', ['-C', coord, 'status', '--porcelain', '--untracked-files=all'], { encoding: 'utf8' }).stdout.trim(), '', 'a hand-run git status stays clean');
+      for (const bad of ['AGENTS.override.md', '.codex/config.toml', '.git/config', '.mcp.json', '../x.txt', join(root, 'x.txt')]) {
+        assert.equal(commitFiles({ home, folder: coord, paths: [bad], message: 'no', author }).ok, false, bad + ' stays refused');
+      }
+      const ls = spawnSync('git', ['-C', coord, 'ls-tree', '-r', '--name-only', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
+      assert.equal(ls, 'notes.txt');
+    }
+
+    // Once the folder is free, Retry sets the developer up the same way.
+    rmSync(join(dev, 'AGENTS.override.md'));
+    assert.deepEqual(retryAgent(home, hubKey, 'developer-1', opts()), { ok: true });
+    assert.equal(overrideState(dev), 'ours');
+    assert.equal(existsSync(join(dev, 'AGENTS.md')), false);
+    assert.equal(resolveFolder(home, dev).binding.provider, 'codex');
+    // A second build over the connector's own override is fine (it is rewritten, never refused).
+    assert.deepEqual(retryAgent(home, hubKey, 'developer-1', opts()), { ok: true });
   });
 });
 

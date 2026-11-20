@@ -95,7 +95,7 @@ afterAll(async () => { await app.close(); });
 
 describe('client files and the prompt', () => {
   it('serves the helper, setup script and prompt template with their hashes, also over plain HTTP', async () => {
-    const h = await ob('GET', '/client/agent-hub-headers.mjs', { from: '192.168.1.50', proto: 'http' });
+    const h = await ob('GET', '/client/agent-hub-headers.mjs', { from: '192.0.2.50', proto: 'http' });
     expect(h.status).toBe(200);
     expect(h.body).toBe('export const helper = 1;\n'); // LF, whatever the checkout
     expect(h.headers.get('x-content-sha256')).toBe(sha256Hex('export const helper = 1;\n'));
@@ -169,12 +169,12 @@ describe('enrolment code', () => {
 describe('HTTPS only', () => {
   it('refuses plain HTTP off loopback with 426 and accepts HTTPS through the proxy', async () => {
     const add = await api('POST', '/pcs/add', { name: 'tls-pc' });
-    const plain = await ob('POST', '/enrol', { body: { code: add.body.code, nonce: nonce() }, from: '192.168.1.60', proto: 'http' });
+    const plain = await ob('POST', '/enrol', { body: { code: add.body.code, nonce: nonce() }, from: '192.0.2.60', proto: 'http' });
     expect(plain.status).toBe(426);
     expect(plain.body.error).toBe('upgrade_required');
-    expect((await ob('POST', '/pickup', { body: { request_id: 'x' }, from: '192.168.1.60', proto: 'http' })).status).toBe(426);
-    expect((await ob('GET', '/requests', { from: '192.168.1.60', proto: 'http' })).status).toBe(426);
-    expect((await ob('POST', '/enrol', { body: { code: add.body.code, nonce: nonce() }, from: '192.168.1.60', proto: 'https' })).status).toBe(200);
+    expect((await ob('POST', '/pickup', { body: { request_id: 'x' }, from: '192.0.2.60', proto: 'http' })).status).toBe(426);
+    expect((await ob('GET', '/requests', { from: '192.0.2.60', proto: 'http' })).status).toBe(426);
+    expect((await ob('POST', '/enrol', { body: { code: add.body.code, nonce: nonce() }, from: '192.0.2.60', proto: 'https' })).status).toBe(200);
   });
 });
 
@@ -282,7 +282,7 @@ const homeMeta = (r: unknown) => {
   const js = readFileSync(join(process.cwd(), 'public', 'app.js'), 'utf8').replace(/\r\n/g, '\n');
   const at = (s: string) => { const i = js.indexOf(`\n${s}`); if (i < 0) throw new Error(`app.js has no ${s}`); return i + 1; };
   const part = (s: string, end: string) => { const i = at(s); return js.slice(i, js.indexOf(end, i) + end.length); };
-  const src = [part('const ago = ', '\n'), part('const cap = ', '\n'), part('const NY_KIND = ', '};\n'), part('const nyKind = ', '\n'), part('const nyUntil = ', '\n'), part('const nySum = ', '\n'), part('const nyMeta = ', '\n'), 'nyMeta(r);'].join('\n');
+  const src = [part('const ago = ', '\n'), part('const cap = ', '\n'), part('const NY_KIND = ', '};\n'), part('const nyKind = ', '\n'), part('const nyUntil = ', '\n'), part('const nyOffline = ', '\n'), part('const nySum = ', '\n'), part('const nyMeta = ', '\n'), 'nyMeta(r);'].join('\n');
   return vm.runInNewContext(src, { r, Date, mdPlain }) as string;
 };
 

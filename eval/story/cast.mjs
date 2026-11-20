@@ -34,32 +34,32 @@ const base = (extra = []) => [
 const write = (...folders) => folders.map((f) => ({ effect: 'allow', actions: RW, resource: path(f) }));
 
 /**
- * Teams: name, project, mode, PC, members [label, role]. The first member is the coordinator. Ezra and Hollis sit in
+ * Teams: name, project, PC, members [label, role]. The first member is the coordinator. Ezra and Hollis sit in
  * the Disclosure Board and, as reviewers, in the two case teams with disclosure-critical work.
  */
 export const TEAMS = [
-  { key: 'fp', name: 'Signals Lab', project: 'drive', mode: 'poll', pc: 'east', write: [F.physics, F.exp],
+  { key: 'fp', name: 'Signals Lab', project: 'drive', pc: 'east', write: [F.physics, F.exp],
     goal: 'Freeze the echo model the dish is designed against (M1) and explain echo 47.',
     members: [['Orla', 'coordinator'], ['Teodor', 'worker'], ['Imani', 'worker'], ['Sef', 'reviewer']] },
-  { key: 'pc', name: 'Relay Engineering', project: 'drive', mode: 'poll', pc: 'east', write: [F.power, F.exp, F.blockers],
+  { key: 'pc', name: 'Relay Engineering', project: 'drive', pc: 'east', write: [F.power, F.exp, F.blockers],
     goal: 'Design the dish array, the transmit sequence and surge protection to R3 (M2).',
     members: [['Brannoc', 'coordinator'], ['Lusa', 'worker'], ['Dario', 'worker'], ['Kemi', 'reviewer'], ['Ezra', 'reviewer']], max_review_rounds: 3 },
-  { key: 'mh', name: 'The Annex', project: 'drive', mode: 'on_demand', pc: 'west', write: [F.materials, F.exp, F.blockers, F.theories],
+  { key: 'mh', name: 'The Annex', project: 'drive', pc: 'west', write: [F.materials, F.exp, F.blockers, F.theories],
     goal: 'Qualify an explanation of the echo to R4 (M3) and keep the theory wall honest.',
     members: [['Hesper', 'coordinator'], ['Vesna', 'worker'], ['Rafi', 'worker'], ['Halden', 'reviewer'], ['Hollis', 'reviewer']] },
-  { key: 'nt', name: 'Timekeepers', project: 'drive', mode: 'on_demand', pc: 'west', write: [F.nav, F.exp],
+  { key: 'nt', name: 'Timekeepers', project: 'drive', pc: 'west', write: [F.nav, F.exp],
     goal: 'Stamp every send and receive within 4 ns (R5) and bound the lead-time error (R6).',
     members: [['Calder', 'coordinator'], ['Mirela', 'worker'], ['Tobin', 'reviewer']] },
-  { key: 'cm', name: 'Xenobiology', project: 'drive', mode: 'on_demand', pc: 'west', write: [F.medical],
+  { key: 'cm', name: 'Xenobiology', project: 'drive', pc: 'west', write: [F.medical],
     goal: 'Keep keeper exposure within R7 and settle the frost question with the Disclosure Board.',
     members: [['Ayo', 'coordinator'], ['Petra', 'worker'], ['Linnea', 'reviewer']] },
-  { key: 'int', name: 'Case Command', project: 'drive', mode: 'poll', pc: 'ops', write: [F.programme, F.reviews, F.exp, F.safety], checkpoints: ['done'],
+  { key: 'int', name: 'Case Command', project: 'drive', pc: 'ops', write: [F.programme, F.reviews, F.exp, F.safety], checkpoints: ['done'],
     goal: 'Bring the case together: plan, live listen (M4) and readiness for the first deliberate reply (M7).',
     members: [['Saoirse', 'coordinator'], ['Quentin', 'curator'], ['Wynn', 'worker'], ['Ilse', 'stakeholder']] },
-  { key: 'sb', name: 'Disclosure Board', project: 'cert', mode: 'on_demand', pc: 'ops', write: [F.safety, F.reviews, F.programme], checkpoints: ['done'], restricted: true,
+  { key: 'sb', name: 'Disclosure Board', project: 'cert', pc: 'ops', write: [F.safety, F.reviews, F.programme], checkpoints: ['done'], restricted: true,
     goal: 'Independently review every disclosure-critical item (R10) and approve the disclosure case (M6).',
     members: [['Marguerite', 'coordinator'], ['Ezra', 'reviewer'], ['Hollis', 'reviewer']] },
-  { key: 'sy', name: 'Tern-9 Keepers', project: 'cert', mode: 'poll', pc: 'yard', write: [F.yard], narrow: true, recruiting: 'propose',
+  { key: 'sy', name: 'Tern-9 Keepers', project: 'cert', pc: 'yard', write: [F.yard], narrow: true, recruiting: 'propose',
     goal: 'Refit Tern-9: dish array, receiver shroud, power train and shielded bunks (M5).',
     members: [['Dunmore', 'coordinator'], ['Fen', 'worker'], ['Ottilie', 'worker'], ['Rook', 'reviewer']] },
 ];

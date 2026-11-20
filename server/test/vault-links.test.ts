@@ -23,7 +23,7 @@ const FROM = '/vault/Projects/X/Notes/today.md';
 const FILES = ['Projects/X/Notes/today.md', 'Projects/X/Notes/Plan.md', 'Projects/X/Plan.md', 'Projects/X/Records/log.md',
   'Projects/X/Restricted/secret.md', 'Other/Plan.md', 'Other/hidden.md', '.obsidian/workspace.md',
   'Home.md', 'Projects/X/Notes/My Note.md', 'Shared/Brief.md', 'Projects/X/Notes/Shared/Brief.md',
-  // A papers README that links its subfolders' notes and the paper folders themselves (the operator's 05 Papers/README.md).
+  // A papers README that links its subfolders' notes and the paper folders themselves (like a papers folder's README.md).
   'Papers/README.md', 'Papers/01 Writing/README.md', 'Papers/01 Writing/Paper A/draft.md', 'Papers/03 Published/Paper B.pdf',
   'Papers/03 Published/Paper C/slides.pdf', 'Papers/Twin.md', 'Papers/Twin/notes.md', 'Shared/01 Writing/README.md'];
 

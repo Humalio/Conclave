@@ -13,7 +13,7 @@
 import { join, dirname } from 'node:path';
 import { mkdirSync, writeFileSync, readFileSync, renameSync, rmSync, existsSync, readdirSync, statSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
-import { readJson, atomicWrite } from './paths.mjs';
+import { readState, writeState, atomicWrite, withLock } from './paths.mjs';
 import { sha256, VERSION_RE, RELEASE_ROOTS } from './release.mjs';
 
 export const appDir = (home) => join(home, 'app');
@@ -22,11 +22,13 @@ export const launcherPath = (home) => join(home, 'conclave.mjs');
 const empty = () => ({ version: 1, current: null, previous: null, pending: null, failed: [], rolled_back: null, builds: {} });
 
 export function readBuilds(home) {
-  const b = readJson(buildsPath(home), null);
+  const b = readState(buildsPath(home), null);
   if (!b || b.version !== 1 || typeof b.builds !== 'object' || b.builds === null) return empty();
   return { ...empty(), ...b };
 }
-const writeBuilds = (home, b) => atomicWrite(buildsPath(home), JSON.stringify(b, null, 2) + '\n');
+const writeBuilds = (home, b) => writeState(buildsPath(home), JSON.stringify(b, null, 2) + '\n');
+/** One read-change-write of builds.json under its lock (the launcher writes it too, at a worker's start). */
+const locked = (home, fn) => withLock(buildsPath(home), fn);
 
 /** Writes the files of one build into app/<version> through a temporary folder and a rename. Returns the file hashes. */
 function placeBuild(home, version, files) {
@@ -49,20 +51,27 @@ function placeBuild(home, version, files) {
 
 /** Installs a build that passed every release check (it is not current yet). */
 export function installVerified(home, version, files, manifestSha256) {
+  if (readBuilds(home).current === version) throw new Error('that build is the one running');
+  const hashes = placeBuild(home, version, files);
+  return locked(home, () => {
   const b = readBuilds(home);
   if (b.current === version) throw new Error('that build is the one running');
-  const hashes = placeBuild(home, version, files);
   b.builds[version] = { verified: true, manifest_sha256: manifestSha256, files: hashes, installed_at: new Date().toISOString() };
   writeBuilds(home, b);
+  });
 }
 
 /** Removes an installed build that is neither current nor previous (one that failed its first start). */
 export function discard(home, version) {
-  const b = readBuilds(home);
-  if (version === b.current || version === b.previous) return false;
-  delete b.builds[version];
-  if (!b.failed.includes(version)) b.failed.push(version);
-  writeBuilds(home, b);
+  const ok = locked(home, () => {
+    const b = readBuilds(home);
+    if (version === b.current || version === b.previous) return false;
+    delete b.builds[version];
+    if (!b.failed.includes(version)) b.failed.push(version);
+    writeBuilds(home, b);
+    return true;
+  });
+  if (!ok) return false;
   rmSync(join(appDir(home), version), { recursive: true, force: true });
   return true;
 }
@@ -104,6 +113,10 @@ export function intact(home, version) {
 
 /** Makes an installed build current; the one before becomes the previous build, older ones are deleted. */
 export function activate(home, version) {
+  locked(home, () => activateNow(home, version));
+  writeLauncher(home);
+}
+function activateNow(home, version) {
   const b = readBuilds(home);
   if (!b.builds[version]) throw new Error('that build is not installed');
   if (b.current !== version) { b.previous = b.current; b.current = version; }
@@ -111,20 +124,39 @@ export function activate(home, version) {
   b.rolled_back = null;
   for (const v of Object.keys(b.builds)) if (v !== b.current && v !== b.previous) { delete b.builds[v]; rmSync(join(appDir(home), v), { recursive: true, force: true }); }
   writeBuilds(home, b);
-  writeLauncher(home);
 }
 
 /** The new build ran its first good check-in: it no longer counts failed starts. */
 export function confirm(home) {
-  const b = readBuilds(home);
-  if (!b.pending) return false;
-  b.pending = null;
-  writeBuilds(home, b);
-  return true;
+  return locked(home, () => {
+    const b = readBuilds(home);
+    if (!b.pending) return false;
+    b.pending = null;
+    writeBuilds(home, b);
+    return true;
+  });
+}
+
+/** How long a worker runs before its start no longer counts as a failed one. */
+export const UP_MS = 60_000;
+/**
+ * The worker of the new build has run for a minute (UP_MS): its start no longer counts as a failed one. The launcher
+ * counts every start of a new build before it runs; a start that stays up a minute takes its count back, so only starts
+ * that crash early lead to a rollback. A PC that starts offline (no first check-in, so no `confirm`) keeps its update.
+ */
+export function markUp(home, version) {
+  return locked(home, () => {
+    const b = readBuilds(home);
+    if (!b.pending || b.pending.version !== version || !(b.pending.boots > 0)) return false;
+    b.pending.boots--;
+    writeBuilds(home, b);
+    return true;
+  });
 }
 
 /** `conclave rollback`: back to the previous build, only if it was verified and is intact. `{ok, version}` or `{ok: false, reason}`. */
-export function rollback(home) {
+export function rollback(home) { return locked(home, () => rollbackNow(home)); }
+function rollbackNow(home) {
   const b = readBuilds(home);
   if (!b.previous) return { ok: false, reason: 'no_previous_build' };
   if (!intact(home, b.previous)) return { ok: false, reason: 'previous_not_verified' };
@@ -136,13 +168,16 @@ export function rollback(home) {
 }
 
 /**
- * The fixed launcher. It runs the current build; when a new build's worker has failed to start more than three times,
+ * The fixed launcher. It runs the current build only while its files still have the hashes recorded at install: a build
+ * with a changed file is refused at every start, and the launcher goes back to the previous verified build, or stops.
+ * It counts each start of a new build's worker; the worker takes its count
+ * back once it has run a minute (`markUp`), so only starts that crash early stay counted. After more than three of those
  * it goes back to the previous build, but only to one verified at install whose files still match (the same rule as
  * `rollback`, repeated here because the launcher must not depend on the build it is judging).
  */
 export const LAUNCHER = `#!/usr/bin/env node
 // Conclave connector launcher. Written by the connector; do not edit. It runs the current build named in app/builds.json.
-import { readFileSync, writeFileSync, renameSync } from 'node:fs';
+import { readFileSync, renameSync, openSync, writeSync, fsyncSync, closeSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -150,24 +185,37 @@ const app = join(dirname(fileURLToPath(import.meta.url)), 'app');
 const file = join(app, 'builds.json');
 const V = /^\\d+\\.\\d+\\.\\d+(-[a-z0-9.]+)?$/;
 const fail = () => { process.stderr.write('conclave: no connector build is installed here. Reinstall the connector.\\n'); process.exit(1); };
-const save = (b) => { const t = file + '.' + process.pid + '.tmp'; writeFileSync(t, JSON.stringify(b, null, 2) + '\\n'); renameSync(t, file); };
-const intact = (b, v) => { const e = b.builds && b.builds[v]; if (!V.test(String(v)) || !e || e.verified !== true || !e.files) return false;
+const put = (p, s) => { const t = p + '.' + process.pid + '.tmp'; const fd = openSync(t, 'w'); try { writeSync(fd, s); fsyncSync(fd); } finally { closeSync(fd); } renameSync(t, p); };
+// Two flushed copies, the .bak first, as the connector writes its state files (paths.mjs writeState).
+const save = (b) => { const s = JSON.stringify(b, null, 2) + '\\n'; put(file + '.bak', s); put(file, s); };
+const read = (p) => JSON.parse(readFileSync(p, 'utf8'));
+const unchanged = (b, v) => { const e = b.builds && b.builds[v]; if (!V.test(String(v)) || !e || !e.files || !Object.keys(e.files).length) return false;
   try { return Object.entries(e.files).every(([p, h]) => createHash('sha256').update(readFileSync(join(app, v, ...p.split('/')))).digest('hex') === h); } catch { return false; } };
+const intact = (b, v) => unchanged(b, v) && b.builds[v].verified === true;
 let b;
-try { b = JSON.parse(readFileSync(file, 'utf8')); } catch { fail(); }
+try { b = read(file); } catch { try { b = read(file + '.bak'); } catch { fail(); } }
 if (process.argv[2] === 'service' && process.argv[3] === 'worker' && b.pending && b.pending.version === b.current) {
   b.pending.boots = (b.pending.boots || 0) + 1;
   if (b.pending.boots > 3 && b.previous && intact(b, b.previous)) {
     b.failed = [...(b.failed || []), b.current]; b.rolled_back = b.current; b.current = b.previous; b.previous = null; b.pending = null;
   }
   save(b);
-  // A worker that stops only because this PC has no hub yet (exit 76, e.g. before \`conclave migrate\`) is not a failed start.
+  // A worker that stops only because this PC has no hub yet (exit 76, e.g. before \`conclave migrate\`), or because another
+  // worker of this installation runs (exit 77), is not a failed start.
   process.on('exit', (code) => {
-    if (code !== 76) return;
-    try { const c = JSON.parse(readFileSync(file, 'utf8')); if (c.pending && c.pending.version === b.current && c.pending.boots > 0) { c.pending.boots--; save(c); } } catch { /* leave the count */ }
+    if (code !== 76 && code !== 77) return;
+    try { const c = read(file); if (c.pending && c.pending.version === b.current && c.pending.boots > 0) { c.pending.boots--; save(c); } } catch { /* leave the count */ }
   });
 }
 if (!V.test(String(b.current))) fail();
+// Every start: a build whose files changed since install is never run (a file transfer or another program may have written there).
+if (!unchanged(b, b.current)) {
+  const bad = b.current;
+  if (!(b.previous && intact(b, b.previous))) { process.stderr.write('conclave: the connector build ' + bad + ' has a file that changed since it was installed, and there is no verified build to go back to. Reinstall the connector.\\n'); process.exit(1); }
+  b.failed = [...(b.failed || []).filter((x) => x !== bad), bad]; b.rolled_back = bad; b.current = b.previous; b.previous = null; b.pending = null;
+  save(b);
+  process.stderr.write('conclave: the connector build ' + bad + ' has a file that changed since it was installed; running ' + b.current + ' instead.\\n');
+}
 // The build serves the installation this launcher sits in, whatever the environment it was started from says.
 process.env.CONCLAVE_HOME = dirname(app);
 await import(pathToFileURL(join(app, b.current, 'deploy', 'client', 'conclave.mjs')).href);

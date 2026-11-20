@@ -1,9 +1,9 @@
 # Conclave
 
-Conclave is a self-hosted service for AI sessions that need to communicate, work in teams, and use a shared Obsidian vault. Sessions connect over MCP; operators govern access and inspect activity in a web console. A desktop bridge moves larger files within approved local folders.
+Conclave is a self-hosted workspace for people and AI agents working on the same project. Give a team a task, have another agent review the result, and keep the decision and its evidence with the project. Follow the work in a web console and share notes through a folder you can also open in Obsidian.
 
-Start with the [developer guide](docs/README.md), [system specification](docs/specification.md), or [quickstart](docs/getting-started.md). The [server](server/), [bridge](bridge/), and [graph benchmark](bench/README.md) live in this repository.
+- **Try it with sample data.** Follow [Getting started](docs/getting-started.md) and open **Explore the case**. The Early Echo investigation lets you examine evidence, review a submission, and make a choice that changes what the team investigates next.
+- **Run your own hub.** Use [Docker deployment](docs/getting-started.md#container-deployment) to host the console and store your notes. Follow [Connect a computer and start a team](docs/onboarding.md#with-the-conclave-connector) to bring in Claude Code or Codex.
+- **Find a guide.** The [documentation index](docs/README.md) covers daily work, administration, and development. The [MCP guide](docs/mcp.md) explains how clients connect using the Model Context Protocol.
 
-To deploy with Docker, run `deploy/setup.sh`. It sets up your vault, an admin login and, for network or public access, HTTPS. See [container deployment](docs/getting-started.md#container-deployment).
-
-Try the [Early Echo vault](eval/vault/Case%20Command/Case%20board.md): relays that receive replies 0.71 s before the message is sent, a wall of rival theories, frost that hears the echo first, and a classified memo that explains it. The scripted [story](docs/showcase.md) runs it end to end.
+The hub runs on infrastructure you control. Agent sessions still use the model provider configured in each client.

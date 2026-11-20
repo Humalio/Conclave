@@ -3,7 +3,7 @@
  * `#directive/<id>` shows reach_label, a "Kept off · n" section with Apply again (the exemption DELETE route), Keep off…
  * (an agent, team or project sheet that leaves out the directive's own target) and exemption events in History; the
  * Work → Directives list reads reach_label; the agent page's Directives card has a muted "Kept off k rules" line from
- * `exempted`. The screen's one-line header and its agent list (search, Team filter, state chips, filters in the route) follow
+ * `exempted`. The screen's one-line header and its agent list (one toolbar row: the search box with the team and state chips, then Filters; filters in the route) follow
  * the approved directive screen. Static, like console-tdirs.test.ts: it reads public/app.js, checks the source, and renders the pieces with
  * their own helpers and stubs.
  */
@@ -26,10 +26,10 @@ const block = (start: string, end: string) => {
 };
 const detail = decl('async function dirDetail(arg, agf = null) {');
 const helpers = ['const esc = ', 'const ic = ', 'const plural = ', 'const raw = ', 'const txt = ', 'const safeHref = ', 'function row(', 'const overline = ',
-  'const pill = ', 'const none = ', 'const cap = ', 'const kv = ', 'const sec = ', 'const dirFirstLine = ', 'const dirReadPill = ', 'const dirTarget = ', 'const dirExcept = ',
+  'const pill = ', 'function listOverline(', 'function csChipsHtml(', 'function chipSearch(', 'const none = ', 'const cap = ', 'const kv = ', 'const sec = ', 'const dirFirstLine = ', 'const dirReadPill = ', 'const dirTarget = ', 'const dirExcept = ',
   'const DIR_KIND_LABEL = ', 'const DIR_CATS = ', 'const DIR_CAT_LABEL = ', 'const dirCatText = ', 'const DIR_UI = ', 'const RID = ', 'const emptyAct = ', 'const filterBtn = ',
   'const DIR_AG = ', 'const DIR_AG_CHIPS = ', 'const DIR_AG_RANK = ', 'const dirAgArgs = ', 'const dirAgOk = ', 'const dirAgStr = ', 'const dirAgSplit = ', 'const dirAgMatch = ',
-  'const dirAgTeams = ', 'const dirAgTeamLabel = ', 'const dirAgNf = ', 'function dirAgRow(', 'function dirAgBody(', 'function dirAgSection(', 'function dirMetaLine('].map(decl).join('\n');
+  'const dirAgTeams = ', 'const dirAgTeamLabel = ', 'const dirAgChips = ', 'const DAG_MORE = ', 'function dirAgRow(', 'function dirAgBody(', 'function dirAgSection(', 'function dirMetaLine('].map(decl).join('\n');
 
 /* GET /api/directives/:id for a hub-wide rule kept off one team (still in force) and one project (lifted). */
 const DETAIL = {
@@ -52,7 +52,7 @@ const renderDetail = async (admin = true, data: unknown = DETAIL, arg = 'dir_hub
 };
 /* The helpers alone, for the agent list and its route keys. */
 // eslint-disable-next-line @typescript-eslint/no-implied-eval
-const H = new Function('initials', 'ago', 'dt', `${helpers}\nreturn { dirAgArgs, dirAgOk, dirAgStr, dirAgSplit, dirAgBody, dirAgRow, dirMetaLine };`)(
+const H = new Function('initials', 'ago', 'dt', `${helpers}\nreturn { dirAgArgs, dirAgOk, dirAgStr, dirAgSplit, dirAgBody, dirAgRow, dirAgChips, dirAgSection, dirMetaLine };`)(
   (l: string) => l.slice(0, 2).toUpperCase(), (t: number) => `t${t}`, () => 'date');
 
 describe('directive screen', () => {
@@ -75,9 +75,9 @@ describe('directive screen', () => {
     expect(iKept).toBeGreaterThan(iText);
     expect(iAgents).toBeGreaterThan(iKept);
     expect(iHist).toBeGreaterThan(iAgents);
-    // The labels and lines that only repeat the page are gone: the meta line names the reach, the chips explain confirmation (as a tooltip).
+    // The labels and lines that only repeat the page are gone: the meta line names the reach, the agent count explains confirmation (as a tooltip).
     for (const gone of ['<h4>Text', '<h4>Agents', '<h4>History', 'dag-intro', 'Applies to', 'kept off above']) expect(r.b).not.toContain(gone);
-    expect(r.b).toContain('role="group" aria-label="State" title="Agents confirm a version when they read it."');
+    expect(r.b).toContain('aria-live="polite" title="Agents confirm a version when they read it."><b>1</b> of 1 agent</span>');
     // Kept off keeps its heading (it carries a count); the agent list and History stand under a divider, still named for assistive tech.
     expect(r.b).toContain('class="sec dir-sec" id="dirAg" tabindex="-1" aria-label="Agents"');
     expect(r.b).toContain('class="sec dir-sec" id="dirHist" tabindex="-1" aria-label="History"');
@@ -305,19 +305,15 @@ describe('directive agent list', () => {
   ];
   const body = (f: Record<string, unknown>) => H.dirAgBody(COV, { q: '', at: [], as: '', ...f }) as string;
   const order = (h: string) => [...h.matchAll(/data-ses="([^"]+)"/g)].map((m) => m[1]);
-  const chip = (h: string, k: string) => new RegExp(`data-dag-st="${k}" aria-pressed="(true|false)">[^<]*<span class="fcount">(\\d+)</span>`).exec(h)?.slice(1);
+  const count = (h: string) => /<span class="lov-n"[^>]*>(.*?)<\/span><\/div>/.exec(h)?.[1].replace(/<[^>]+>/g, '');
 
-  it('sorts not confirmed first, then out of date, then confirmed, and counts each state on its chip', () => {
+  it('sorts not confirmed first, then out of date, then confirmed, and puts "n of m agents" in the list overline', () => {
     const h = body({});
     expect(order(h)).toEqual(['ag_4', 'ag_2', 'ag_3', 'ag_1']);
-    expect(chip(h, '')).toEqual(['true', '4']);
-    expect(chip(h, 'current')).toEqual(['false', '1']);
-    expect(chip(h, 'outdated')).toEqual(['false', '1']);
-    expect(chip(h, 'unread')).toEqual(['false', '2']);
-    // The chip counts say how many agents and how many are not confirmed, so no line repeats them until a filter narrows the list.
-    expect(h).not.toContain('dag-cnt');
-    expect(h).not.toContain('not confirmed</span>');
-    expect(h).not.toContain('data-dag-clr');
+    expect(h).toContain('<div class="overline lov"><span class="lov-n" tabindex="-1" aria-live="polite" title="Agents confirm a version when they read it."><b>4</b> of 4 agents');
+    expect(count(h)).toBe('4 of 4 agents · 2 not confirmed');
+    // No state chip row and no Clear filters link: the state is a chip in the box, picked in Filters.
+    expect(h).not.toMatch(/data-dag-st|dag-cnt|data-dag-clr|dl-cats/);
   });
 
   it('each row names its teams and roles, when it confirmed, and its state', () => {
@@ -328,30 +324,52 @@ describe('directive agent list', () => {
     expect(H.dirAgRow(COV[3])).toContain('has not confirmed it');
   });
 
-  it('the Team filter keeps the agents of the chosen teams, and the chips count under it', () => {
+  it('the Team filter keeps the agents of the chosen teams, and the count follows', () => {
     const h = body({ at: ['team_bz'] });
     expect(order(h)).toEqual(['ag_2', 'ag_3']);
-    expect(chip(h, '')).toEqual(['true', '2']);
-    expect(h).toContain('<b>2 of 4 agents</b> · ECHO Research');
-    expect(h).toContain('data-dag-clr');
+    expect(count(h)).toBe('2 of 4 agents · 1 not confirmed');
+    expect(h).not.toContain('data-dag-clr');
     expect(order(body({ at: ['team_bz', 'team_cd'] }))).toEqual(['ag_2', 'ag_3', 'ag_1']);
   });
 
-  it('a state chip filters the list but its own counts stay those of the other filters', () => {
+  it('a state filter keeps that state; "not confirmed" is left out of the count when it is the filter', () => {
     const h = body({ as: 'unread' });
     expect(order(h)).toEqual(['ag_4', 'ag_2']);
-    expect(chip(h, 'unread')).toEqual(['true', '2']);
-    expect(chip(h, '')).toEqual(['false', '4']);
-    expect(h).toContain('<b>2 of 4 agents</b> · Not confirmed');
+    expect(count(h)).toBe('2 of 4 agents');
   });
 
-  it('search matches the label, the agent id and the role; no match shows an empty state with Clear filters', () => {
+  it('search matches the label, the agent id and the role; no match shows an empty state with Clear search and filters', () => {
     expect(order(body({ q: 'coord' }))).toEqual(['ag_2', 'ag_3']);
     expect(order(body({ q: 'ag_1' }))).toEqual(['ag_1']);
     const h = body({ q: 'zzz' });
     expect(order(h)).toEqual([]);
     expect(h).toContain('No agent matches these filters');
-    expect(h).toContain('data-dag-clr');
+    expect(h).toContain('data-dag-clr>Clear search and filters');
+  });
+
+  it('draws one toolbar row: the search box with a chip per team and the state, then Filters', () => {
+    const f = { q: 'ops', at: ['team_bz', 'team_cd'], as: 'outdated' };
+    expect(H.dirAgChips(COV, f)).toEqual([
+      { label: 'ECHO Research', name: 'Remove team ECHO Research', attrs: 'data-dag-rm="t:team_bz"' },
+      { label: 'Conclave Developers', name: 'Remove team Conclave Developers', attrs: 'data-dag-rm="t:team_cd"' },
+      { label: 'Out of date', name: 'Remove the state filter Out of date', attrs: 'data-dag-rm="as"' },
+    ]);
+    expect(H.dirAgChips(COV, { q: 'ops', at: [], as: '' })).toEqual([]);
+    const sec = H.dirAgSection({}, COV, f) as string;
+    expect(sec).toContain('<div class="ltb"><form class="srch csrch" role="search" id="dagQ">');
+    expect(sec).toContain('aria-label="Remove team ECHO Research">ECHO Research');
+    expect(sec).toContain('data-cs-more data-cs-filt="dagMore" hidden>');
+    expect(sec).toContain('value="ops"');
+    expect(sec).toContain('aria-label="Clear search and filters"');
+    expect(sec).toMatch(/<\/form><button type="button" class="btn on" id="dagMore" aria-haspopup="dialog">[^]*· 3<\/span><\/button><\/div>/);
+    expect(sec).not.toMatch(/dagTeam|only-m|only-d/);
+    // Filters holds Team and the states, at every width; changes swap the chips in place.
+    const sheet = decl('function dirAgSheet(');
+    expect(sheet).toContain('<legend class="vlabel">Team</legend>');
+    expect(sheet).toContain('<legend class="vlabel">State</legend>');
+    expect(sheet).not.toContain('phone');
+    expect(decl('function dirAgBind(')).toContain("const ch = dirAgChips(C, f); csrchSet(form, ch, DAG_MORE); setFilterCount('dagMore', ch.length); dirAgRoute(f);");
+    expect(decl('function dirAgBind(')).toContain("set(k === 'as' ? { as: '' } : { at: f.at.filter((id) => id !== k.slice(2)) }); q?.focus();");
   });
 
   it('reads and writes only aq, at and as, each well formed', () => {
@@ -387,14 +405,13 @@ describe('directive agent list', () => {
     expect(L.dirArgStr({ ...L.dirArgs(''), aq: 'ops' })).toBe('');
   });
 
-  it('the meta line links each part, and phones get search and Filters instead of the chips', () => {
+  it('the meta line links each part', () => {
     const h = H.dirMetaLine({ reach_label: 'Team Conclave Developers', scope_label: 'team Conclave Developers', category: 'tokens', version: 3, updated_at: 1, tags: ['cost'] }, { active: true, pending: false }) as string;
     expect(h).toBe('<div class="dir-meta"><span class="dms"><button type="button" class="lnk" data-dgo="dirAg" title="Go to the agent list">Team Conclave Developers</button></span>'
       + '<span class="dms"><a href="#directives/c=tokens" data-dirs="c=tokens">Token economy</a></span>'
       + '<span class="dms"><button type="button" class="lnk" data-dgo="dirHist" title="Go to History">v3, date</button></span>'
       + '<span class="dms"><span class="dir-tags"><a class="tag txt" href="#directives/t=cost" data-dirs="t=cost">#cost</a></span></span></div>');
     expect(css).toContain(".dir-meta .dms:not(:last-child)::after{content:'·'");
-    expect(css).toMatch(/@media \(max-width:767\.98px\)\{\.dag-chips\{display:none\}/);
-    expect(decl('function dirAgSection(')).toContain("<span class=\"only-m\">${filterBtn('dagMore', dirAgNf(f))}</span>");
+    expect(css).not.toMatch(/\.dag-chips|\.dag-flt|\.dag-cnt/);
   });
 });

@@ -1,5 +1,5 @@
 /**
- * The 0.x migration runner as it shipped in 0c507c8 (src/db/db.ts), kept as a test fixture with the 56 migration files
+ * The 0.x migration runner as it shipped in the last 0.x version (src/db/db.ts), kept as a test fixture with the 56 migration files
  * beside it. It builds the old chain that the 1.0 baseline must equal, and proves a rollback: the 0.x runner still starts
  * on a 1.0 database (docs/proposals/v1-release.md §2.4, §5). Self-contained so scripts/v1-baseline.mjs can import it too.
  * Not used by the hub.

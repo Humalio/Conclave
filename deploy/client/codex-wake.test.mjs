@@ -14,7 +14,7 @@ import {
 } from './codex-wake.mjs';
 
 const WIN = platform() === 'win32';
-const SES = '00000000-0000-7000-8000-000000000000';
+const SES = '019a0000-0000-7000-8000-000000000000';
 const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 const until = async (f, ms = 5000) => { const end = Date.now() + ms; while (Date.now() < end) { if (f()) return true; await new Promise((r) => setTimeout(r, 50)); } return f(); };
 

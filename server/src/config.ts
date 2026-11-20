@@ -48,16 +48,18 @@ export interface Config {
   repoHosts?: string[];
   /** CONNECTOR_RELEASE_URL: the GitHub Releases page Add PC links to for the connector download (docs/connector.md). */
   connectorReleaseUrl?: string;
+  /** CONNECTOR_RELEASE_DIR: a folder with the signed release files (conclave-connector-<version>.bundle, .json, .json.sig) the hub serves at /connector/v1/release/<tag>/<file>, for PCs behind a relay (docs/relay.md). */
+  connectorReleaseDir?: string;
   /** API list prices per million tokens, by model, for the admin's usage view; a model without one has an Unknown cost. */
   connectorPrices?: Record<string, import('./connector/connector.js').ModelPrice>;
   /** BACKUP_DIR: the folder of database backups a Blueprint restore may read authorship from (default <DATA_DIR>/backups, docs/blueprint.md §4.2). */
   backupDir?: string;
 }
 
-/** TRUST_PROXY: true / false, or a comma list of addresses, CIDR ranges or the names loopback, linklocal, uniquelocal. */
+/** TRUST_PROXY: true / false, or a comma list of addresses, CIDR ranges or the names loopback, linklocal, uniquelocal. Unset trusts only a proxy on the hub's own host (loopback): X-Forwarded-For from any other address is ignored, so a host on the LAN that reaches the hub's port directly cannot fake its address. The HTTPS compose file sets it to the Caddy container's fixed address. */
 export function parseTrustProxy(v: string | undefined): boolean | string {
   const s = (v ?? '').trim();
-  if (!s) return 'loopback,linklocal,uniquelocal';
+  if (!s) return 'loopback';
   if (/^(true|false)$/i.test(s)) return s.toLowerCase() === 'true';
   return s;
 }
@@ -94,6 +96,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     // Test and demo hubs (eval/run.mjs) shorten the indexing debounce so curator jobs appear within the run.
     ...(env.GRAPH_DEBOUNCE_MS !== undefined && Number.isFinite(Number(env.GRAPH_DEBOUNCE_MS)) ? { graph: { debounceMs: Number(env.GRAPH_DEBOUNCE_MS) } } : demo ? { graph: { debounceMs: 1000 } } : {}),
     demoMode: demo,
+    ...(env.CONNECTOR_RELEASE_DIR?.trim() ? { connectorReleaseDir: env.CONNECTOR_RELEASE_DIR.trim() } : {}),
     ...(env.CONNECTOR_RELEASE_URL?.trim() && /^https:\/\//.test(env.CONNECTOR_RELEASE_URL.trim()) ? { connectorReleaseUrl: env.CONNECTOR_RELEASE_URL.trim() } : {}),
     backupDir: resolve(env.BACKUP_DIR ?? join(dataDir, 'backups')),
     ...(env.CONCLAVE_REPO_HOSTS?.trim() ? { repoHosts: env.CONCLAVE_REPO_HOSTS.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean) } : {}),

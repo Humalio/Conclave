@@ -34,9 +34,9 @@ export const caCheck = (sha256: string): string => sha256.slice(0, 16).match(/.{
  * The prompt for a PC with the connector (docs/onboarding.md, "The prompt and the request"). It carries no code and no
  * key: the code goes into the connector's own pairing screen, and the agent only drafts and files the team request.
  */
-export function connectorPrompt(o: { pc: string; hubUrl: string }): string {
+export function connectorPrompt(o: { pc: string; hubUrl: string; relay?: string }): string {
   return [
-    `Set up a Conclave team on this PC ("${o.pc}", hub ${o.hubUrl}).`,
+    `Set up a Conclave team on this PC ("${o.pc}", hub ${o.hubUrl}${o.relay ? `, through relay "${o.relay}"` : ''}).`,
     '',
     'The Conclave connector is installed and paired on this PC; you never handle a pairing code or a key.',
     '1. Ask the user what the team should do, then draft the team request as a JSON file. `conclave setup schema` prints its shape and rules.',

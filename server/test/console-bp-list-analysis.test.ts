@@ -63,21 +63,23 @@ describe('console: Blueprint list analysis route', () => {
 });
 
 describe('console: Blueprint list analysis screen', () => {
-  const where = fn('function bpLaWhere('), table = fn('function bpLaTable('), list = fn('function bpLaList(');
-  it('shows the hub\'s numbers only: Showing N of M, cells, row totals and group counts come from the browse answer', () => {
-    expect(line('const bpLaShow = ')).toContain('Showing <b>${lst.total}</b> of ${lst.of ?? lst.counts.all}');
+  const chips = fn('function bpLaChips('), notes = fn('function bpLaNotes('), table = fn('function bpLaTable('), list = fn('function bpLaList('), head = fn('function bpLaHead(');
+  it('shows the hub\'s numbers only: N of M, cells, row totals and group counts come from the browse answer', () => {
+    expect(line('const bpLaShow = ')).toContain('<b>${lst.total}</b> of ${lst.of ?? lst.counts.all}');
     expect(table).toContain('c.cells[i][j]');
     expect(table).toContain('c.totals?.[i]');
     expect(table).not.toMatch(/reduce\(/);
     expect(list).toContain('overline(g?.label || it.group, g?.count)');
+    expect(head).toContain("xOn ? String(lst.total) : { html: bpLaShow(lst) }");
     expect(js).toContain('of ${r.rows ?? r.total}</span>');
   });
 
-  it('says when an item can sit in more than one column, and when a filter no longer applies', () => {
+  it('says when an item can sit in more than one column, and, under the toolbar, when a filter no longer applies', () => {
     expect(table).toContain('An item can sit in more than one column');
-    expect(where).toContain("'1 filter no longer applies'");
-    expect(where).toContain('filters no longer apply');
-    expect(where).toContain('lst.hidden?.[0]?.reason');
+    expect(notes).toContain("'1 filter no longer applies'");
+    expect(notes).toContain('filters no longer apply');
+    expect(notes).toContain('lst.hidden?.[0]?.reason');
+    expect(js).toContain("body = tools + (la ? bpLaNotes(lst, f) : '') + (xOn ?");
   });
 
   it('is a table only from tablet up and a list on phones, never a sideways table on a phone', () => {
@@ -86,52 +88,195 @@ describe('console: Blueprint list analysis screen', () => {
     expect(css).toMatch(/@media \(max-width:767\.98px\)\{\.only-d\{display:none!important\}\}/);
   });
 
-  it('draws every chip, cell and group control as a button or select with its count in its name', () => {
-    expect(where).toContain('<button type="button" class="bp-chip on');
+  it('the Where you are line is gone; the filters are chips in the search box, each a button named for what removing it does', () => {
+    expect(js).not.toContain('bpLaWhere');
+    expect(js).not.toContain('bp-where');
+    expect(chips).toContain("name: `Remove ${name}`");
+    expect(chips).toContain('data-bp-fk="q"');
     expect(table).toContain('aria-pressed="${on}" aria-label="${esc(name(i, j))}"');
     expect(table).toContain("plural(c.cells[i][j], 'item')");
-    expect(list).toContain('data-bp-g aria-label="Group by"');
-    expect(list).toContain('data-bp-s aria-label="Sort"');
-    expect(css).toMatch(/\.bp-chip\{[^}]*border-radius:var\(--r-chip\)/);
+    expect(css).toMatch(/\.cs-chip\{[^}]*border-radius:var\(--r-chip\)/);
     expect(css).toMatch(/\.bp-xc\{[^}]*border-radius:var\(--r-chip\)/);
   });
 
-  it('offers Save view only when the saved-views code has set its hook, and hands it the state without counts', () => {
+  it('Save view is the first row of Views, offered only while the view differs from the default, and gets the state without counts', () => {
     expect(line('const BP_VIEW = ')).toBe('const BP_VIEW = { save: null };');
-    expect(where).toContain("BP_VIEW.save ? '<button type=\"button\" class=\"btn ghost sm\" data-bp-save>Save view</button>' : ''");
-    expect(js).toContain('BP_VIEW.save?.({ pid, section: tab, team, state: { q: f.q, kind: f.kind, sel: f.sel, status, f: f.f, gap: f.gap, x: f.x, g: f.g, s: f.s }, anchor: sv })');
+    const vs = fn('function bpViewsSheet(');
+    expect(vs).toContain("const sv = save ? `<div class=\"sheet-list bpv-save\">${row({ one: true, as: 'button', title: 'Save view'");
+    expect(vs).toContain('html: `${sv}<div id="bpvBody">');
+    expect(js).toContain('bpFilters = { f, fq, goF, statuses: lst.statuses, la: la && pg ? pg : null, canSave: la && filtered };');
+    expect(js).toContain('const save = canSave && BP_VIEW.save ? (anchor) => BP_VIEW.save({ pid, section: tab, team, state: { q: f.q, kind: f.kind, sel: f.sel, status, f: f.f, gap: f.gap, x: f.x, g: f.g, s: f.s }, anchor }) : null;');
+    expect(js).not.toContain('data-bp-save');
+  });
+
+  it('Ask for a report is the first row of ⋯ at every width; the app bar keeps only ⋯ (after the team filter)', () => {
+    expect(js).toContain("a: `${one ? '' : teamSelH}${moreBtn()}`,");
+    expect(js).toContain("menu: [!(sum.parts || []).length ? null : { label: 'Ask for a report', icon: 'note', fn: () => askFn($('[data-dbar-more]')) }, wide ? { label: 'Export'");
+    expect(js).not.toContain('id="bpAsk"');
+  });
+
+  it('the empty state offers Clear search and filters, which does what the box\'s ✕ does', () => {
+    expect(js).toContain("emptyAct('Clear search and filters', `data-bpv=\"${esc(clearTo)}\" data-bp-fk=\"q\"`)");
+    expect(js).toContain("clearTo = goF({ ...f, q: '', kind: '', f: [], gap: '', at: '' }, '')");
+    expect(js).toContain("clear: `data-bpv=\"${esc(clearTo)}\" data-bp-fk=\"q\"`");
   });
 });
 
-describe('console: the count table beside the list on wide screens', () => {
-  // The real Where you are and count table, run with the console's helpers stubbed; goF writes the route state it was given.
-  const src = [line('const bpLaShow = '), line('const bpLaDims = '), line('const bpLaXOn = '), fn('function bpLaSet('), line('const bpLaIs = '), line('const bpLaFacet = '), line('const bpLaDim = '),
-    line('const bpLaLabel = '), fn('function bpLaWhere('), fn('function bpLaTable(')].join('\n');
-  const run = new Function('stubs', `with (stubs) { ${src}\nreturn { bpLaWhere, bpLaTable }; }`) as (s: object) => { bpLaWhere: (...a: unknown[]) => string; bpLaTable: (...a: unknown[]) => string };
+describe('console: the search field with chips (a shared helper)', () => {
   const esc = (s: unknown) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
-  const L = run({ esc, ic: (n: string) => `<i-${n}>`, plural: (n: number, w: string) => `${n} ${w}${n === 1 ? '' : 's'}`, cap: (s: string) => s, bpLabel: (s: string) => s, BP_KIND_PL: {}, BP_VIEW: { save: () => {} } });
-  const goF = (f: { x: string; f: string[] }, st: string) => `x=${f.x}|f=${f.f.join(',')}|st=${st}`;
-  const F = { q: '', kind: '', sel: '', at: '', f: [] as string[], gap: '', x: 'area*status', g: '', s: '' };
-  const lst = { total: 18, of: 112, counts: { all: 112 }, items: [], facets: [{ id: 'area', label: 'Area', values: [{ value: 'AAA', label: 'Alpha area' }] }, { id: 'status', label: 'Status', values: [{ value: 'agreed', label: 'Agreed' }] }],
-    cross: { rows: 'area', cols: 'status', row_values: [{ value: 'AAA', label: 'Alpha area' }], col_values: [{ value: 'agreed', label: 'Agreed' }, { value: 'verified', label: 'Verified' }], cells: [[3, 0]], totals: [3], col_totals: [3, 0], multi: true } };
+  const H = new Function('stubs', `with (stubs) { ${fn('function csChipsHtml(')}\n${fn('function chipSearch(')}\n${fn('function csrchKey(')}\nreturn { chipSearch, csrchKey }; }`)({ esc, ic: (n: string) => `<i-${n}>`,
+    $: (q: string, el: { q: Record<string, unknown> }) => el.q[q], $$: (q: string, el: { all: Record<string, unknown[]> }) => el.all[q], csrchMark: () => {} }) as {
+    chipSearch: (o: object) => string; csrchKey: (e: object) => void };
+  const chips = [{ label: 'Status: Agreed', name: 'Remove the filter Status: agreed', attrs: 'data-bpv="a"' }, { label: 'Gap: No AC', name: 'Remove the gap No AC', attrs: 'data-bpv="g"', gap: true }];
 
-  it('heads the drawn table with "Showing N of M" (its live region and focus target), with no title and a quiet Hide count table icon button', () => {
-    const tb = L.bpLaTable(lst, F, '', goF), wh = L.bpLaWhere(lst, F, '', goF);
-    expect(tb).toMatch(/^<div class="bp-c bp-xcard" data-bp-x="area\*status"><div class="bp-xh"><span class="bp-show" tabindex="-1" aria-live="polite">Showing <b>18<\/b> of 112<\/span><button type="button" class="ibtn bp-xhide"[^>]*aria-expanded="true" aria-label="Hide count table" title="Hide count table"/);
-    expect(tb).not.toContain('Count table');
-    expect(tb).not.toContain('<h3>');
-    // One count on the page: the Where you are line keeps Save view and loses Showing while the table is drawn.
-    expect(wh).not.toContain('bp-show');
-    expect(wh).toContain('data-bp-save');
-    expect(wh).not.toContain('Show count table');
+  it('draws the chips before the input, in one box, then the ✕ named Clear search and filters', () => {
+    const h = H.chipSearch({ attrs: 'data-bp-q', label: 'Search this section', value: 'net', chips, clear: 'data-bpv="clr"', more: 'data-bp-fmore' });
+    expect(h).toMatch(/^<form class="srch csrch" role="search" data-bp-q><i-search><span class="csrch-box"><button type="button" class="cs-chip" data-cs-chip data-bpv="a" aria-label="Remove the filter Status: agreed">Status: Agreed<i-x><\/button><button type="button" class="cs-chip gap"/);
+    expect(h).toContain('<button type="button" class="cs-chip cs-more" data-cs-more data-bp-fmore hidden></button><input class="csrch-in"');
+    expect(h).toContain('value="net" data-q="net" placeholder="" aria-label="Search this section"');
+    expect(h).toMatch(/<button type="button" class="ibtn csrch-x" data-bpv="clr" aria-label="Clear search and filters" title="Clear search and filters"><i-x><\/button><\/form>$/);
   });
 
-  it('puts Rows, the swap and Columns on the second line, and the several-columns note above the table', () => {
+  it('says Search only while there are no chips, and hides the ✕ and "+k" while the box is empty', () => {
+    const h = H.chipSearch({ label: 'Search this section', value: '', chips: [], clear: 'data-bpv="clr"', more: 'data-bp-fmore' });
+    expect(h).toContain('placeholder="Search"');
+    expect(h).toContain('aria-label="Clear search and filters" title="Clear search and filters" hidden>');
+    expect(h).not.toContain('data-cs-more');
+  });
+
+  it('folds the last filter chips past two lines into "+k" (it opens Filters); the gap chip never folds', () => {
+    const fit = fn('function csrchFit(');
+    expect(fit).toContain("const fold = chips.filter((c) => !c.classList.contains('gap'));");
+    expect(fit).toContain('lines() > 2');
+    expect(fit).toContain("more.setAttribute('aria-label', `${plural(k, 'more filter')}, open Filters`)");
+    expect(js).toContain("const fm = $('[data-bp-fmore]', $('#dB')); if (fm) fm.onclick = () => $('#bpFilt')?.click();");
+    expect(js).toContain("addEventListener('resize', () => $$('.csrch').forEach(csrchFit));");
+  });
+
+  // A pretend box: two chips and the input; each records focus and clicks.
+  const box = () => {
+    const log: string[] = [], form: Record<string, unknown> = { requestSubmit: () => log.push('submit') };
+    const el = (name: string, chip: boolean) => ({ name, hidden: false, value: '', selectionStart: 0, selectionEnd: 0, dataset: { q: '' } as Record<string, string>,
+      closest: () => form, matches: (q: string) => chip && q === '[data-cs-chip]', focus: () => log.push(`focus ${name}`), click: () => log.push(`click ${name}`) });
+    const a = el('a', true), g = el('g', true), inp = el('in', false);
+    form.q = { '.csrch-in': inp }; form.all = { '[data-cs-chip],[data-cs-more]': [a, g] };
+    const key = (t: object, k: string) => { let stopped = false; H.csrchKey({ target: t, key: k, preventDefault: () => {}, stopImmediatePropagation: () => { stopped = true; } }); return stopped; };
+    return { log, a, g, inp, key };
+  };
+
+  it('Backspace in an empty input focuses the last chip, and a second Backspace removes it', () => {
+    const b = box();
+    expect(b.key(b.inp, 'Backspace')).toBe(true);
+    expect(b.key(b.g, 'Backspace')).toBe(true);
+    expect(b.log).toEqual(['focus g', 'click g']);
+    // With text, Backspace edits the text.
+    const c = box(); c.inp.value = 'ne'; c.inp.selectionStart = c.inp.selectionEnd = 2;
+    expect(c.key(c.inp, 'Backspace')).toBe(false);
+    expect(c.log).toEqual([]);
+  });
+
+  it('Arrow Left and Right move between the chips and the input (Left from the input only at its start)', () => {
+    const b = box();
+    b.key(b.inp, 'ArrowLeft'); b.key(b.g, 'ArrowLeft'); b.key(b.a, 'ArrowLeft'); b.key(b.a, 'ArrowRight'); b.key(b.g, 'ArrowRight');
+    expect(b.log).toEqual(['focus g', 'focus a', 'focus g', 'focus in']);
+    const c = box(); c.inp.value = 'net'; c.inp.selectionStart = c.inp.selectionEnd = 3;
+    expect(c.key(c.inp, 'ArrowLeft')).toBe(false);
+  });
+
+  it('Escape clears only the text, and runs the search again when the list was searched; the chips stay', () => {
+    const b = box(); b.inp.value = 'net'; b.inp.dataset.q = 'net';
+    expect(b.key(b.inp, 'Escape')).toBe(true);
+    expect(b.inp.value).toBe('');
+    expect(b.log).toEqual(['submit']);
+    // Nothing typed: Escape is left to the console (it leaves the field).
+    const c = box();
+    expect(c.key(c.inp, 'Escape')).toBe(false);
+  });
+
+  it('after a chip or the ✕ is pressed, focus returns to the input', () => {
+    expect(js).toContain("(fk === 'q' && $('#dB .csrch-in'))");
+  });
+});
+
+describe('console: the list overline (a shared helper)', () => {
+  const esc = (s: unknown) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+  const show = '<span class="bp-show" tabindex="-1" aria-live="polite"><b>18</b> of 112</span>';
+  const O = new Function('stubs', `with (stubs) { ${fn('function listOverline(')}\n${line('const BP_SORTS = ')}\n${line('const bpLaShow = ')}\n${line('const bpLc = ')}\n${fn('function bpLaHead(')}\nreturn { listOverline, bpLaHead }; }`)({ esc }) as {
+    listOverline: (p: unknown[]) => string; bpLaHead: (lst: object, xOn: boolean, ctl?: boolean) => string };
+  const lst = { total: 18, of: 112, counts: { all: 112 }, filters: { g: 'line', s: 'risk' }, facets: [{ id: 'line', label: 'Line', values: [{}] }, { id: 'confidence', label: 'Confidence', values: [{}] }, { id: 'empty', label: 'Empty', values: [] }] };
+
+  it('joins its parts with "·": text, trusted markup, and inline selects that keep their names and say their words in the options', () => {
+    const h = O.listOverline(['Matching', '18', '', { name: 'Sort', attrs: 'data-s', value: 'b', options: [['a', 'A first'], ['b', 'B first']] }]);
+    expect(h).toBe('<div class="overline lov"><span>Matching</span><span aria-hidden="true">·</span><span>18</span><span aria-hidden="true">·</span><select class="isel" data-s aria-label="Sort"><option value="a">A first</option><option value="b" selected>B first</option></select></div>');
+    expect(css).toMatch(/\.isel\{[^}]*text-transform:none;letter-spacing:normal/);
+    expect(css).toMatch(/@media \(max-width:767\.98px\)\{\.isel\{height:var\(--h-touch\)\}\}/);
+  });
+
+  it('the list reads MATCHING · 18 · Grouped by line ▾ · Most at risk first ▾ while the table is drawn', () => {
+    const h = O.bpLaHead(lst, true);
+    expect(h).toMatch(/^<div class="overline lov"><span>Matching<\/span><span aria-hidden="true">·<\/span><span>18<\/span><span aria-hidden="true">·<\/span><select class="isel" data-bp-g data-bp-fk="g" aria-label="Group by">/);
+    expect(h).toContain('<option value="">Not grouped</option><option value="line" selected>Grouped by line</option><option value="confidence">Grouped by confidence</option></select>');
+    expect(h).not.toContain('Grouped by empty');
+    expect(h).toContain('<select class="isel" data-bp-s data-bp-fk="s" aria-label="Sort"><option value="">Blueprint order</option><option value="risk" selected>Most at risk first</option>');
+    expect(h).not.toContain('bp-show');
+    // No fixed "grouped by" text around the select, and no Group by and Sort row of their own.
+    expect(js).not.toContain('<span class="vlabel">Group by</span>');
+    expect(js).not.toContain('<span class="vlabel">Sort</span>');
+  });
+
+  it('while the table is folded, "18 of 112" (the one live region) is the overline\'s count, never a group\'s', () => {
+    const h = O.bpLaHead(lst, false);
+    expect(h).toContain(`<span>Matching</span><span aria-hidden="true">·</span>${show}<span aria-hidden="true">·</span><select`);
+    expect(h.match(/aria-live=/g)).toHaveLength(1);
+    // An empty list keeps the count line without the selects.
+    expect(O.bpLaHead(lst, false, false)).toBe(`<div class="overline lov"><span>Matching</span><span aria-hidden="true">·</span>${show}</div>`);
+    expect(fn('function bpLaList(')).toContain('rows += `<div class="bp-grp">${overline(g?.label || it.group, g?.count)}</div>`');
+  });
+});
+
+describe('console: the count table above the list, at full width', () => {
+  // The real chips, toggle and count table, run with the console's helpers stubbed; goF writes the route state it was given.
+  const src = [line('const bpLaShow = '), line('const bpLaDims = '), line('const bpLaXOn = '), fn('function bpLaSet('), line('const bpLaIs = '), line('const bpLaFacet = '), line('const bpLaDim = '),
+    line('const bpLaLabel = '), fn('function bpLaChips('), fn('function bpLaXTog('), fn('function bpLaTable(')].join('\n');
+  const run = new Function('stubs', `with (stubs) { ${src}\nreturn { bpLaChips, bpLaXTog, bpLaTable }; }`) as (s: object) => { bpLaChips: (...a: unknown[]) => { label: string; name: string; attrs: string; gap?: boolean }[]; bpLaXTog: (...a: unknown[]) => string; bpLaTable: (...a: unknown[]) => string };
+  const esc = (s: unknown) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+  const L = run({ esc, ic: (n: string) => `<i-${n}>`, plural: (n: number, w: string) => `${n} ${w}${n === 1 ? '' : 's'}`, cap: (s: string) => s, bpLabel: (s: string) => s, BP_KIND_PL: {} });
+  const goF = (f: { x: string; f: string[]; gap?: string; kind?: string }, st: string) => `x=${f.x}|f=${f.f.join(',')}|st=${st}${f.gap ? `|gap=${f.gap}` : ''}${f.kind ? `|kind=${f.kind}` : ''}`;
+  const F = { q: '', kind: '', sel: '', at: '', f: [] as string[], gap: '', x: 'area*status', g: '', s: '' };
+  const lst = { total: 18, of: 112, counts: { all: 112 }, items: [], facets: [{ id: 'area', label: 'Area', values: [{ value: 'AAA', label: 'Alpha area' }] }, { id: 'status', label: 'Status', values: [{ value: 'agreed', label: 'Agreed' }] }],
+    gaps: [{ id: 'no_ac', label: 'No AC' }],
+    cross: { rows: 'area', cols: 'status', row_values: [{ value: 'AAA', label: 'Alpha area' }], col_values: [{ value: 'agreed', label: 'Agreed' }, { value: 'verified', label: 'Verified' }], cells: [[3, 0]], totals: [3], col_totals: [3, 0], multi: true } };
+
+  it('the chips come in the Where you are order: status, kind, the dimension filters, then the gap; each link drops only its own', () => {
+    const c = L.bpLaChips(lst, { ...F, kind: 'fr', f: ['area:AAA'], gap: 'no_ac' }, 'agreed', goF);
+    expect(c.map((x) => x.label)).toEqual(['Agreed', 'fr', 'Area: Alpha area', 'Gap: No AC']);
+    expect(c.map((x) => x.name)).toEqual(['Remove the filter Status: agreed', 'Remove the kind filter', 'Remove the filter Area: Alpha area', 'Remove the gap No AC']);
+    expect(c[2].attrs).toBe('data-bpv="x=area*status|f=|st=agreed|gap=no_ac|kind=fr" data-bp-fk="q"');
+    expect(c.map((x) => !!x.gap)).toEqual([false, false, false, true]);
+    // A default is never a chip, and a filter the hub no longer applies is not one either.
+    expect(L.bpLaChips(lst, F, '', goF)).toEqual([]);
+    expect(L.bpLaChips({ ...lst, ignored: ['area:AAA'] }, { ...F, f: ['area:AAA'] }, '', goF)).toEqual([]);
+  });
+
+  it('one toggle, at the end of the toolbar, names what it does, with aria-expanded and aria-controls and no aria-pressed', () => {
+    const on = L.bpLaXTog(lst, F, '', goF), off = L.bpLaXTog(lst, { ...F, x: '-' }, '', goF);
+    expect(on).toBe('<button type="button" class="ibtn bp-xtog on" data-bpv="x=-|f=|st=" data-bp-fk="xshow" aria-expanded="true" aria-controls="bpX" aria-label="Hide count table" title="Hide count table"><i-grid></button>');
+    expect(off).toBe('<button type="button" class="ibtn bp-xtog" data-bpv="x=|f=|st=" data-bp-fk="xshow" aria-expanded="false" aria-controls="bpX" aria-label="Show count table" title="Show count table"><i-grid></button>');
+    expect(on + off).not.toContain('aria-pressed');
+    // No cross from the hub: Show asks for the first two dimensions. One dimension: no toggle.
+    expect(L.bpLaXTog({ ...lst, cross: null }, F, '', goF)).toContain('data-bpv="x=area*status|f=|st=" data-bp-fk="xshow" aria-expanded="false"');
+    expect(L.bpLaXTog({ ...lst, facets: lst.facets.slice(0, 1) }, F, '', goF)).toBe('');
+    expect(js).toContain("Refine with coordinator</button>' : ''}${xtog}</div>` : '';");
+  });
+
+  it('heads the drawn table with one line: "18 of 112" (its live region and focus target) · Rows by Columns and the swap', () => {
     const tb = L.bpLaTable(lst, F, '', goF);
-    const at = tb.indexOf('<div class="bp-xsel">'), sel = tb.slice(at, tb.indexOf('</div>', at));
-    expect(sel.indexOf('data-bp-xa="r"')).toBeLessThan(sel.indexOf('aria-label="Swap rows and columns"'));
-    expect(sel.indexOf('aria-label="Swap rows and columns"')).toBeLessThan(sel.indexOf('data-bp-xa="c"'));
-    expect(sel).toContain('data-bpv="x=status*area|f=|st="');
+    expect(tb).toMatch(/^<div class="bp-c bp-xcard" id="bpX" data-bp-x="area\*status"><div class="bp-xh"><span class="bp-show" tabindex="-1" aria-live="polite"><b>18<\/b> of 112<\/span><span aria-hidden="true">·<\/span><select class="isel" data-bp-xa="r" data-bp-fk="xr" aria-label="Rows">/);
+    const hd = tb.slice(0, tb.indexOf('</div>'));
+    expect(hd).toMatch(/aria-label="Rows">[^]*<\/select><span class="bp-xby">by<\/span><select class="isel" data-bp-xa="c" data-bp-fk="xc" aria-label="Columns">[^]*<\/select><button type="button" class="ibtn bp-xswap" data-bpv="x=status\*area\|f=\|st=" data-bp-fk="xswap" aria-label="Swap rows and columns"/);
+    expect(tb).not.toContain('Hide count table');
+    expect(tb).not.toContain('Showing');
+    expect(tb).not.toContain('class="bp-xsel"');
     expect(tb.indexOf('An item can sit in more than one column')).toBeLessThan(tb.indexOf('class="bp-xw only-d"'));
     // Row names carry their full name as the tooltip; a zero is a faint cell.
     expect(tb).toContain('<th scope="row" title="Alpha area"><span>Alpha area</span></th>');
@@ -143,54 +288,37 @@ describe('console: the count table beside the list on wide screens', () => {
     expect(L.bpLaTable(lst, { ...F, f: ['area:AAA'] }, 'agreed', goF)).toContain('class="bp-xc on" data-bpv="x=area*status|f=|st=" data-bp-fk="x:AAA|agreed" aria-pressed="true"');
   });
 
-  it('folded or not offered draws no table: Show count table ends the Where you are line, and Showing stays on it', () => {
-    const folded = { ...F, x: '-' };
-    expect(L.bpLaTable(lst, folded, '', goF)).toBe('');
-    const wh = L.bpLaWhere(lst, folded, '', goF);
-    expect(wh).toMatch(/^<div class="bp-where"><span class="bp-show"[^>]*>Showing <b>18<\/b> of 112<\/span>/);
-    expect(wh).toMatch(/data-bp-save>Save view<\/button><button type="button" class="btn sm" data-bpv="x=\|f=\|st=" data-bp-fk="xshow" aria-expanded="false">Show count table<\/button><\/div>$/);
-    const one = { ...lst, facets: lst.facets.slice(0, 1) };
-    expect(L.bpLaTable(one, F, '', goF)).toBe('');
-    expect(L.bpLaWhere(one, F, '', goF)).not.toContain('Show count table');
-    // No cross from the hub: Show count table asks for the first two dimensions.
-    expect(L.bpLaWhere({ ...lst, cross: null }, F, '', goF)).toContain('data-bpv="x=area*status|f=|st=" data-bp-fk="xshow" aria-expanded="false">Show count table');
+  it('folded, the table is an empty #bpX (what the toggle controls); not offered, it is nothing', () => {
+    expect(L.bpLaTable(lst, { ...F, x: '-' }, '', goF)).toBe('<div id="bpX" hidden></div>');
+    expect(L.bpLaTable({ ...lst, facets: lst.facets.slice(0, 1) }, F, '', goF)).toBe('');
   });
 
-  it('a fold and an unfold move the one "Showing N of M" (one live region, never two) and hand focus to the other toggle', () => {
-    const page = (f: typeof F) => L.bpLaWhere(lst, f, '', goF) + L.bpLaTable(lst, f, '', goF);
-    for (const f of [F, { ...F, x: '-' }]) {
-      const h = page(f);
-      expect(h.match(/class="bp-show"/g)).toHaveLength(1);
-      expect(h.match(/aria-live=/g)).toHaveLength(1);
-      expect(h).toContain('tabindex="-1" aria-live="polite">Showing <b>18</b> of 112');
-      // The toggle drawn is the one fk "xshow" names, so the click handler gives it focus after the redraw.
-      expect(h.match(/data-bp-fk="xshow"/g)).toHaveLength(1);
-    }
-    expect(page(F)).toMatch(/<div class="bp-xh"><span class="bp-show"/);
-    expect(page({ ...F, x: '-' })).toMatch(/^<div class="bp-where"><span class="bp-show"/);
-    // Hide folds to x=-; Show brings back the same pair the link had before it folded (x= clears to the screen's default).
-    expect(page(F)).toContain('data-bpv="x=-|f=|st=" data-bp-fk="xshow" aria-expanded="true"');
-    expect(page({ ...F, x: '-' })).toContain('data-bpv="x=|f=|st=" data-bp-fk="xshow" aria-expanded="false"');
+  it('a fold moves the one "N of M" from the table to the list\'s overline, and the toggle keeps its place (and focus)', () => {
+    const screen = js.slice(js.indexOf('const xt = la ? bpLaTable(lst, f, status, goF)'), js.indexOf("bpFilters = { f, fq, goF"));
+    expect(screen).toContain("(xOn ? `<div class=\"bp-la\">${xt}</div>` : xt)");
+    expect(screen).toContain('bpLaList(pid, lst, f, team, xOn)');
+    expect(js).toContain("const xtog = la && pg ? bpLaXTog(pg, f, status, goF) : '', xOn = la && pg ? bpLaXOn(pg, f) : false;");
+    // The table comes before the list, never beside it: no 7 + 5 grid, no sticky card.
+    expect(css).not.toContain('grid-template-areas:"list x"');
+    expect(css).not.toMatch(/\.bp-xcard[^{]*\{[^}]*position:sticky/);
+    expect(js).not.toContain('bp-la-main');
   });
 
-  it('the list and the table share one grid only while the table is drawn; the table is first in the DOM, the pager stays with the list', () => {
-    expect(js).toContain('laBody = (h) => (xt ? `<div class="bp-la">${xt}<div class="bp-la-main">${h}</div></div>` : h)');
-    expect(js).toMatch(/laBody\(lst\.items\.length\n\s+\? `\$\{la \? bpLaList\(pid, lst, f, team\) : [^\n]*\$\{bpPager\(/);
-  });
-
-  it('from 1180 px the list takes 7 of 12 columns and the table 5 when the table fits there; below, or when it does not, one column with the table first', () => {
-    const wide = css.slice(css.indexOf('@media (min-width:1180px){\n  #workspaceView:has(.bp-la)'));
-    expect(wide).toMatch(/^@media \(min-width:1180px\)\{\n  #workspaceView:has\(\.bp-la\) \.db\{overflow:visible\}/);
-    expect(wide).toContain('.bp-la:not(.full){display:grid;grid-template-columns:minmax(0,7fr) minmax(0,5fr);grid-template-areas:"list x"');
-    // Sticky only while pinned (bpXFit pins a card that fits in the window), and only beside the list.
-    expect(wide).toContain('.bp-la:not(.full)>.bp-xcard{grid-area:x;margin-top:0}\n  .bp-la:not(.full)>.bp-xcard.pin{position:sticky;top:calc(var(--h-bar) + var(--s3))}');
-    // Nothing outside that query lays the two side by side, so below 1180 px (and when .full) the table is a card above the list.
-    expect(css.slice(0, css.indexOf('#workspaceView:has(.bp-la)'))).toContain('.bp-la{display:flex;flex-direction:column;gap:var(--s3);min-width:0}');
-    // Column headers and row names wrap to two lines before they are cut; a cell keeps its number's width.
-    expect(css).toMatch(/\.bp-xt thead th\{[^}]*white-space:normal;min-width:44px/);
-    expect(css).toMatch(/\.bp-xt tbody th\{white-space:normal;min-width:96px/);
+  it('row names use the free width and wrap to three lines before they are cut; headers keep their size and two lines', () => {
+    expect(css).toContain('.bp-xt{width:100%}');
+    expect(css).toMatch(/\.bp-xt thead th\{[^}]*white-space:normal;min-width:44px;max-width:120px;width:1%\}/);
+    expect(css).toContain('.bp-xt thead th:first-child{width:auto}');
     expect(css).toMatch(/\.bp-xt thead th>span,\.bp-xt tbody th>span\{[^}]*-webkit-line-clamp:2/);
+    expect(css).toContain('.bp-xt thead th>span{width:max-content;max-width:104px;margin-inline:auto}');
+    expect(css).toContain('.bp-xt tbody th{white-space:normal;min-width:96px;max-width:none}');
+    expect(css).toContain('.bp-xt tbody th>span{-webkit-line-clamp:3}');
+    expect(css).toContain('.bp-xt td{padding:0;text-align:center;width:1%}');
     expect(css).toContain('.bp-xt td.bp-xtot,.bp-xt thead th.bp-xtot{text-align:right}');
+  });
+
+  it('⇄, Rows and Columns have 44 px targets on a phone', () => {
+    expect(css).toContain('@media (max-width:767.98px){.bp-xswap{width:var(--h-touch);height:var(--h-touch)}}');
+    expect(css).toMatch(/\.bp-xtog\{width:var\(--h-touch\);height:var\(--h-touch\)\}/);
   });
 
   it('never scrolls inside the count table: no overflow scroll, no max-height and no faded edge on anything in it', () => {
@@ -214,11 +342,11 @@ describe('console: the count table fits without scrolling (turned, then folded i
   const src = [line('const bpLaShow = '), line('const bpLaDims = '), line('const bpLaXOn = '), fn('function bpLaSet('), line('const bpLaIs = '), line('const bpLaFacet = '), line('const bpLaDim = '),
     line('const bpLaLabel = '), fn('function bpLaTable('), line('const bpXTurn = ') + '\n' + line('  cells: c.col_values.map('), fn('function bpXFold('), line('let BP_XU = '), line('const bpXFits = '), fn('function bpXFit(')].join('\n');
   const esc = (s: unknown) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
-  // A pretend page: the table is 60 px plus 50 px a column; the card is 400 px beside the list and 900 px at full width.
+  // A pretend page: the table is 60 px plus 50 px a column; the card (at full width, above the list) is 900 px.
   const page = { full: false, v: {} as { turn?: boolean; keep?: number }, h: 300, cols: 0 };
   const la = { isConnected: true, contains: () => false, classList: { remove: () => { page.full = false; }, add: () => { page.full = true; }, contains: () => page.full } };
   const card = { classList: { on: false, toggle(_: string, on: boolean) { this.on = on; } }, get offsetHeight() { return page.h; }, set outerHTML(s: string) { page.v = JSON.parse(s); }, contains: () => false };
-  const xw = { offsetParent: {}, get clientWidth() { return page.full ? 900 : 400; }, firstElementChild: { get offsetWidth() { return 60 + 50 * page.cols; } } };
+  const xw = { offsetParent: {}, get clientWidth() { return 900; }, firstElementChild: { get offsetWidth() { return 60 + 50 * page.cols; } } };
   const stubs = { esc, ic: (n: string) => `<i-${n}>`, plural: (n: number, w: string) => `${n} ${w}${n === 1 ? '' : 's'}`, cap: (s: string) => s, bpLabel: (s: string) => s, BP_KIND_PL: {},
     $: (q: string) => (q === '.bp-xw' ? xw : card), $$: () => [], getComputedStyle: () => ({ getPropertyValue: () => '56' }), innerWidth: 1360, innerHeight: 900, document: { activeElement: null } };
   const X = new Function('stubs', `with (stubs) { ${src}\nreturn { bpLaTable, bpXTurn, bpXFold, bpXFit, setXU: (x) => { BP_XU = x; } }; }`)(stubs) as {
@@ -229,23 +357,18 @@ describe('console: the count table fits without scrolling (turned, then folded i
   const fit = (c: ReturnType<typeof cross>) => {
     const draw = (v: { turn?: boolean; keep?: number }) => { const n = v.turn ? c.row_values.length : c.col_values.length; page.cols = v.keep ? v.keep + 1 : n; return JSON.stringify(v); };
     const v = X.bpXFit(la, c, draw, () => {});
-    return { v, full: page.full, pin: card.classList.on };
+    return v;
   };
 
-  it('a table that fits beside the list sits there, and is sticky when the whole card fits in the window', () => {
-    page.h = 300; X.setXU(null);
-    expect(fit(cross(4, 5))).toEqual({ v: {}, full: false, pin: true });
-    page.h = 900;
-    expect(fit(cross(4, 5))).toEqual({ v: {}, full: false, pin: false });
+  it('a table that fits sits above the list as it is, at full width, never pinned', () => {
+    X.setXU(null);
+    expect(fit(cross(4, 5))).toEqual({});
+    expect(fit(cross(4, 12))).toEqual({});
+    expect(fn('function bpXFit(')).not.toMatch(/pin|full/);
   });
 
-  it('a wide cross falls back to full width above the list, and is not sticky there', () => {
-    page.h = 300;
-    expect(fit(cross(4, 12))).toEqual({ v: {}, full: true, pin: false });
-  });
-
-  it('a cross whose turned form fits gets turned (here, beside the list again), with "Turned to fit" by the swap; the turned table swaps values, cells and totals', () => {
-    expect(fit(cross(5, 20))).toEqual({ v: { turn: true }, full: false, pin: true });
+  it('a cross whose turned form fits gets turned, with "Turned to fit" by the swap; the turned table swaps values, cells and totals', () => {
+    expect(fit(cross(5, 20))).toEqual({ turn: true });
     const c = cross(2, 3), t = X.bpXTurn(c);
     expect([t.rows, t.cols, t.row_values, t.col_values, t.totals, t.col_totals]).toEqual([c.cols, c.rows, c.col_values, c.row_values, c.col_totals, c.totals]);
     expect(t.cells).toEqual([[c.cells[0][0], c.cells[1][0]], [c.cells[0][1], c.cells[1][1]], [c.cells[0][2], c.cells[1][2]]]);
@@ -254,7 +377,7 @@ describe('console: the count table fits without scrolling (turned, then folded i
     const goF = (f: { x: string; f: string[] }, st: string) => `x=${f.x}|f=${f.f.join(',')}|st=${st}`;
     const tb = X.bpLaTable(lst, F, '', goF, { turn: true });
     expect(tb).toContain('data-bp-x="team*area"');
-    expect(tb).toMatch(/aria-label="Swap rows and columns"[^>]*>[^<]*<i-swap><\/button><label[^]*<\/label><span class="meta bp-xturn">Turned to fit<\/span><\/div>/);
+    expect(tb).toMatch(/aria-label="Swap rows and columns"[^>]*>[^<]*<i-swap><\/button><span class="meta bp-xturn">Turned to fit<\/span><\/div>/);
     // Swapping a turned table asks for the axes as the hub drew them; its cells still filter both dimensions.
     expect(tb).toContain('data-bpv="x=area*team|f=|st="');
     expect(tb).toContain('data-bpv="x=area*team|f=team:t1,area:a0|st=" data-bp-fk="x:t1|a0"');
@@ -263,16 +386,16 @@ describe('console: the count table fits without scrolling (turned, then folded i
 
   it("the viewer's own axes are not turned until the window's width changes; the table folds instead", () => {
     X.setXU({ x: 'area*team', w: 1360 });
-    expect(fit(cross(5, 20)).v).toEqual({ keep: 15 });
+    expect(fit(cross(5, 20))).toEqual({ keep: 15 });
     X.setXU({ x: 'area*team', w: 1024 });
-    expect(fit(cross(5, 20)).v).toEqual({ turn: true });
+    expect(fit(cross(5, 20))).toEqual({ turn: true });
     X.setXU(null);
   });
 
   it('a cross with too many columns either way folds the smallest into Other, on the side with fewer columns, until it fits', () => {
     // 30 columns, 25 rows: turned has 25 columns, still too wide; 15 kept + Other is 60 + 16 × 50 = 860 px of 900.
-    expect(fit(cross(25, 30)).v).toEqual({ turn: true, keep: 15 });
-    expect(fit(cross(30, 25)).v).toEqual({ keep: 15 });
+    expect(fit(cross(25, 30))).toEqual({ turn: true, keep: 15 });
+    expect(fit(cross(30, 25))).toEqual({ keep: 15 });
   });
 
   it('Other keeps the columns with the largest totals in their order and sums the rest per row', () => {

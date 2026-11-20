@@ -51,7 +51,7 @@ const uniq = (over: Record<string, unknown> = {}) => {
   return { kind: 'limitation', title: `${WORDS[i % 20]} ${WORDS[(i * 7 + 3) % 20]} widget${'x'.repeat(i)} limit`, area: 'limits', tried: 'Tried to do a thing', severity: 'minor', ...over };
 };
 const file = (S: Sess, a: Record<string, unknown>) => S('feedback_file', a);
-const noticesOf = (r: Res) => ((r.structuredContent?.notices ?? []) as { seq: number; kind: string; body: string }[]).filter((x) => x.kind === 'feedback_update');
+const noticesOf = (r: Res) => ((r.structuredContent?.notices ?? []) as { seq: number; kind: string; body: string; l2?: string[] }[]).filter((x) => x.kind === 'feedback_update');
 const setSettings = async (p: Record<string, unknown>) => (await api('PUT', '/feedback/settings', p)).body;
 const rowOf = (id: string) => app.db.prepare('SELECT * FROM feedback_reports WHERE id=?').get(id) as any;
 
@@ -349,7 +349,7 @@ describe('statuses, notices and reopening', () => {
       expect(ns.length).toBe(1);
       expect(ns[0]!.body).toContain('is now fixed');
       expect(ns[0]!.body).toContain('changed it');
-      expect(ns[0]!.body).toContain('L2 data');
+      expect(ns[0]!.l2!.length).toBeGreaterThan(0);
       await S('session_ack', { notice_seq: Math.max(...(r.structuredContent.notices as any[]).map((x) => x.seq)) });
       expect(noticesOf(await S('session_whoami')).length).toBe(0);
     }

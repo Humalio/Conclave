@@ -7,7 +7,7 @@
  */
 import { homedir, platform } from 'node:os';
 import { join, resolve } from 'node:path';
-import { realpathSync, statSync, lstatSync, writeFileSync, mkdirSync, renameSync, chmodSync, readFileSync } from 'node:fs';
+import { realpathSync, statSync, lstatSync, writeFileSync, mkdirSync, renameSync, chmodSync, readFileSync, openSync, writeSync, fsyncSync, closeSync, rmSync } from 'node:fs';
 import { randomBytes, createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 
@@ -50,14 +50,74 @@ export function readJson(path, fallback = undefined) {
   try { return JSON.parse(text); } catch { return null; }
 }
 
-/** Writes a file through a temporary file in the same folder and a rename, so a reader never sees half a file. */
+/**
+ * Writes a file through a temporary file in the same folder and a rename, so a reader never sees half a file. The
+ * temporary file is flushed to disk before the rename, and on macOS and Linux the folder is flushed after it, so a power
+ * loss leaves the old file or the new one, never an empty one.
+ */
 export function atomicWrite(path, text, secret = false) {
   const dir = join(path, '..');
   mkdirSync(dir, { recursive: true, ...(secret && !WIN ? { mode: 0o700 } : {}) });
   const tmp = `${path}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
-  writeFileSync(tmp, text, { mode: secret ? 0o600 : 0o644 });
+  const fd = openSync(tmp, 'w', secret ? 0o600 : 0o644);
+  try { writeSync(fd, typeof text === 'string' ? Buffer.from(text, 'utf8') : text); fsyncSync(fd); } finally { closeSync(fd); }
   if (secret && !WIN) chmodSync(tmp, 0o600);
-  renameSync(tmp, path);
+  try { renameSync(tmp, path); } catch (e) { rmSync(tmp, { force: true }); throw e; }
+  if (!WIN) { try { const d = openSync(dir, 'r'); try { fsyncSync(d); } finally { closeSync(d); } } catch { /* a folder that cannot be flushed: the rename still happened */ } }
+}
+
+/** True if a process with this id is alive (signal 0 only checks; EPERM means it exists under another user). */
+export function alive(pid) {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
+  try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; }
+}
+
+/**
+ * The connector's shared state files (the key file, the registry, the process list, the switches, the builds) are
+ * written as two flushed copies: `<file>.bak` first, then `<file>`, both through `atomicWrite`. Whichever write a crash
+ * or a power loss interrupts, the other copy is whole, and `readState` falls back to the `.bak` when the file itself
+ * is not valid. The `.bak` always holds the newest content, so a key removed from the file is gone from the `.bak` too.
+ */
+export const bakPath = (path) => `${path}.bak`;
+export function writeState(path, text, secret = false) {
+  atomicWrite(bakPath(path), text, secret);
+  atomicWrite(path, text, secret);
+}
+
+/** Like `readJson`, but a file that is not valid JSON is read from its `.bak` (written by `writeState`) when that one is. */
+export function readState(path, fallback = undefined) {
+  const v = readJson(path, fallback);
+  if (v !== null) return v;
+  const b = readJson(bakPath(path), null);
+  return b ?? null;
+}
+
+const sleepSync = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+/** How long a state lock is waited for, and after how long a lock whose holder still runs is taken as stuck. */
+export const LOCK_WAIT_MS = 10_000, LOCK_STALE_MS = 60_000;
+
+/**
+ * Runs `fn` (synchronous) while holding `<path>.lock`, so two processes never interleave a read-change-write of the
+ * same state file. The lock file names its holder (`{pid, at}`); a lock whose process is gone, or older than a minute, is
+ * taken over. Waits up to 10 seconds, then throws `state_locked`.
+ */
+export function withLock(path, fn, { waitMs = LOCK_WAIT_MS, staleMs = LOCK_STALE_MS } = {}) {
+  const lock = `${path}.lock`;
+  mkdirSync(join(path, '..'), { recursive: true });
+  const until = Date.now() + waitMs;
+  let fd = null;
+  for (;;) {
+    try { fd = openSync(lock, 'wx', 0o600); break; } catch (e) { if (e.code !== 'EEXIST') throw e; }
+    const h = readJson(lock, null);
+    if (!h || !alive(h.pid) || h.pid === process.pid || Date.now() - (Number(h.at) || 0) > staleMs) {
+      // An unreadable lock may be one being written this instant: only a lock that stays unreadable is taken over.
+      if (h || Date.now() + waitMs - until > 200) { rmSync(lock, { force: true }); continue; }
+    }
+    if (Date.now() > until) throw Object.assign(new Error(`a state file is locked by process ${h?.pid ?? 'unknown'}`), { reason: 'state_locked' });
+    sleepSync(25);
+  }
+  try { writeSync(fd, JSON.stringify({ pid: process.pid, at: Date.now() })); } finally { closeSync(fd); }
+  try { return fn(); } finally { const h = readJson(lock, null); if (!h || h.pid === process.pid) rmSync(lock, { force: true }); }
 }
 
 /** The keys Claude Code uses for a folder in ~/.claude.json: forward slashes, and on Windows also the native form (proof 9). */

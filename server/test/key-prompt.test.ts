@@ -100,9 +100,10 @@ describe('a new key for a known PC travels by pickup', () => {
     const t: string = r.prompt.text;
     expect(t).not.toMatch(/ah_ses_/);
     expect(t).not.toContain('session_login');
-    expect(t).toContain('Set ROWAN_SESSION_KEY on office-pc');
-    expect(t).toContain(`setup.mjs SHA-256: ${sha256Hex(SETUP)}`);
-    expect(t).toContain('node ~/.config/conclave/setup.mjs key');
+    expect(t).toContain('keeps the key in its own key file, for the agent\'s entry ROWAN_SESSION_KEY');
+    expect(t).toContain('docs/connector.md');
+    expect(t).toContain('conclave check');
+    for (const old of ['keys.env', '.agent-hub.json', 'agent-hub-headers', 'headers helper', 'setup.mjs', 'codex-bridge', 'helper.log', 'session_var']) expect(t, old).not.toContain(old);
     expect(t).toContain('into a chat with a person or another agent');
     expect(t).toMatch(/\nThis key may use .+ tools\./);
     expect(codeOf(t)).toMatch(/^cnv_key_/);
@@ -257,10 +258,10 @@ describe('the client step, from the onboarding request that made the key', () =>
     expect(r.body.prompt.client).toBe('codex');
     expect(r.body.prompt.session_var).toBe(o.agent.session_var);
     const t: string = r.body.prompt.text;
-    expect(t).toContain(`Set ${o.agent.session_var} on codex-pc`);
-    expect(t).toContain(`(in ${o.agent.folder})`);
-    expect(t).toContain('restart the Codex bridge on codex-pc');
-    expect(t).not.toContain('/mcp');
+    expect(t).toContain(`for the agent's entry ${o.agent.session_var}`);
+    expect(t).toContain(`(${o.agent.folder})`);
+    expect(t).toContain('restart the agent\'s client on codex-pc');
+    for (const old of ['keys.env', '.agent-hub.json', 'agent-hub-headers', 'headers helper', 'setup.mjs', 'codex-bridge', 'helper.log', 'session_var']) expect(t, old).not.toContain(old);
     expect(t).not.toContain('session_login');
     expect(t).toContain('the rotated Conclave session key');
     const ok = await pickup(o.app, codeOf(t));
@@ -270,9 +271,8 @@ describe('the client step, from the onboarding request that made the key', () =>
   it('a Claude Code agent is told its helper reads the key at the next login, and no bridge line', async () => {
     const o = await onboarded('claude-pc', 'claude-code');
     const t: string = (await api('POST', `/keys/${o.cred.id}/rotate`)).body.prompt.text;
-    expect(t).toContain('helper reads the new key at its next login');
-    expect(t).toContain('/mcp and reconnect agent-hub');
-    expect(t).not.toContain('Codex bridge');
+    expect(t).toContain("restart the agent's client on claude-pc");
+    expect(t).not.toMatch(/helper|bridge|agent-hub/);
     expect(t).not.toContain('session_login');
   });
 
@@ -281,8 +281,7 @@ describe('the client step, from the onboarding request that made the key', () =>
     const r = await api('POST', `/keys/${o.cred.id}/rotate`);
     const t: string = r.body.prompt.text;
     expect(r.body.prompt.client).toBe('unknown');
-    expect(t).toContain('If the agent runs in Codex, restart the Codex bridge on unknown-pc');
-    expect(t).toContain('If it runs in Claude Code');
+    expect(t).toContain("restart the agent's client on unknown-pc");
     expect(t).not.toContain('session_login');
     expect(app.keys.credential(r.body.key.id)!.session_var).toBe(o.agent.session_var);
   });
@@ -316,7 +315,7 @@ describe('review fixes: where the key goes, the binding, long names, the tools l
     app.keys.login(app.keys.verifyKey(cx, 'app_key'), r.body.secret);
     const n = await api('POST', `/keys/${r.body.key.id}/rotate`);
     expect(n.body.prompt).toMatchObject({ mode: 'pickup', pc: 'last-login-pc', client: 'codex', session_var: 'ROAMER_SESSION_KEY' });
-    expect(n.body.prompt.text).toContain('restart the Codex bridge on last-login-pc');
+    expect(n.body.prompt.text).toContain("restart the agent's client on last-login-pc");
   });
 
   it("changing the binding voids an open code, and a bound key's code is refused once the key is bound elsewhere", async () => {
@@ -343,7 +342,7 @@ describe('review fixes: where the key goes, the binding, long names, the tools l
     expect(v.endsWith('_SESSION_KEY')).toBe(true);
     const ok = await pickup(pc.app, codeOf(r.prompt.text));
     expect(ok.body.session_var).toBe(v);
-    expect(() => app.keys.armPickup(r.key.id, pc.id, 'x'.repeat(70), sys)).toThrow(/keys\.env variable/);
+    expect(() => app.keys.armPickup(r.key.id, pc.id, 'x'.repeat(70), sys)).toThrow(/session variable must be/);
   });
 
   it("the tools line follows the target PC's app key cap and deny rules, not team membership", async () => {

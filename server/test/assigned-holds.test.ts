@@ -5,7 +5,7 @@
  * submitted work in review with its author; task_assign's text says what the spec says about silent polling members.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { mkdtempSync, mkdirSync, readFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -50,14 +50,13 @@ const heldFor = (key: string, ms: number) => app.db.prepare('UPDATE system_setti
 const lock = async (scope: string, id: string | undefined, on: boolean) => expect((await api('POST', '/lockdown', { scope, id, on })).status).toBe(200);
 
 /** Coordinator, two workers, one reviewer; started. W1 holds a queued and a started task. */
-async function team(mode: 'poll' | 'on_demand' = 'poll') {
+async function team() {
   const [c, w1, w2, r] = ['coord', 'w1', 'w2', 'rev'].map(mk) as ReturnType<typeof mk>[];
   const res = await api('POST', '/teams', { name: `holds ${++n}`, goal: 'ship it',
     members: [{ agent_id: c!.id, role: 'coordinator' }, { agent_id: w1!.id, role: 'worker' }, { agent_id: w2!.id, role: 'worker' }, { agent_id: r!.id, role: 'reviewer' }] });
   expect(res.status).toBe(201);
   const tid = res.body.team.id as string;
   expect((await api('POST', `/teams/${tid}/start`)).status).toBe(200);
-  if (mode === 'on_demand') expect((await api('PATCH', `/teams/${tid}`, { delivery_mode: 'on_demand' })).body.team.delivery_mode).toBe('on_demand');
   const [C, W1, R] = await Promise.all([c!, w1!, r!].map((x) => loginWith(x.secret)));
   const mkTask = async (title: string) => (await C!('task_create', { team_id: tid, title, reviewer: r!.id })).structuredContent.task as { id: string };
   const queued = await mkTask('queued'), started = await mkTask('started');
@@ -67,7 +66,6 @@ async function team(mode: 'poll' | 'on_demand' = 'poll') {
 }
 type T = Awaited<ReturnType<typeof team>>;
 const task = (id: string) => app.teams.task(id)!;
-const member = (X: T) => app.db.prepare('SELECT last_work_next_at FROM team_members WHERE team_id=? AND agent_id=?').get(X.tid, X.w1.id) as { last_work_next_at: number };
 const stillHeld = (X: T) => {
   expect(task(X.queued)).toMatchObject({ status: 'assigned', assignee_agent_id: X.w1.id });
   expect(task(X.started)).toMatchObject({ status: 'in_progress', assignee_agent_id: X.w1.id });
@@ -89,23 +87,21 @@ beforeAll(async () => {
 afterAll(async () => { await Promise.all(clients.map((c) => c.close())); await app.close(); });
 
 describe('holds stop the sweep', () => {
-  it('a lockdown of all writes longer than the lease releases nothing, and lifting it restarts the lease', async () => {
+  it('a lockdown of all writes longer than the lease releases nothing, and after it a silent member still keeps its work', async () => {
     const X = await team();
     await lock('writes', undefined, true);
     silence(X.tid, X.w1.id, LEASE + 60_000);
     heldFor('emergency.writes_disabled', LEASE + 60_000);
     app.teams.tick();
     stillHeld(X);
-    const lifted = Date.now();
     await lock('writes', undefined, false);
-    expect(member(X).last_work_next_at).toBeGreaterThanOrEqual(lifted);
-    expect(task(X.started).lease_expires_at!).toBeGreaterThanOrEqual(lifted + LEASE);
     app.teams.tick();
     stillHeld(X);
-    // The lease runs again: silent past it after the lift, the member loses its work as the spec says.
+    // One delivery model: silence never returns work to open; only the started task's check-in time can pass.
     silence(X.tid, X.w1.id, LEASE + 60_000);
     app.teams.tick();
-    expect(task(X.queued)).toMatchObject({ status: 'open', lapsed_from: X.w1.id });
+    stillHeld(X);
+    expect(task(X.queued)).toMatchObject({ lapsed_from: null, overdue_at: null });
   });
   it('a lockdown of the team or of the agent holds the same way', async () => {
     for (const scope of ['team', 'agent'] as const) {
@@ -121,7 +117,7 @@ describe('holds stop the sweep', () => {
     }
   });
   it('an on-demand check-in time that passes during a lockdown is not flagged, and moves by the time the hold lasted', async () => {
-    const X = await team('on_demand');
+    const X = await team();
     await lock('team', X.tid, true);
     const due = Date.now() - 60_000;
     app.db.prepare('UPDATE tasks SET lease_expires_at=? WHERE id=?').run(due, X.started);
@@ -139,9 +135,10 @@ describe('holds stop the sweep', () => {
     silence(X.tid, X.w1.id, LEASE + 60_000);
     app.teams.tick();
     stillHeld(X);
-    const resumed = Date.now();
     expect((await api('POST', `/teams/${X.tid}/resume`)).status).toBe(200);
-    expect(member(X).last_work_next_at).toBeGreaterThanOrEqual(resumed);
+    app.teams.tick();
+    stillHeld(X);
+    silence(X.tid, X.w1.id, LEASE + 60_000);
     app.teams.tick();
     stillHeld(X);
   });
@@ -198,12 +195,12 @@ describe('submitted work keeps its author', () => {
 });
 
 describe('the tool text', () => {
-  it('task_assign says what the spec\'s "Polling teams" rule says about silent polling members', async () => {
-    const spec = readFileSync(join(process.cwd(), '..', 'docs', 'specification.md'), 'utf8').split('\n');
-    expect(spec.find((l) => l.startsWith('- **Polling teams**'))).toMatch(/^- \*\*Polling teams\*\* track liveness by member\..*one sweep returns the member's queued and in-progress assignments to open/);
+  it('task_assign says nothing returns to open by itself, and that it reassigns', async () => {
     const tools = (await clients[0]!.listTools()).tools;
     const assign = tools.find((t) => t.name === 'task_assign')!.description!;
-    expect(assign).toContain("Queued work has no work deadline, but a polling member who goes silent past the team's lease loses its queued and started tasks.");
+    expect(assign).toContain('Nothing returns to open by itself: queued work has no deadline and stays assigned until the worker starts it or you reassign it.');
+    expect(assign).toContain('Also reassigns a task still waiting on or started by its worker');
+    expect(assign).not.toMatch(/polling|lease/);
     expect(assign).not.toContain('without a clock');
   });
 });

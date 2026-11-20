@@ -24,7 +24,7 @@ describe('console: Delegate sheet', () => {
     expect(blk).toContain('data-dlg-pc="have"');
     expect(blk).toContain('Already set up');
     expect(blk).toContain('data-dlg-pc="new"');
-    expect(blk).toContain('>New PC<');
+    expect(blk).toContain('>PC not added yet<');
     expect(blk).toContain("(S.pcs || []).filter((p) => p.status === 'active')");
     expect(blk).toContain('What the agent loses while delegated');
     expect(blk).toContain('DLG_R.preview(a.id, u)');
@@ -42,15 +42,10 @@ describe('console: Delegate sheet', () => {
     expect(dlgPerms('bypassPermissions')).toHaveLength(4);
     expect(dlgPerms('something-new')).toEqual(['plan']);
   });
-  it('names the step in words: saving work, the prompt, the PC check, the approval, then the running line', () => {
+  it('names the step in words: saving work, the prompt, the restore, then the running line', () => {
     expect(dlgStep({ status: 'collecting' }).head).toBe('Saving work…');
     expect(dlgStep({ status: 'rendered', member: { name: 'Lena Ortiz' }, pc: { name: 'lena-laptop' } }).head).toBe('Waiting for Lena Ortiz to run the prompt');
     expect(dlgStep({ status: 'restoring', member: { name: 'Lena Ortiz' }, pc: { name: 'lena-laptop' } }).head).toBe('Restored on lena-laptop');
-    const c = dlgStep({ status: 'restoring', member: { name: 'Lena Ortiz' }, pc: { name: 'lena-laptop', new: true, enrolled: true, confirmed: false } });
-    expect(c.head).toBe('Waiting for Lena Ortiz to confirm lena-laptop');
-    const w = dlgStep({ status: 'restoring', member: { name: 'Lena Ortiz' }, pc: { name: 'lena-laptop', new: true, approval: 'waiting', enrolled: true, confirmed: true, enrolled_from: '203.0.113.9' } });
-    expect(w.head).toBe('Waiting for you to approve lena-laptop');
-    expect(w.tone).toBe('warn');
     expect(dlgStep({ status: 'restored', member: { name: 'Lena Ortiz' }, pc: { name: 'lena-laptop' } }).head).toBe('Running on lena-laptop · delegated to Lena Ortiz');
   });
   it('never shows the prompt to the administrator: only the member\'s Home does, held in the page', () => {
@@ -60,30 +55,29 @@ describe('console: Delegate sheet', () => {
     expect(blk).toContain('DLG.prompt[id] =');
     expect(blk).not.toMatch(/sessionStorage|indexedDB/);
     expect(blk.match(/localStorage\.\w+\('[^']+'/g)).toEqual(["localStorage.getItem('dlgSeen'", "localStorage.setItem('dlgSeen'"]);
-    expect(blk).toContain('good for 30 minutes');
+    expect(blk).not.toContain('good for 30 minutes');
   });
-  it('approves a new PC only once the member has said it is theirs', () => {
-    expect(blk).toContain("c.pc.approval === 'waiting' && !!c.pc?.enrolled && !!c.pc?.confirmed");
-    expect(blk).toContain('id="dlgOk"');
+  it('has no approval of a new PC: a PC must be added with the connector first', () => {
+    expect(blk).not.toContain('dlgOk');
+    expect(blk).not.toContain('approve-pc');
+    expect(blk).not.toContain('confirm_pc');
+    expect(blk).toContain('Add this PC with the connector first');
   });
-  it('the member\'s Home row asks Is this your PC, shows the prompt with Copy and says when it was taken back', () => {
-    expect(blk).toContain('Is this your PC: ${esc(d.confirm_pc.name)}');
-    expect(blk).toContain('data-dlg-mu="yes"');
-    expect(blk).toContain('data-dlg-mu="no"');
+  it('the member\'s Home row shows the prompt with Copy and says when it was taken back', () => {
     expect(blk).toContain('codeBox(P.text, true)');
     expect(blk).toContain('took ${ag} back');
     expect(js).toContain('const dm = dlgMemberHtml(await dlgMine());');
     expect(js).toContain('[data-dlg-mu]');
   });
-  it('Take back offers to retire the PC and the agent page shows a Contributor tag', () => {
-    expect(blk).toContain('Also retire ${esc(c.pc.name)}');
-    expect(blk).toContain('retire_pc:');
+  it('Take back no longer offers to retire a PC, and the agent page shows a Contributor tag', () => {
+    expect(blk).not.toContain('dlgRetire');
+    expect(blk).not.toContain('retire_pc');
     expect(js).toContain('>Contributor</span>');
   });
   it('escapes the member\'s and the PC\'s names where they are drawn', () => {
     const progress = blk.slice(blk.indexOf('function dlgProgressHtml'), blk.indexOf('/* Open the sheet'));
     expect(progress).toContain("esc(c.member?.name || 'the member')");
-    expect(progress).toContain("esc(`${c.pc?.name || '—'}");
+    expect(progress).toContain("esc(c.pc?.name || '—')");
     expect(progress).toContain('<b>${esc(s.head)}</b>');
     expect(dlgStep({ status: 'restored', member: { name: '<img src=x onerror=alert(1)>' }, pc: { name: 'p' } }).text).toBe('');
     const hostile = dlgStep({ status: 'rendered', member: { name: '<img src=x onerror=alert(1)>' }, pc: { name: '<b>pc</b>', new: true } });

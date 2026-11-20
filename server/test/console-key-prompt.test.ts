@@ -7,6 +7,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import vm from 'node:vm';
 
@@ -145,6 +146,11 @@ describe('console: the key prompt and Make a new prompt', () => {
     expect(note({ mode: 'pickup', pc: 'pc1', session_var: 'A_SESSION_KEY', expires_at: 1, client: 'unknown' })).toContain("into the agent's client (Claude Code or Codex) on");
     expect(note({ mode: 'pickup', pc: 'pc1', session_var: 'A_SESSION_KEY', expires_at: 1, client: 'unknown', note: 'The PC pc1 has no active app key: issue or reactivate one before running the command there.' })).toContain('<b>The PC pc1 has no active app key');
     expect(note({ mode: 'pickup', pc: 'office-pc', session_var: 'ROWAN_SESSION_KEY', expires_at: 1 })).toContain('single-use pickup code, not the key');
+    const n = note({ mode: 'pickup', pc: 'office-pc', session_var: 'ROWAN_SESSION_KEY', expires_at: 1 });
+    expect(n).toContain('Conclave connector on that PC stores the key');
+    expect(n).not.toMatch(/keys\.env|ROWAN_SESSION_KEY/);
+    expect(readFileSync(join(__dirname, '../public/app.js'), 'utf8')).not.toMatch(/reconnect agent-hub|goes into keys\.env/);
+    expect(() => execFileSync(process.execPath, ['--check', join(__dirname, '../public/app.js')], { stdio: 'pipe' }), 'public/app.js must parse (node --check)').not.toThrow();
     expect(note({ mode: 'secret' })).toContain('Do not paste it into a chat with a person or another agent.');
     expect(src).toContain("if (p) b += vnote(keyPromptNote(p)) + sec('Key prompt', codeBox(p.text, true)");
     expect(src).toContain("else b += sec('Key',");

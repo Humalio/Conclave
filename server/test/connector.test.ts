@@ -93,6 +93,22 @@ describe('check-in and PC status', () => {
       expect((await cn('POST', '/check-in', pc.key, { ...report, agents: [{ agent_id: mine.id, state }] })).status).toBe(400); // the hub's states
     }
   });
+  it("keeps the account profile a PC reports for a run, or only that it is hidden, and the agent page gets it", async () => {
+    const pc = await newPc('conn-profile');
+    const ag = app.keys.createAgent('profiled worker', null, sys);
+    app.keys.createSessionKey({ agentId: ag.id, label: 'k', machineId: pc.id }, sys);
+    const prof = async () => (await api('GET', `/sessions/${ag.id}`)).body.pc_profile;
+    expect(await prof()).toBeNull(); // never reported
+    expect((await cn('POST', '/check-in', pc.key, { ...report, agents: [{ agent_id: ag.id, state: 'open', profile: 'work' }] })).status).toBe(200);
+    expect(await prof()).toEqual({ name: 'work' });
+    expect((await cn('POST', '/check-in', pc.key, { ...report, agents: [{ agent_id: ag.id, state: 'open', profile_hidden: true }] })).status).toBe(200);
+    expect(await prof()).toEqual({ hidden: true });
+    expect((await cn('POST', '/check-in', pc.key, { ...report, agents: [{ agent_id: ag.id, state: 'open' }] })).status).toBe(200);
+    expect(await prof()).toBeNull(); // a chat opened by hand
+    // Never an address or anything but the flag.
+    expect((await cn('POST', '/check-in', pc.key, { ...report, agents: [{ agent_id: ag.id, state: 'open', profile: 'me@example.com' }] })).status).toBe(400);
+    expect((await cn('POST', '/check-in', pc.key, { ...report, agents: [{ agent_id: ag.id, state: 'open', profile_hidden: false }] })).status).toBe(400);
+  });
   it('the bridge key may check in during the transition, and nothing else', async () => {
     const pc = await newPc('conn-bridge');
     const sk = app.setup.createSetupKey(pc.id, sys);
@@ -173,6 +189,7 @@ describe('PC actions', () => {
     await cn('GET', '/orders', pc.key);
     expect((await api('POST', `/pcs/${pc.id}/actions`, { kind: 'check' })).status).toBe(409);
     app.db.prepare('UPDATE pc_actions SET fetched_at=? WHERE id=?').run(Date.now() - 24 * 60 * 60_000 - 1, a.id);
+    app.connector.tick(); // expiry runs on the timer, not on each request
     const lost = (await api('GET', `/pcs/${pc.id}/actions`)).body.actions.find((x: any) => x.id === a.id);
     expect(lost).toMatchObject({ state: 'expired', finished_at: expect.any(Number), result: { reason: expect.stringMatching(/did not report a result within 24 hours/) } });
     expect((await api('POST', `/pcs/${pc.id}/actions`, { kind: 'check' })).status).toBe(200);
@@ -240,6 +257,35 @@ describe('PC actions', () => {
     await cn('POST', '/check-in', pc.key, report);
     expect((await pcOf(pc.id)).connector.destinations).toBeNull();
   });
+  it('a restore order stays open while its checkout is rendered or restoring, takes progress notes and start lines, and ends when the checkout is cancelled', async () => {
+    const pc = await newPc('conn-restore-life');
+    const lead = app.keys.createAgent('life lead', null, sys);
+    app.keys.createSessionKey({ agentId: lead.id, label: 'lead' }, sys);
+    const team = app.teams.create({ name: 'Restore life team', goal: 'Move house', members: [{ agent_id: lead.id, role: 'coordinator' }] }, sys);
+    const now = Date.now(), cko = 'cko_restorelife1';
+    app.db.prepare("INSERT INTO checkouts(id,team_id,status,target_machine_id,created_at,updated_at,expires_at) VALUES (?,?,'rendered',?,?,?,?)").run(cko, team.id, pc.id, now, now, now + 86400_000);
+    await cn('POST', '/check-in', pc.key, { ...report, destinations: [{ id: 'dst_life0001', label: 'Life' }] });
+    const o = (await api('POST', `/pcs/${pc.id}/actions`, { kind: 'restore', checkout_id: cko, destination_id: 'dst_life0001' })).body.action;
+    expect((await cn('GET', '/orders', pc.key)).body.orders.map((x: { id: string }) => x.id)).toEqual([o.id]);
+    expect((await cn('POST', `/orders/${o.id}/progress`, pc.key, { note: 'Waiting for the PC user to approve the folder.' })).status).toBe(200);
+    const clock = (t: number) => app.db.prepare('UPDATE pc_actions SET expires_at=? WHERE id=?').run(t, o.id);
+    clock(Date.now() - 1); // the clock alone never ends a restore
+    expect((await api('GET', `/pcs/${pc.id}/actions`)).body.actions[0]).toMatchObject({ state: 'fetched', result: { progress: 'Waiting for the PC user to approve the folder.' } });
+    app.db.prepare("UPDATE checkouts SET status='restoring' WHERE id=?").run(cko);
+    expect((await api('GET', `/pcs/${pc.id}/actions`)).body.actions[0].state).toBe('fetched');
+    expect((await cn('POST', `/orders/${o.id}/result`, pc.key, { state: 'done', result: { start_lines: ["cd '/x/y' && claude 'hi'"] } })).status).toBe(200);
+    expect((await api('GET', `/pcs/${pc.id}/actions`)).body.actions[0]).toMatchObject({ state: 'done', result: { start_lines: ["cd '/x/y' && claude 'hi'"] } });
+    // A second restore, then the checkout is cancelled: the order ends with the reason.
+    app.db.prepare("UPDATE checkouts SET status='rendered' WHERE id=?").run(cko);
+    const o2 = (await api('POST', `/pcs/${pc.id}/actions`, { kind: 'restore', checkout_id: cko, destination_id: 'dst_life0001' })).body.action;
+    await cn('GET', '/orders', pc.key);
+    app.db.prepare("UPDATE checkouts SET status='cancelled' WHERE id=?").run(cko);
+    app.connector.tick();
+    const ended = (await api('GET', `/pcs/${pc.id}/actions`)).body.actions.find((x: { id: string }) => x.id === o2.id);
+    expect(ended.state).toBe('expired');
+    expect(JSON.stringify(ended)).toMatch(/The checkout ended/);
+    expect((await cn('POST', `/orders/${o2.id}/progress`, pc.key, { note: 'late' })).status).toBeGreaterThanOrEqual(404); // gone: the worker finishes its state on 404 or 409
+  });
   it('a destination label passes the leak guard like every other text from the PC', async () => {
     const pc = await newPc('conn-dest-leak');
     const shaped = ['ah', 'app', 'e'.repeat(12), 'f'.repeat(32)].join('_');
@@ -249,6 +295,7 @@ describe('PC actions', () => {
     const pc = await newPc('conn-expire');
     const a = (await api('POST', `/pcs/${pc.id}/actions`, { kind: 'check' })).body.action;
     app.db.prepare('UPDATE pc_actions SET expires_at=? WHERE id=?').run(Date.now() - 1, a.id);
+    app.connector.tick();
     expect((await api('GET', `/pcs/${pc.id}/actions`)).body.actions[0].state).toBe('expired');
     expect((await cn('GET', '/orders', pc.key)).body.orders).toEqual([]);
   });

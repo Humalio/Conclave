@@ -46,7 +46,7 @@ export function registerChannelTools(reg: Reg, d: ChannelToolDeps): void {
     if (!['agent', 'vault', 'share'].includes(kind) || !target) throw new ToolError('invalid_argument', 'to must be agent:<id>, vault:<path> or share:<id>.');
     const bridge = a.local_path !== undefined;
     const from = { agentId: s.agent.id, credId: s.cred.id, machineId: ctx.app.machine_id as string | null, appId: ctx.app.id as string };
-    const local = bridge ? channels.resolveLocal(from.machineId, a.local_path, 'local_path') : undefined;
+    const local = bridge ? channels.resolveLocal(from.machineId, a.local_path, 'local_path', 'send') : undefined;
     if (!bridge && (a.size === undefined || !a.sha256)) throw new ToolError('invalid_argument', 'Give local_path (bridge mode), or size and sha256 (inline mode).');
     let c: ChannelRow;
     if (kind === 'agent') {

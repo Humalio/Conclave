@@ -171,6 +171,23 @@ describe('the backlog list: list, project and tag together, before paging and co
     expect((await backlog(`?project=${X.project}&tag=docs`)).total).toBe(0);
   });
 
+  it('searches the title and the brief (q) with the other filters, before paging and counting; LIKE wildcards are literal', async () => {
+    const X = await team('PpSearch');
+    const a = await create(X, { title: 'Rotate the relay keys', tags: ['ops'] }), b = await create(X, { title: 'Tidy the docs', description: 'Mention the relay in the intro.' });
+    await create(X, { title: 'Unrelated work' }); const pct = await create(X, { title: 'Cut costs by 50% now' });
+    const P = `?project=${X.project}`;
+    const r = await backlog(`${P}&q=relay`);
+    expect(ids(r.tasks).sort()).toEqual([a.id, b.id].sort());
+    expect(r).toMatchObject({ q: 'relay', total: 2, active_total: 2 });
+    expect(ids((await backlog(`${P}&q=relay&tag=ops`)).tasks)).toEqual([a.id]);
+    // % and _ are matched as typed, not as wildcards.
+    expect(ids((await backlog(`${P}&q=${encodeURIComponent('50%')}`)).tasks)).toEqual([pct.id]);
+    expect(ids((await backlog(`${P}&q=${encodeURIComponent('%')}`)).tasks)).toEqual([pct.id]);
+    expect((await backlog(`${P}&q=_`)).total).toBe(0);
+    expect((await backlog(P)).q).toBeNull();
+    expect((await api('GET', `/tasks/backlog?q=${'x'.repeat(201)}`)).status).toBe(400);
+  });
+
   it('filters by team (Backlog · n on the team page): the same tasks and counts as the team backlog count', async () => {
     const X = await team('PpTeam'), Y = await team('PpTeamElse');
     const a = await create(X), b = await create(X), c = await create(X), y = await create(Y);

@@ -3,6 +3,7 @@ import { randomToken } from './crypto.js';
 /** Immutable ids with the prefixes used in the spec, schema and MCP tools. */
 export const newId = {
   agent: () => `agent-${randomToken(5)}`,
+  relay: () => `rly_${randomToken(8)}`,
   pc: () => `pc-${randomToken(5)}`,
   credential: () => `crd_${randomToken(10)}`,
   policy: () => `pol_${randomToken(10)}`,

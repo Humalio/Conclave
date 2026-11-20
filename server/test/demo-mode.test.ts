@@ -112,7 +112,7 @@ describe('demo mode on', () => {
     writeFileSync(join(dir, 'vault', 'stray.md'), '# stray\n');
     expect((await call(host.base, s, 'POST', '/agents', { label: 'Leftover', project: null })).status).toBe(200);
     // And what the story itself leaves: a member, and settings it changes.
-    const old = await call(host.base, s, 'POST', '/users', { username: 'old-member', display_name: 'Mira Okafor' });
+    const old = await call(host.base, s, 'POST', '/users', { username: 'old-member', display_name: 'Nadia Okafor' });
     expect(old.status).toBe(200);
     expect((await call(host.base, s, 'PUT', `/users/${old.body.user.id}/folder-grants`, { grants: [{ path: '/Case Command/', mode: 'read' }] })).status).toBe(200);
     expect((await call(host.base, s, 'PUT', '/settings/onboarding', { max_agents: 7 })).status).toBe(200);

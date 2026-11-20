@@ -1,6 +1,6 @@
 /**
  * Hub warnings (docs/onboarding.md "Alerts", docs/checkout.md "What it waits for" and "Refused starts", docs/dashboard-ux.md
- * "Agent status"): the unknown-key alert fires on a key the hub never issued that keeps being retried (the robot_stack
+ * "Agent status"): the unknown-key alert fires on a key the hub never issued that keeps being retried (the orbit_lab
  * pattern) and not on one typo; a checkout says what it waits for; refused team changes and checkout starts are audited;
  * Connected and Last active come from the agent's own calls, never the helper's sign-in check.
  */
@@ -29,7 +29,7 @@ const client = async (headers: Record<string, string> = {}) => {
   await c.connect(new StreamableHTTPClientTransport(new URL(`${base}/mcp`), { requestInit: { headers: { Authorization: `Bearer ${appA}`, ...headers } } }));
   return c;
 };
-const helperHeaders = { 'X-Agent-Hub-Folder': encodeURIComponent('C:\\agents\\robot_stack\\coordinator'), 'X-Agent-Hub-Session-Var': 'ROBOT_STACK_COORDINATOR_SESSION_KEY' };
+const helperHeaders = { 'X-Agent-Hub-Folder': encodeURIComponent('C:\\agents\\orbit_lab\\coordinator'), 'X-Agent-Hub-Session-Var': 'ORBIT_LAB_COORDINATOR_SESSION_KEY' };
 const login = async (secret: string, headers: Record<string, string> = helperHeaders) =>
   (await (await client(headers)).callTool({ name: 'session_login', arguments: { session_key: secret } })) as { isError?: boolean; structuredContent?: any };
 const unknownAlerts = () => app.db.prepare("SELECT subject, details FROM security_alerts WHERE type='unknown_session_key'").all() as { subject: string; details: string }[];
@@ -49,7 +49,7 @@ beforeAll(async () => {
   await app.fastify.listen({ port: 0, host: '127.0.0.1' });
   base = `http://127.0.0.1:${(app.fastify.server.address() as { port: number }).port}`;
   ({ cookie, csrf } = await adminLogin(base));
-  pcA = (await api('POST', '/pcs', { name: 'xlin2' })).body.pc.id;
+  pcA = (await api('POST', '/pcs', { name: 'lab-pc' })).body.pc.id;
   appA = app.keys.createAppKey({ machineId: pcA, appName: 'claude-code', maxLiveSessions: 100 }, sys).secret;
 });
 afterAll(async () => { await app.close(); });
@@ -61,22 +61,22 @@ describe('unknown session key alert', () => {
     expect(unknownAlerts()).toHaveLength(0);
   });
 
-  it('the robot_stack pattern (one unknown key id retried from one PC) raises one alert naming the PC, its team and the folder', async () => {
+  it('the orbit_lab pattern (one unknown key id retried from one PC) raises one alert naming the PC, its team and the folder', async () => {
     // A team whose keys are bound to the PC, as after onboarding.
     const lead = agentWithKey('robot lead');
     app.keys.setBinding(lead.key.credential.id, pcA, sys);
-    const t = app.teams.create({ name: 'robot_stack', goal: 'Stack robots.', members: [{ agent_id: lead.agent.id, role: 'coordinator' }] }, sys);
-    const stale = 'ah_ses_zwonwcoalsz7_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+    const t = app.teams.create({ name: 'orbit_lab', goal: 'Stack robots.', members: [{ agent_id: lead.agent.id, role: 'coordinator' }] }, sys);
+    const stale = 'ah_ses_qwertyuiop22_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
     expect((await login(stale)).isError).toBe(true);
     expect((await login(stale)).isError).toBe(true);
     expect(unknownAlerts()).toHaveLength(0); // two is still a retry, not a pattern
     for (let i = 0; i < 5; i++) expect((await login(stale)).isError).toBe(true);
     const a = unknownAlerts();
     expect(a).toHaveLength(1); // seven refusals, one alert (repeats bump it)
-    expect(a[0]!.subject).toBe(`${pcA}/zwonwcoalsz7`);
+    expect(a[0]!.subject).toBe(`${pcA}/qwertyuiop22`);
     const d = JSON.parse(a[0]!.details);
-    expect(d).toMatchObject({ presented_id: 'zwonwcoalsz7', count: 3, window_minutes: 10, pc: { id: pcA, name: 'xlin2' }, teams: [{ id: t.id, name: 'robot_stack' }],
-      folder: 'C:\\agents\\robot_stack\\coordinator', session_var: 'ROBOT_STACK_COORDINATOR_SESSION_KEY' });
+    expect(d).toMatchObject({ presented_id: 'qwertyuiop22', count: 3, window_minutes: 10, pc: { id: pcA, name: 'lab-pc' }, teams: [{ id: t.id, name: 'orbit_lab' }],
+      folder: 'C:\\agents\\orbit_lab\\coordinator', session_var: 'ORBIT_LAB_COORDINATOR_SESSION_KEY' });
     expect(d.repeats).toBe(5);
     expect(a[0]!.details).not.toContain('bbbbbbbb'); // never the key
   });

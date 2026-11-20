@@ -93,6 +93,7 @@ export class Alerts {
     }
   }
 
+  // The folder and variable come from the old helper's X-Agent-Hub-* headers; this goes at the cutover.
   /**
    * A session key the hub does not recognise, refused again and again from one place: an agent whose folder holds a
    * stale or mistyped key keeps retrying, while a single typo does not. Counted over a sliding window from the sign-in

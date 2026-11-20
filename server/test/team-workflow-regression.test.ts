@@ -50,8 +50,8 @@ async function submitted(f: Awaited<ReturnType<typeof fixture>>) {
   expect(claim.data.task.status).toBe('in_progress');
   const s = await f.worker.call('task_submit', { task_id: f.task.id, summary: 'Completed with evidence' });
   expect(s.data.task.status).toBe('in_review');
-  // A polling reviewer: the result names the hand-off, with no wake text (docs/proposals/console-systems.md §8.4, 8.A9).
-  expect(s.data.handoff).toEqual({ to: f.reviewer.id, to_label: 'reviewer', phase: 'review', on_demand: false, seen: false });
+  // One delivery model: the result names the hand-off with the wake text (on_demand is always true, kept for older clients).
+  expect(s.data.handoff).toEqual({ to: f.reviewer.id, to_label: 'reviewer', phase: 'review', on_demand: true, seen: false, wake_text: `review ${s.data.task.id}` });
 }
 
 async function nextNonNotice(a: Agent) {

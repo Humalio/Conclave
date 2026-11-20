@@ -752,6 +752,37 @@ select.inp{width:auto;padding-right:var(--s8)}
 .srch{position:relative;margin-bottom:var(--s3)}
 .srch svg{position:absolute;left:var(--s3);top:50%;transform:translateY(-50%);color:var(--faint);z-index:1;pointer-events:none}
 .srch .inp{width:100%;padding-left:calc(var(--s3) + var(--icon) + var(--s2))} /* icon column, then text: every search field */
+/* Search field with chips (docs/design-guidelines.md): the box is the field; the chips, then the input, wrap inside it (two lines at
+   most, then "+k"); the ✕ ends it. The icon sits on the first line. */
+.csrch{display:flex;align-items:flex-start;gap:var(--s1);min-height:var(--h-ctl);padding:1px 1px 1px calc(var(--s3) + var(--icon) + var(--s2));border:1px solid var(--line-2);border-radius:var(--r-md);background:var(--panel-2)}
+.csrch>svg{top:calc(var(--h-ctl) / 2 - 1px)}
+.csrch button svg{position:static;transform:none;color:inherit;z-index:auto} /* only the field's own icon is placed by .srch svg */
+.csrch:focus-within{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+.csrch-box{flex:1;min-width:0;display:flex;flex-wrap:wrap;align-items:center;gap:2px var(--s1);cursor:text}
+.csrch-in{flex:1 1 80px;min-width:80px;height:28px;padding:0 var(--s1) 0 0;border:0;background:transparent;color:var(--text);font:inherit;outline:none}
+.csrch-in::-webkit-search-cancel-button{display:none}
+.csrch-x{width:28px;height:28px}
+.cs-chip{display:inline-flex;align-items:center;gap:var(--s1);min-height:28px;max-width:100%;padding:0 var(--s2);border-radius:var(--r-chip);border:1px solid transparent;background:var(--accent-soft);color:var(--accent);font:var(--t-cap);cursor:pointer}
+.cs-chip svg{width:12px;height:12px;flex:none}
+.cs-chip.gap{background:var(--warn-soft);color:var(--warn-t)}
+.cs-chip.cs-more{background:var(--panel);border-color:var(--line);color:var(--muted)}
+.cs-chip:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+@media (max-width:767.98px){.csrch>svg{top:calc(var(--h-touch) / 2 - 1px)}.csrch-in,.cs-chip,.csrch-x{min-height:var(--h-ctl);height:auto}.csrch{min-height:var(--h-touch);padding-block:5px}.csrch-in{height:var(--h-ctl)}.csrch-x{width:var(--h-ctl)}}
+/* List overline (docs/design-guidelines.md): one line over a list, its parts joined by "·"; an inline select keeps sentence case
+   and its native ▾ inside the uppercase line. */
+.overline.lov{flex-wrap:wrap;margin:0 0 var(--s2)}
+.lov .bp-show,.lov .lov-n{text-transform:none;letter-spacing:normal}
+.lov .lov-n b{color:var(--text)}
+/* The list toolbar (docs/design-guidelines.md, Search field with chips): the search box with its chips, the state segment, Filters and
+   Views in one row, top-aligned while the box grows; on a phone the box takes the first line and the rest the second. */
+.ltb{display:flex;align-items:flex-start;gap:var(--s2) var(--s3);flex-wrap:wrap;margin-bottom:var(--stack)}
+.ltb .srch{margin:0;flex:1 1 260px;max-width:440px}
+.ltb .fcount{font-variant-numeric:tabular-nums}
+@media (max-width:767.98px){.ltb .srch{flex-basis:100%;max-width:none}}
+.isel{height:28px;max-width:100%;field-sizing:content;padding:0 var(--s1);border:1px solid transparent;border-radius:var(--r-chip);background:transparent;color:var(--text);font:var(--t-label);text-transform:none;letter-spacing:normal;cursor:pointer}
+.isel:hover{background:var(--panel-2)}
+.isel:focus-visible{outline:2px solid var(--accent)}
+@media (max-width:767.98px){.isel{height:var(--h-touch)}}
 .msgs{display:flex;flex-direction:column;gap:var(--s2);max-height:calc(100dvh - 210px);overflow:auto}
 .msg{background:var(--panel-2);border-radius:var(--r-lg);padding:var(--s2) var(--s3);max-width:92%;align-self:flex-start}
 .msg.hub{background:var(--accent-soft);align-self:center}
@@ -1277,14 +1308,12 @@ details.cf summary::-webkit-details-marker{display:none}
 .chk-row input{accent-color:var(--accent)}
 .dir-review .row{display:flex;flex-wrap:wrap;gap:var(--s2);justify-content:flex-end;margin-top:var(--s3)}
 /* Directives list (Work → Directives): rows with a tick box, folding scope groups, a bulk bar; side by side with the selected directive from 1024 px */
-.dl-q{flex:1;min-width:160px;max-width:320px;margin:0}
-.dl-sels{display:inline-flex;gap:var(--s2);flex-wrap:wrap}
 .dl-chk{width:var(--icon);height:var(--icon);margin:0;accent-color:var(--accent);cursor:pointer}
 .dl-hit{display:grid;place-items:center;flex:none;width:44px;height:44px;margin-inline:-6px;cursor:pointer} /* 44 px tap target in the 32 px leading column */
-.dl-sum{display:flex;align-items:center;gap:var(--s3);min-height:44px}
-.dl-sum .lrow-lead,.dl-sum>.dl-chk{margin-inline:var(--s2)}
-.dl-sum .meta b{color:var(--text);font-weight:500}
-.dl-sum .info-t{color:var(--info)}
+/* the list overline: Select all shown (lined up with the rows' tick boxes), the live count, Group by */
+.dl-list .lov{align-items:center;min-height:44px;margin:0}
+.dl-list .lov>.dl-chk{margin-inline:var(--s2)}
+.lov .info-t{color:var(--info)}
 .dl-gh{display:flex;align-items:center;gap:var(--s2);width:100%;height:44px;padding:0;border:0;border-top:1px solid var(--line);background:none;color:var(--faint);font:var(--t-cap);letter-spacing:var(--track-cap);text-transform:uppercase;cursor:pointer;text-align:left}
 .dl-gh .chev{width:var(--icon);height:var(--icon);margin-inline:var(--s2);transform:rotate(90deg);transition:transform .15s}
 .dl-gh[aria-expanded=false] .chev{transform:none}
@@ -1317,17 +1346,9 @@ details.cf summary::-webkit-details-marker{display:none}
 .dir-meta a:hover,.dir-meta a:focus-visible,.lnk:hover,.lnk:focus-visible{text-decoration:underline}
 #dirAg:focus,#dirHist:focus{outline:none}
 #dirAg:focus-visible,#dirHist:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:var(--r-md)}
-/* the agent list: who it applies to, search and Team (Filters on phones), state chips, the count line, then the rows */
 /* the agent list and History follow the text under a thin divider instead of an uppercase label */
 .dir-sec{border-top:1px solid var(--line);padding-top:var(--s4);margin-top:var(--s4)}
 .dl-det>.dir-sec{margin-top:0}
-.dag-flt{display:flex;align-items:center;gap:var(--s2);margin-bottom:var(--s3)}
-.dag-flt .srch{margin:0;flex:1;min-width:0;max-width:360px}
-.dag-flt .btn .fcount{color:inherit}
-.dag-cnt{display:flex;align-items:center;flex-wrap:wrap;gap:var(--s1) var(--s3);margin-bottom:var(--s2)}
-.dag-cnt .meta{white-space:normal}
-.dag-cnt .meta b{color:var(--text);font-weight:600}
-@media (max-width:767.98px){.dag-chips{display:none}.dag-flt .srch{max-width:none}}
 .dir-revcat{margin:var(--s3) 0}
 .dl-bulk{position:sticky;bottom:0;z-index:5;display:flex;align-items:center;flex-wrap:wrap;gap:var(--s2);margin-top:var(--s3);padding:var(--s2) var(--s3);background:var(--panel-3);border:1px solid var(--line-2);border-radius:var(--r-lg);box-shadow:var(--shadow-pop)}
 .dl-bn{flex:1;font:var(--t-label)}
@@ -1479,6 +1500,8 @@ button.av{cursor:pointer}
 .av .st.warn{background:var(--warn)}
 .kvc{padding-top:0;padding-bottom:0}
 .kv-sub{font:var(--t-meta);color:var(--muted)}
+/* The woken run row (docs/connector.md, "The wake") wraps onto more lines: its task title and the Stop hint stay readable on a phone. */
+.kv-v:has(.kv-wake){white-space:normal;line-height:1.7}
 /* Teams (docs/dashboard-ux.md): pinned teams first, then groups by Organize, in one workspace card. Rows are 56 px and run to the card's
    edges (--tl-pad is the card's padding). The pin toggle leads; the name is the open button; the whole row opens the team. */
 .tl{--tl-pad:var(--s5);min-width:0}
@@ -1830,6 +1853,10 @@ button.av{cursor:pointer}
   #workspaceView:is([data-area=security],[data-area=vault],[data-area=log],[data-view=account],[data-view=shortcuts]) .vtools>.seg{flex:1 1 0;min-width:0}
   #workspaceView:is([data-area=vault],[data-area=log],[data-view=account],[data-view=shortcuts]) .vtools>.seg button{padding:0 var(--s1)}
   #workspaceView:is([data-area=vault],[data-area=log],[data-view=account],[data-view=shortcuts]) .vtools>.btn{flex:none}
+  /* The Audit tabs' and Vault Activity's toolbar: the box on line 1, the segment and Filters share line 2. */
+  #workspaceView:is([data-area=vault],[data-area=log]) .ltb>.seg{flex:1 1 0;min-width:0}
+  #workspaceView:is([data-area=vault],[data-area=log]) .ltb>.seg button{padding:0 var(--s1)}
+  #workspaceView:is([data-area=vault],[data-area=log]) .ltb>.btn{flex:none}
   #vaultBar,#auditBar{margin-top:var(--s1)}
   #vaultBar .ws-act,#auditBar .ws-act{display:none}
   #vaultBar .tabs,#auditBar .tabs{width:100%}
@@ -1963,6 +1990,7 @@ b,strong{font-weight:600}
 .lc-s.cur .lc-l{font:var(--t-title);color:var(--text)}
 .lc.off .lc-dot{opacity:.5}
 .lc-foot{display:flex;align-items:center;justify-content:space-between;gap:var(--s3);margin-top:var(--s3)}
+.tk-deliv{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:var(--s2);margin:var(--s3) 0 0;white-space:normal} /* who the task waits on and whether it reached them; Reassign at the end */
 .lc-now{display:flex;flex-direction:column;min-width:0}
 .lc-now b{font:var(--t-title)}
 .lc-now b.bad-t{color:var(--bad-t)}
@@ -1995,7 +2023,7 @@ b,strong{font-weight:600}
 .ta-h{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:var(--s2)}
 .ta-ht{display:flex;flex-direction:column;min-width:0}
 .ta-ht b{font:var(--t-title)}
-.ta-ht .meta{font:var(--t-meta);color:var(--muted)}
+.ta-ht .meta{font:var(--t-meta);color:var(--muted);white-space:normal} /* the hint wraps on a phone (.meta does not wrap) */
 .ta-strip{display:flex;gap:var(--s3);overflow-x:auto;padding-bottom:var(--s1);scroll-snap-type:x proximity}
 .ta-th{flex:none;display:flex;flex-direction:column;gap:var(--s1);width:160px;padding:0;text-align:left;color:var(--text);scroll-snap-align:start}
 .ta-img{display:block;height:100px;overflow:hidden;border:1px solid var(--line);border-radius:var(--r-md);background:var(--panel-2)}
@@ -2398,11 +2426,13 @@ a.bp-xref svg.i{width:12px;height:12px;flex:none}
 .bp-seg .faint{font-variant-numeric:tabular-nums}
 @media (max-width:767.98px){.bp-seg{height:calc(var(--s8) + var(--s1))}}
 /* One row of filters (§4): search, All · Open · Dropped, Filters; on a phone the search takes its own line above the other two */
-.bp-tb{display:flex;align-items:center;gap:var(--s2) var(--s3);flex-wrap:wrap}
-.bp-tb .srch{margin:0;flex:1 1 220px;max-width:360px}
-.bp-tb .bp-seg{align-self:center}
+.bp-tb{display:flex;align-items:flex-start;gap:var(--s2) var(--s3);flex-wrap:wrap}
+.bp-tb .srch{margin:0;flex:1 1 260px;max-width:440px}
+.bp-tb .bp-seg{align-self:flex-start}
 .bp-fbtn{flex:none}
-@media (max-width:767.98px){.bp-tb .srch{flex-basis:100%;max-width:none}.bp-fbtn{min-height:var(--h-touch)}}
+.bp-xtog{width:var(--h-ctl);height:var(--h-ctl);margin-left:auto}
+.bp-xtog.on{color:var(--accent)}
+@media (max-width:767.98px){.bp-tb .srch{flex-basis:100%;max-width:none}.bp-fbtn{min-height:var(--h-touch)}.bp-xtog{width:var(--h-touch);height:var(--h-touch)}}
 /* A Dropped row: the row (a button that opens the item) and its Archive button side by side, never one inside the other */
 .bp-drow{display:flex;align-items:center;gap:var(--s2)}
 .bp-drow>.lrow{flex:1;min-width:0}
@@ -2815,6 +2845,19 @@ a.btn{text-decoration:none}
 .cs-add{display:flex;align-items:center;gap:var(--s2);padding-top:var(--s3);margin-top:var(--s1);border-top:1px solid var(--line)}
 .cs-add .inp{flex:1;min-width:0;width:auto;height:var(--h-ctl)}
 /* Knowledge view (Vault → Knowledge): section tabs, usage meters (bar + percent on the trailing edge), identifiers, the add-pattern row */
+/* Context bar (docs/connector.md, "Context size"): bar + words; warn from 60 %, bad from 85 %. */
+.cx-bar{display:inline-flex;align-items:center;gap:var(--s2);min-width:0;white-space:nowrap}
+.cx-bar .pb{flex:none;width:72px;min-width:0}
+.cx-bar .pb i.warn{background:var(--warn)}
+.cx-bar .pb i.bad{background:var(--bad)}
+.cx-t{font:var(--t-meta);font-variant-numeric:tabular-nums;color:var(--muted)}
+.cx-t.warn-t{color:var(--warn-t)}
+.cx-t.bad-t{color:var(--bad-t)}
+.cx-bar.stale{opacity:.6}
+.cx-big{margin-bottom:var(--s3)}
+.cx-big .pb{width:160px}
+.cx-rs{margin:var(--s2) 0 0}
+@media (max-width:767px){.cx-bar .pb{width:48px}.cx-big .pb{width:120px}}
 .kg-meter{display:inline-flex;align-items:center;gap:var(--s2)}
 .kg-meter .pb{flex:none;width:72px;min-width:0}
 .kg-meter .pb i.warn{background:var(--warn)}
@@ -3020,7 +3063,7 @@ a.btn{text-decoration:none}
 /* Account: two-factor off says so, beside its Set up button. */
 .acc-2fa{display:inline-flex;align-items:center;gap:var(--s2)}
 /* Feedback list on phones: the segmented control takes the row beside Filters, so New, Open and Closed get equal room. */
-@media (max-width:767.98px){.vtools>.seg.fb-seg{flex:1 1 0;min-width:0}}
+@media (max-width:767.98px){.ltb>.seg.fb-seg{flex:1 1 0;min-width:0}}
 /* Reset: Everything is the select-all, set apart from the parts under its own overline. */
 .rs-row .rs-n{font-variant-numeric:tabular-nums}
 .rs-all .rs-n{color:var(--text)}
@@ -3141,16 +3184,15 @@ body.view-busy #app{cursor:progress}
 .nk-kv{display:flex;flex-direction:column;gap:var(--s1)}
 @media (min-width:1024px){.nk-grid{grid-template-columns:minmax(0,560px) minmax(0,1fr);align-items:start}.nk-grid .kform,.nk-grid .kform + .actionbar{max-width:none}}
 .nk-sum .meta{white-space:normal}
-/* Hardware (#hardware): flags, then one card per machine; the registration sheet's windows, limits and teams. */
-.hw-flags{margin-bottom:var(--s4)}
-.hw-flag .lrow-meta{white-space:normal}
-.hw-grid{display:grid;gap:var(--s4);grid-template-columns:minmax(0,1fr)}
-@media (min-width:1024px){.hw-grid{grid-template-columns:repeat(2,minmax(0,1fr));align-items:start}}
-.hw-card .kd-h h3{display:flex;align-items:center;gap:var(--s2);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.hw-hd{display:flex;align-items:center;gap:var(--s2);flex-wrap:wrap;justify-content:flex-end}
-.hw-card .kd-h{flex-wrap:wrap;row-gap:var(--s2)}
-.hw-card .kd-h h3{flex:1 1 auto}
-@media (max-width:767px){.hw-hd{flex:1 1 100%;justify-content:space-between}}
+/* Hardware (#hardware, #hwm/<pc id>): the Machines rows, the analysis bars, the machine page and its week grid. No colour here
+   is new: open hours use --accent-soft, held hours --accent, team bars the series tokens; state colours come from pills. */
+.hw-sum{font:var(--t-body);color:var(--muted);margin-left:var(--s2)}
+.hw-flags,.hw-machines,.hw-ana,.hw-hours,.hw-whatran{margin-bottom:var(--s4)}
+.hw-where{display:flex;align-items:center;flex-wrap:wrap;gap:var(--s2);margin-top:var(--s3)}
+.hw-flag .lrow-meta,.hw-ran .lrow-meta,.hw-row .lrow-meta{white-space:normal}
+.hw-ran .lrow-trail{display:flex;gap:var(--s1);flex-wrap:wrap;justify-content:flex-end}
+.hw-cols{display:grid;gap:var(--s4);grid-template-columns:minmax(0,1fr);margin-bottom:var(--s4)}
+@media (min-width:1024px){.hw-cols{grid-template-columns:repeat(2,minmax(0,1fr));align-items:start}}
 .hw-card .kv-v{white-space:normal;text-align:right;overflow-wrap:anywhere}
 .hw-ent{display:flex;flex-direction:column;gap:var(--s1);padding:var(--s2) 0;border-top:1px solid var(--line)}
 .hw-ent:first-of-type{border-top:0}
@@ -3158,7 +3200,66 @@ body.view-busy #app{cursor:progress}
 .hw-ent-h{display:flex;align-items:center;justify-content:space-between;gap:var(--s2);min-width:0}
 .hw-pos{display:inline-block;min-width:1.5em;color:var(--muted);font-variant-numeric:tabular-nums}
 .hw-rep{margin:0;overflow-wrap:anywhere}
+.hw-ent a{color:var(--accent);text-decoration:none}
+.hw-ent a:hover,.hw-ent a:focus-visible{text-decoration:underline}
 .hw-none{margin:var(--s1) 0 var(--s2)}
+.hw-mper{display:flex;justify-content:flex-end;margin-bottom:var(--s3)}
+.hw-pause{display:inline-flex;align-items:center;gap:var(--s2);font:var(--t-cap);color:var(--muted)}
+/* The toolbar: search, then a row of chips per dimension, then the Where you are line. */
+.hw-tools{display:flex;flex-direction:column;gap:var(--s2);margin-bottom:var(--s3)}
+.hw-search .inp{width:100%;max-width:420px}
+.hw-chips{display:flex;flex-wrap:wrap;align-items:center;gap:var(--s1)}
+.hw-chips .vlabel{min-width:56px}
+.hw-n{color:var(--muted);font-variant-numeric:tabular-nums}
+.bp-chip.on .hw-n{color:inherit}
+/* Analysis: the stat row, then one stacked bar per day. */
+.hw-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:var(--s3);margin:var(--s2) 0 var(--s3)}
+.hw-stat{display:flex;flex-direction:column;gap:2px;min-width:0}
+.hw-sv{font:var(--t-title);font-variant-numeric:tabular-nums}
+.hw-bars{display:flex;align-items:stretch;gap:2px;height:140px;padding-bottom:var(--s1);border-bottom:1px solid var(--line);overflow:hidden}
+.hw-day{flex:1 1 0;min-width:0;display:flex;flex-direction:column;gap:var(--s1)}
+.hw-bar{flex:1 1 auto;display:flex;flex-direction:column-reverse;background:var(--panel-2);border-radius:var(--r-chip) var(--r-chip) 0 0;overflow:hidden}
+.hw-seg{display:block;width:100%}
+.hw-dl{font:var(--t-cap);color:var(--muted);text-align:center;white-space:nowrap;overflow:hidden;text-overflow:clip}
+.hw-legend{display:flex;flex-wrap:wrap;gap:var(--s2) var(--s3);margin:var(--s2) 0;font:var(--t-cap);color:var(--muted)}
+.hw-legend span{display:inline-flex;align-items:center;gap:var(--s1)}
+.hw-legend i,.hw-key i{display:inline-block;width:10px;height:10px;border-radius:2px}
+.hw-s0{background:var(--accent)}.hw-s1{background:var(--s-vault)}.hw-s2{background:var(--s-tool)}.hw-s3{background:var(--s-msg)}.hw-s4{background:var(--info)}.hw-s5{background:var(--spark)}
+/* The week grid: a day label column and 24 hour cells; hidden on phones, where the list of windows is the way to edit. */
+.hw-wk{display:grid;grid-template-columns:40px repeat(24,minmax(0,1fr));gap:2px;margin:var(--s2) 0;user-select:none;touch-action:none}
+.hw-gh{font:var(--t-cap);color:var(--muted)}
+.hw-gd{font:var(--t-cap);color:var(--muted);align-self:center}
+.hw-c{height:22px;border-radius:3px;background:var(--panel-2);border:1px solid var(--line);cursor:pointer}
+.hw-c.open{background:var(--accent-soft);border-color:transparent}
+.hw-c.held{background:var(--accent);border-color:transparent}
+.hw-c.pick{outline:2px solid var(--accent);outline-offset:-2px}
+.hw-key{display:flex;flex-wrap:wrap;gap:var(--s2) var(--s3);font:var(--t-cap);color:var(--muted);margin-bottom:var(--s2)}
+.hw-key span{display:inline-flex;align-items:center;gap:var(--s1)}
+.hw-key i.open{background:var(--accent-soft)}
+.hw-key i.held{background:var(--accent)}
+.hw-wl{margin-bottom:var(--s2)}
+@media (max-width:767px){.hw-wk,.hw-key{display:none}}
+/* Allowance meter: today's use of the daily hours. */
+.hw-meter{display:inline-block;width:80px;height:6px;border-radius:3px;background:var(--panel-3);overflow:hidden}
+.hw-meter i{display:block;height:100%;background:var(--accent)}
+/* Measured use (step 2): small bars on the Machines card, labelled bars on the machine page, a hold's figures in What ran. */
+.hw-meter.sm{width:40px;height:4px;border-radius:2px}
+.hw-mini{display:inline-flex;gap:var(--s2);margin-right:var(--s2)}
+.hw-mi{display:inline-flex;flex-direction:column;gap:2px}
+.hw-ml{font:var(--t-cap);color:var(--muted)}
+.hw-unm{margin-right:var(--s2)}
+.hw-use{display:grid;gap:var(--s2);margin:var(--s2) 0}
+.hw-ub{display:grid;grid-template-columns:72px 1fr;align-items:center;gap:var(--s1) var(--s2)}
+.hw-ub .hw-meter{width:100%}
+.hw-ub .meta{grid-column:2}
+.hw-ul{font:var(--t-cap);color:var(--muted)}
+.hw-ru{display:block;white-space:normal;overflow-wrap:anywhere}
+.hw-note{white-space:normal;overflow-wrap:anywhere;margin:var(--s1) 0 var(--s2)}
+.hw-ux{display:grid;gap:2px;padding:var(--s2) 0;border-bottom:1px solid var(--line)}
+.hw-ux .hw-note{margin:0}
+.hw-uxl{font-weight:600}
+@media (max-width:767px){.hw-mini,.hw-unm{display:none}}
+/* The registration sheet. */
 .hw-win{display:flex;flex-wrap:wrap;align-items:center;gap:var(--s2);padding:var(--s2) 0;border-bottom:1px solid var(--line)}
 .hw-days{flex-wrap:wrap}
 .hw-days button{min-width:40px}
@@ -3166,7 +3267,10 @@ body.view-busy #app{cursor:progress}
 .hw-times .inp{width:auto}
 .hw-lim{display:grid;grid-template-columns:1fr 1fr;gap:var(--s2)}
 .hw-teams{display:flex;flex-direction:column;gap:var(--s1)}
-.hw-tm{display:flex;align-items:center;gap:var(--s2);min-height:var(--h-touch)}
+.hw-tm{display:flex;align-items:center;justify-content:space-between;gap:var(--s2);min-height:var(--h-touch)}
+.hw-tml{display:inline-flex;align-items:center;gap:var(--s2);min-width:0}
+.hw-alw{display:inline-flex;align-items:center;gap:var(--s1)}
+.hw-alw .inp{width:96px}
 .hw-pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:280px;overflow:auto;margin:0}
 .hw-m{margin:0}
 .hw-stop{display:flex;justify-content:flex-start;padding-top:var(--s2)}
@@ -3433,9 +3537,8 @@ button.bp-sk-c:hover .stat-l{color:var(--text)}
 .dlg-chk{display:flex;gap:var(--s2);align-items:center;min-height:var(--h-touch)}
 .dlg-loses ul{margin:var(--s1) 0 0;padding-left:var(--s5);color:var(--text-2)}
 
-/* Blueprint list analysis (docs/dashboard-ux.md, List analysis): Where you are with its chips, the count table (a list on phones)
-   and the grouped list. Chips and cells have the 3 px chip corner; every colour is a theme token. */
-.bp-where{display:flex;align-items:center;flex-wrap:wrap;gap:var(--s2);margin-top:var(--s3)}
+/* Blueprint list analysis (docs/dashboard-ux.md, List analysis): the notes under the toolbar, the count table (a list on phones)
+   always above the list at full width, and the grouped list. Cells have the 3 px chip corner; every colour is a theme token. */
 /* Saved views: a row opens the view, its actions sit beside it, each 40 px. */
 .bpv{display:flex;align-items:center;gap:var(--s1)}
 .bpv .lrow{flex:1;min-width:0}
@@ -3444,34 +3547,32 @@ button.bp-sk-c:hover .stat-l{color:var(--text)}
 .bpv-none{padding:var(--s3) 0}
 .bp-show{font:var(--t-label);color:var(--muted);margin-right:var(--s1)}
 .bp-show b{color:var(--text);font-weight:600;font-variant-numeric:tabular-nums}
-.bp-chip{display:inline-flex;align-items:center;gap:var(--s1);min-height:28px;padding:0 var(--s2);border-radius:var(--r-chip);border:1px solid var(--line);background:var(--panel);color:var(--text);font:var(--t-cap)}
-.bp-chip svg{width:12px;height:12px}
-.bp-chip.on{background:var(--accent-soft);color:var(--accent);border-color:transparent}
-.bp-chip.gap{background:var(--warn-soft);color:var(--warn-t)}
 .bp-la-note{margin:var(--s1) 0 0}
 .bp-xcard{margin-top:var(--stack)}
-/* Below 1180 px the count table is a card above the list, spaced like the cards around it. */
-.bp-la{display:flex;flex-direction:column;gap:var(--s3);min-width:0}
-.bp-la-main{min-width:0}
-.bp-xh,.bp-lh{display:flex;align-items:center;flex-wrap:wrap;gap:var(--s2) var(--s3)}
-/* The card's header is the count, with Hide table (a quiet icon button) at its right end; the selects are the second line. */
-.bp-xh .bp-show{flex:1 1 auto;margin:0;font:var(--t-title);color:var(--muted)}
-.bp-xh .bp-xhide{margin:calc(-1 * var(--s2)) calc(-1 * var(--s2)) calc(-1 * var(--s2)) 0;color:var(--muted)}
-.bp-xcard>.bp-xsel{display:flex;margin-top:var(--s2)}
-.bp-xswap{color:var(--muted)}
-.bp-lh{margin-bottom:var(--s2)}
-.bp-lh .overline{flex:1 1 auto;margin:0}
-.bp-xsel{display:inline-flex;align-items:center;gap:var(--s2);flex-wrap:wrap}
-.bp-xsel .bp-fl{display:inline-flex;align-items:center;gap:var(--s2)}
+/* The count table is a card above the list at every width, spaced like the cards around it. */
+.bp-la{min-width:0}
+/* Its header is one line: "6 of 21 · Line ▾ by Confidence ▾ ⇄" (the count, the inline Rows and Columns selects, the swap). */
+.bp-xh{display:flex;align-items:center;flex-wrap:wrap;gap:var(--s1)}
+.bp-xh .bp-show{margin:0 var(--s1) 0 0;font:var(--t-title);color:var(--muted)}
+.bp-xh>[aria-hidden]{color:var(--faint)}
+.bp-xby{font:var(--t-label);color:var(--muted)}
+.bp-xswap{width:32px;height:32px;color:var(--muted)}
+@media (max-width:767.98px){.bp-xswap{width:var(--h-touch);height:var(--h-touch)}}
 /* No scroll inside the count table, ever: bpXFit places, turns or folds it until it fits (Other's popover is not a scroll). */
 .bp-xw{margin-top:var(--s3)}
 .bp-xt{border-collapse:separate;border-spacing:3px;font:var(--t-body);font-variant-numeric:tabular-nums}
 .bp-xt th{font:var(--t-cap);color:var(--muted);text-align:left;padding:0 var(--s2);white-space:nowrap;max-width:220px;overflow:hidden;text-overflow:ellipsis}
-/* Column headers and row names wrap to two lines before they are cut (the full name is the tooltip); a cell never shrinks below its number. */
-.bp-xt thead th{text-align:center;vertical-align:bottom;white-space:normal;min-width:44px;max-width:120px}
+/* The table is the card's width: the number columns keep their size (a header as wide as its name, up to 120 px, wrapping to two
+   lines before it is cut) and the row-name column takes the rest, wrapping to three lines before it is cut (the full name is
+   the tooltip; 96 px at least). A cell never shrinks below its number. */
+.bp-xt{width:100%}
+.bp-xt thead th{text-align:center;vertical-align:bottom;white-space:normal;min-width:44px;max-width:120px;width:1%}
+.bp-xt thead th:first-child{width:auto}
 .bp-xt thead th>span,.bp-xt tbody th>span{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden;overflow-wrap:break-word}
-.bp-xt tbody th{white-space:normal;min-width:96px;max-width:180px}
-.bp-xt td{padding:0;text-align:center}
+.bp-xt thead th>span{width:max-content;max-width:104px;margin-inline:auto}
+.bp-xt tbody th{white-space:normal;min-width:96px;max-width:none}
+.bp-xt tbody th>span{-webkit-line-clamp:3}
+.bp-xt td{padding:0;text-align:center;width:1%}
 .bp-xc{min-width:44px;width:100%;height:32px;border-radius:var(--r-chip);background:var(--panel-2);color:var(--text);font:var(--t-label);font-variant-numeric:tabular-nums}
 .bp-xc:hover{background:var(--accent-soft)}
 .bp-xc.zero{color:var(--faint);background:transparent}
@@ -3493,16 +3594,6 @@ button.bp-sk-c:hover .stat-l{color:var(--text)}
 .bp-grp:first-of-type{margin-top:0}
 .bp-ff{border:0;padding:0;margin:0;display:flex;flex-direction:column;gap:var(--s1)}
 .bp-ff legend{margin-bottom:var(--s1)}
-/* From 1180 px the list (7 of 12) and the count table (5 of 12) side by side when the table fits there (else .full: a card above
-   the list, as below 1180 px); sticky under the app bar only when the whole card fits in the window (.pin), never scrolling itself. */
-@media (min-width:1180px){
-  #workspaceView:has(.bp-la) .db{overflow:visible}
-  .bp-la:not(.full){display:grid;grid-template-columns:minmax(0,7fr) minmax(0,5fr);grid-template-areas:"list x";gap:var(--s3);align-items:start;margin-top:var(--stack)}
-  .bp-la:not(.full)>.bp-la-main{grid-area:list}
-  .bp-la:not(.full)>.bp-xcard{grid-area:x;margin-top:0}
-  .bp-la:not(.full)>.bp-xcard.pin{position:sticky;top:calc(var(--h-bar) + var(--s3))}
-}
-@media (max-width:767.98px){.bp-xsel{width:100%}.bp-xsel .bp-fl{flex:1 1 0}.bp-xsel .sel{flex:1 1 auto;min-width:0}.bp-chip{min-height:var(--h-ctl)}}
 
 /* The connector on the PC page (docs/dashboard-ux.md "PC page"): the setup timeline, version approval, check results,
    Disconnect's lists and the Add PC download line. */
@@ -3535,3 +3626,18 @@ button.bp-sk-c:hover .stat-l{color:var(--text)}
 .ag-ms .lrow-meta{white-space:normal}
 
 .mdl{margin-top:var(--s1)}
+
+/* Home's Backlog card: All plus at most 7 tags in one row, with the chip corners (not the button corners). */
+.tk-tagf.tg-card{flex-wrap:nowrap}
+.tk-tagf.tg-card .btn{border-radius:var(--r-chip)}
+.tw-tags{display:inline-flex;flex-wrap:wrap;gap:var(--s1);align-items:center}
+.tg-rows{display:grid;gap:var(--s2);margin-bottom:var(--s2)}
+.tg-row{display:flex;gap:var(--s2);align-items:center}
+.tg-row .inp{flex:1}
+.tg-h{margin:var(--s3) 0 var(--s1)}
+.tg-pv{margin-top:var(--s3);padding:var(--s3);background:var(--panel-2);border:1px solid var(--line);border-radius:var(--r-md)}
+.tg-pv ul{margin:var(--s1) 0 var(--s2) var(--s4);padding:0}
+.bp-rf-l{list-style:none;padding-left:0}
+.bp-rf-r .chk-row{align-items:flex-start;color:inherit}
+.bp-rf-r .chk-row>span{display:grid;gap:2px;overflow-wrap:anywhere}
+.bp-rf-why,.bp-rf-need{display:block}

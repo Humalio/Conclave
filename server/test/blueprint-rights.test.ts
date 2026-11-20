@@ -9,6 +9,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { buildApp, type App } from '../src/app.js';
 import type { Config } from '../src/config.js';
 import { DECIDED_NOTE, type Op, type SubmitResult } from '../src/blueprint/blueprint.js';
+import { plainNotice } from '../src/notices/l2.js';
 import { testConfig, adminLogin } from './hub.js';
 
 const sys = { kind: 'system' as const, id: null };
@@ -258,7 +259,7 @@ describe('proposals (§2.6)', () => {
     expect(r.status).toBe('proposed');
     const n = notices(coordA).slice(before);
     expect(n).toHaveLength(1);
-    expect(n[0]).toMatch(/worker-a proposed a blueprint change in .* \(bpp_\w+, 1 op: FR-FLD-\*\)/);
+    expect(plainNotice(n[0]!)).toMatch(/worker-a proposed a blueprint change in .* \(bpp_\w+, 1 op: "FR-FLD-\*"\)/);
     expect(n.join()).not.toMatch(/IGNORE/);
     if (r.status !== 'proposed') return;
     const alert = app.db.prepare("SELECT details FROM security_alerts WHERE type='bp_proposal' AND subject=?").get(r.proposal.id) as { details: string } | undefined;
@@ -531,5 +532,23 @@ describe('key examples stay in step with docs/blueprint.md §2.2', () => {
       expect(row, `row for ${kind}`).toBeDefined();
       expect(row!.split('|')[2], `${kind} key cell`).toContain(`\`${s.example}\``);
     }
+  });
+});
+
+describe('a coordinator\'s status change on a project-level requirement is a proposal, not a refusal (feedback fb_moys3bynzrzkc)', () => {
+  it('is proposed with its id named, the requirement stays as it is, and another team\'s status is still refused', () => {
+    put([
+      { op: 'upsert', kind: 'module', key: 'COM', title: 'Common' },
+      { op: 'upsert', kind: 'fr', key: 'FR-COM-01', parent_key: 'COM', title: 'One shared requirement', status: 'agreed' },
+    ]);
+    const was = item('FR-COM-01')!.status;
+    expect(item('COM')!.team_id ?? null).toBeNull();
+    const r = sub(coordA, [{ op: 'upsert', kind: 'fr', key: 'FR-COM-01', status: 'built' }]);
+    expect(r.status, JSON.stringify(r)).toBe('proposed');
+    expect((r as { proposal: { id: string } }).proposal.id).toBeTruthy();
+    expect(item('FR-COM-01')!.status).toBe(was);
+    app.blueprint.rejectProposal((r as { proposal: { id: string } }).proposal.id, opr(), null);
+    // Another team's item: its status is still its owner's, a refusal.
+    expect(code(() => sub(coordA, [{ op: 'upsert', kind: 'hypothesis', key: 'H-L2-01', status: item('H-L2-01')!.status === 'testing' ? 'inconclusive' : 'testing' }]))).toMatch(/^denied: .*outside your team's part; its status is its owner's/);
   });
 });

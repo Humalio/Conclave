@@ -56,7 +56,7 @@ export default [
       // The case's coordinators plan their own work: tasks open at once (task intake open). Act 4 puts Relay Engineering
       // back on the default backlog intake, where the operator accepts or discards what agents propose.
       await c.op.patch(`/api/projects/${r.team.project_id}`, { task_intake: 'open' });
-      await c.op.patch(`/api/teams/${r.team.id}`, { delivery_mode: t.mode, coordinator_reviews: t.key === 'int', ...(t.recruiting ? { recruiting: t.recruiting, recruit_max: 1, recruit_roles: ['worker'] } : {}) });
+      await c.op.patch(`/api/teams/${r.team.id}`, { coordinator_reviews: t.key === 'int', ...(t.recruiting ? { recruiting: t.recruiting, recruit_max: 1, recruit_roles: ['worker'] } : {}) });
       for (const [role, playbook] of Object.entries(PLAYBOOKS)) if (t.members.some(([, r2]) => r2 === role)) await c.op.put(`/api/teams/${r.team.id}/roles/${role}`, { playbook });
     }
     c.eq(Object.keys(c.teams).length, 8, 'teams');

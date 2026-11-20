@@ -66,13 +66,13 @@ describe('assigning a report', () => {
     const r = await api('POST', `/feedback/${reportId}/assign`, { agent_id: coord.id, note: 'Please look at this before Friday.' });
     expect(r.status).toBe(200);
     expect(r.body.assignee).toMatchObject({ agent_id: coord.id, note: 'Please look at this before Friday.' });
-    const got = await notices(coord, 'feedback_assigned');
+    const got = await notices(coord, 'feedback_assigned') as { seq: number; body: string; l2?: string[] }[];
     expect(got).toHaveLength(1);
     expect(got[0]!.body).toContain(reportId);
     expect(got[0]!.body).toContain('Operator note on the assignment (L0): Please look at this before Friday.');
     expect(got[0]!.body).toContain('Operator guidance (L0): Patch one line at a time.');
     expect(got[0]!.body).toContain('Operator decision note (L0): Reproduced.');
-    expect(got[0]!.body).toContain('L2 data');
+    expect(got[0]!.l2!.length).toBeGreaterThan(0);
     expect(await notices(other, 'feedback_assigned')).toHaveLength(0);
     const ev = app.db.prepare("SELECT details FROM audit_events WHERE action='feedback.assign' AND target_id=?").all(reportId) as { details: string }[];
     expect(ev.map((e) => JSON.parse(e.details))).toEqual([{ from: null, to: coord.id }]);

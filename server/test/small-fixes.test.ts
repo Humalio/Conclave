@@ -124,9 +124,11 @@ describe('R29 work_next waits by default', () => {
     expect(ok(await lone.call('work_next'))).toMatchObject({ status: 'idle', note: 'You are not in a team.' });
     expect(Date.now() - t0).toBeLessThan(5_000);
   });
-  it('the shipped playbooks and the tool say so', async () => {
+  it('the tool says so; the shipped playbooks act when woken and do not poll (one delivery model)', async () => {
     const pb = (app.db.prepare("SELECT playbook FROM team_role_defaults WHERE role='worker'").get() as { playbook: string }).playbook;
-    expect(pb).toContain('call work_next (it waits about 25 s for new work)');
+    expect(pb).toContain('you do not poll');
+    const tool = (await clients[0]!.listTools()).tools.find((x) => x.name === 'work_next')!.description!;
+    expect(tool).toMatch(/It waits for new work: [0-9]+ s by default/);
   });
 });
 

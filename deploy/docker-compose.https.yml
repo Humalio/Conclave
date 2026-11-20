@@ -6,10 +6,17 @@
 services:
   agent-hub:
     ports: !reset []
+    # Only the Caddy container below may set X-Forwarded-For; any other address that reaches the hub is taken at its connection address.
+    environment:
+      TRUST_PROXY: ${TRUST_PROXY:-172.29.0.2}
+    networks: [default]
   caddy:
     image: caddy:2.10.2-alpine
     restart: unless-stopped
     depends_on: [agent-hub]
+    networks:
+      default:
+        ipv4_address: 172.29.0.2
     environment:
       HUB_HOST: ${HUB_HOST:?set HUB_HOST in .env}
       HTTP_PORT: ${HTTP_PORT:-80}
@@ -24,6 +31,11 @@ services:
       # Certificates and the internal certificate authority survive restarts here.
       - caddy_data:/data
       - caddy_config:/config
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 172.29.0.0/24
 volumes:
   caddy_data:
   caddy_config:

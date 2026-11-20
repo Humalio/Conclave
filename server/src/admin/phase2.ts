@@ -67,6 +67,8 @@ export function registerPhase2(api: FastifyInstance, d: Phase2Deps, actor: (r: F
     const sessionKeys = keys.credentials({ kind: 'session_key', agentId: id }).map((c) => ({ id: c.id, label: c.label, masked_key: `ah_ses_${c.key_id}_…`, status: keys.effectiveStatus(c), last_used_at: c.last_used_at }));
     return {
       ...v, session_keys: sessionKeys, links: links.forAgent(id),
+      // The account profile its PC reported for a run the connector started (docs/connector.md, Account profiles).
+      pc_profile: d.connector?.agentProfile(id) ?? null,
       invocations: db.prepare('SELECT tool,result,error_code,duration_ms,created_at FROM tool_invocations WHERE agent_id=? ORDER BY created_at DESC LIMIT 30').all(id),
       accesses: db.prepare('SELECT path,action,decision,created_at FROM resource_access_events WHERE agent_id=? ORDER BY created_at DESC LIMIT 30').all(id),
       // The agent page's Inbox: the 50 newest notices with whether each is still current and, for what an admin sent,

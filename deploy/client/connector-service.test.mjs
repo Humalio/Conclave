@@ -25,10 +25,15 @@ import { validateEntry } from './connector/manifest.mjs';
 import { readSettings, setSwitch } from './connector/settings.mjs';
 import { usageOptIn, setUsageOptIn, recordUsageEvent, sessionsPath } from './connector/usage.mjs';
 import { markRunning, runningAgents } from './connector/run.mjs';
-import { runWorker, runSupervisor, NO_HUBS } from './connector/worker.mjs';
-import { runningAs, processesPath } from './connector/processes.mjs';
+import { runWorker, runSupervisor, NO_HUBS, LOCKED } from './connector/worker.mjs';
+import { runningAs, processesPath, takeProcessLock, lockHolder } from './connector/processes.mjs';
+import { workerLockPath, servicePidPath, RESTART_COUNT, RESTART_INTERVAL_MIN } from './connector/service.mjs';
+import { markUp } from './connector/builds.mjs';
+import { writeState, readState, withLock, bakPath } from './connector/paths.mjs';
+import { manifestPath } from './connector/manifest.mjs';
+import { pathToFileURL } from 'node:url';
 import { readdirSync } from 'node:fs';
-import { putHub, caFingerprint } from './connector/keyfile.mjs';
+import { putHub, caFingerprint, keyFilePath, readKeyFile } from './connector/keyfile.mjs';
 import { CONNECTOR_VERSION } from './connector/version.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -225,6 +230,30 @@ describe('the launcher goes back after a new build fails to start', () => {
     for (let i = 0; i < 5; i++) assert.match(launch(home).stdout, /build 1\.1\.0/);
     assert.equal(readBuilds(home).current, '1.1.0');
   });
+  test('a build whose file changed since install is refused at every start, and the launcher goes back to the previous verified build', () => {
+    const home = mk();
+    installVerified(home, '1.0.0', stub('1.0.0', 0), 'a'.repeat(64)); activate(home, '1.0.0'); confirm(home);
+    installVerified(home, '1.1.0', stub('1.1.0', 0), 'b'.repeat(64)); activate(home, '1.1.0'); confirm(home);
+    assert.match(launch(home).stdout, /build 1\.1\.0/);
+    writeFileSync(join(home, 'app', '1.1.0', 'deploy', 'client', 'conclave.mjs'), "console.log('changed');\n");
+    const r = spawnSync(process.execPath, [launcherPath(home), 'version'], { encoding: 'utf8' });
+    assert.match(r.stdout, /build 1\.0\.0 version/);
+    assert.doesNotMatch(r.stdout, /changed/);
+    assert.match(r.stderr, /1\.1\.0 has a file that changed/);
+    const b = readBuilds(home);
+    assert.equal(b.current, '1.0.0');
+    assert.equal(b.rolled_back, '1.1.0');
+    assert.ok(b.failed.includes('1.1.0'));
+  });
+  test('a changed build with no verified build to go back to is not run at all', () => {
+    const home = mk();
+    installVerified(home, '1.0.0', stub('1.0.0', 0), 'a'.repeat(64)); activate(home, '1.0.0'); confirm(home);
+    writeFileSync(join(home, 'app', '1.0.0', 'deploy', 'client', 'conclave.mjs'), "console.log('changed');\n");
+    const r = spawnSync(process.execPath, [launcherPath(home), 'version'], { encoding: 'utf8' });
+    assert.equal(r.status, 1);
+    assert.equal(r.stdout, '');
+    assert.match(r.stderr, /Reinstall the connector/);
+  });
   test('the build serves the installation the launcher sits in, not the default folder', () => {
     const home = mk();
     installVerified(home, '1.0.0', [{ path: 'deploy/client/conclave.mjs', data: Buffer.from('console.log(process.env.CONCLAVE_HOME);\n') }], 'a'.repeat(64)); activate(home, '1.0.0');
@@ -252,6 +281,140 @@ describe('the launcher goes back after a new build fails to start', () => {
     installVerified(home, '1.1.0', stub('1.1.0', 0), 'b'.repeat(64)); activate(home, '1.1.0');
     for (let i = 0; i < 5; i++) spawnSync(process.execPath, [launcherPath(home), 'mcp', home]);
     assert.equal(readBuilds(home).pending.boots, 0);
+  });
+});
+
+describe('crash safety: one worker, restarts, kept updates, state files', () => {
+  const BUILDS = pathToFileURL(join(HERE, 'connector', 'builds.mjs')).href;
+  const stub = (v, body) => [{ path: 'deploy/client/conclave.mjs', data: Buffer.from(body) }];
+  const launch = (home) => spawnSync(process.execPath, [launcherPath(home), 'service', 'worker'], { encoding: 'utf8' });
+  const installed = () => { const h = mk(); writeFileSync(manifestPath(h), '{}\n'); return h; };
+
+  test('a second worker stops at once and names the one that runs; so does a second service', async () => {
+    const home = installed();
+    const held = takeProcessLock(workerLockPath(home), 'worker');
+    assert.equal(held.ok, true);
+    try {
+      const r = spawnSync(process.execPath, [join(HERE, 'conclave.mjs'), 'service', 'worker'], { encoding: 'utf8', env: { ...process.env, CONCLAVE_HOME: home } });
+      assert.equal(r.status, LOCKED, r.stderr);
+      assert.match(r.stderr, new RegExp('another connector worker is running \\(process ' + process.pid));
+      const sv = spawnSync(process.execPath, ['--input-type=module', '-e', 'import { takeProcessLock } from ' + JSON.stringify(pathToFileURL(join(HERE, 'connector', 'processes.mjs')).href) + '; const r = takeProcessLock(process.argv[1], "service"); console.log(JSON.stringify(r.ok ? { ok: true } : r));', servicePidPath(home)], { encoding: 'utf8' });
+      assert.deepEqual(JSON.parse(sv.stdout).ok, true, 'the service lock is a separate one');
+    } finally { held.release(); }
+    assert.equal(existsSync(workerLockPath(home)), false, 'released');
+  });
+
+  test('two processes racing for the lock: exactly one gets it, the other names it', async () => {
+    const home = installed();
+    const src = 'import { takeProcessLock } from ' + JSON.stringify(pathToFileURL(join(HERE, 'connector', 'processes.mjs')).href) + '; const r = takeProcessLock(process.argv[1], "worker"); console.log(JSON.stringify(r.ok ? { ok: true } : { ok: false, pid: r.holder.pid })); if (r.ok) setTimeout(() => {}, 1500);';
+    const { spawn } = await import('node:child_process');
+    const run = () => new Promise((res) => { const c = spawn(process.execPath, ['--input-type=module', '-e', src, workerLockPath(home)], { stdio: ['ignore', 'pipe', 'inherit'] }); let out = ''; c.stdout.on('data', (d) => { out += d; }); c.on('exit', () => res({ pid: c.pid, r: JSON.parse(out) })); });
+    const [a, b] = await Promise.all([run(), run()]);
+    const won = [a, b].filter((x) => x.r.ok);
+    assert.equal(won.length, 1, JSON.stringify([a, b]));
+    const lost = [a, b].find((x) => !x.r.ok);
+    assert.equal(lost.r.pid, won[0].pid, 'the loser names the winner');
+  });
+
+  test('a lock left by a crashed worker is taken over; one whose id was reused by another program is too', () => {
+    const home = installed();
+    mkdirSync(join(home, 'run'), { recursive: true });
+    writeFileSync(workerLockPath(home), JSON.stringify({ pid: 2 ** 30, started_ms: 1, what: 'worker' }));
+    const a = takeProcessLock(workerLockPath(home), 'worker');
+    assert.equal(a.ok, true); a.release();
+    writeFileSync(workerLockPath(home), JSON.stringify({ pid: process.ppid, started_ms: 1, what: 'worker' }));
+    assert.equal(lockHolder(workerLockPath(home), { startTime: () => 1_000_000 }), null, 'same id, another start time: not the holder');
+  });
+
+  test('service remove ends the worker the lock names, and leaves a live one alone with noKill', () => {
+    const home = installed();
+    mkdirSync(join(home, 'run'), { recursive: true });
+    const ended = [];
+    const lockDeps = { alive: () => true, startTime: () => 5000 };
+    writeFileSync(workerLockPath(home), JSON.stringify({ pid: 4242, started_ms: 5000, what: 'worker' }));
+    removeService(home, { platform: 'win32', exec: () => ({ status: 0, stdout: '', stderr: '' }), killTree: (pid) => ended.push(pid), lockDeps, noKill: true });
+    assert.deepEqual(ended, []); assert.equal(existsSync(workerLockPath(home)), true, 'noKill never frees a live worker\'s lock');
+    removeService(home, { platform: 'win32', exec: () => ({ status: 0, stdout: '', stderr: '' }), killTree: (pid) => ended.push(pid), lockDeps });
+    assert.deepEqual(ended, [4242]); assert.equal(existsSync(workerLockPath(home)), false);
+  });
+
+  test('Windows: Task Scheduler restarts the service when it dies, every minute', () => {
+    const s = serviceSpec(mk(), { platform: 'win32', node: 'C:\\node.exe' });
+    assert.match(s.install[0][2], new RegExp('-RestartCount ' + RESTART_COUNT + ' -RestartInterval \\(New-TimeSpan -Minutes ' + RESTART_INTERVAL_MIN + '\\)'));
+    assert.ok(RESTART_INTERVAL_MIN <= 1 && RESTART_COUNT >= 100);
+  });
+
+  test('a worker that is killed is started again by the supervisor after a short pause', async () => {
+    const home = mk();
+    writeFileSync(join(home, 'conclave.mjs'), 'setInterval(() => {}, 1000);\n');
+    const ac = new AbortController();
+    const done = runSupervisor({ home, log: () => {}, signal: ac.signal, deps: { backoffMs: 50 } });
+    const worker = () => { try { return JSON.parse(readFileSync(processesPath(home), 'utf8')).processes.find((x) => x.what === 'service worker')?.pid ?? null; } catch { return null; } };
+    try {
+      let first = null;
+      for (let i = 0; i < 200 && !first; i++) { await new Promise((r) => setTimeout(r, 25)); first = worker(); }
+      assert.ok(first, 'a worker runs');
+      process.kill(first);
+      const t0 = Date.now();
+      let next = null;
+      for (let i = 0; i < 400 && !(next && next !== first); i++) { await new Promise((r) => setTimeout(r, 25)); next = worker(); }
+      assert.ok(next && next !== first, 'a new worker runs');
+      assert.ok(Date.now() - t0 < 10_000);
+    } finally { ac.abort(); await done; }
+  });
+
+  test('a second supervisor stops at once and names the first', async () => {
+    const home = mk();
+    const held = takeProcessLock(servicePidPath(home), 'service');
+    try {
+      // the holder is this process; a child process is the real second supervisor
+      const r = spawnSync(process.execPath, [join(HERE, 'conclave.mjs'), 'service', 'run'], { encoding: 'utf8', env: { ...process.env, CONCLAVE_HOME: home }, timeout: 20_000 });
+      assert.equal(r.status, LOCKED, r.stderr + r.stdout);
+      assert.match(r.stderr + r.stdout, new RegExp('already running \\(process ' + process.pid));
+    } finally { held.release(); }
+  });
+
+  test('an update that starts three times while the PC is offline is kept: only starts that crash early count', () => {
+    const home = mk();
+    installVerified(home, '1.0.0', stub('1.0.0', "console.log('build 1.0.0'); process.exit(0);\n"), 'a'.repeat(64)); activate(home, '1.0.0'); confirm(home);
+    // the new build runs past its first minute (markUp) and then stops, as a worker with no network may
+    installVerified(home, '1.1.0', stub('1.1.0', "import { markUp } from " + JSON.stringify(BUILDS) + "; console.log('build 1.1.0'); markUp(process.env.CONCLAVE_HOME, '1.1.0'); process.exit(1);\n"), 'b'.repeat(64)); activate(home, '1.1.0');
+    for (let i = 0; i < 6; i++) assert.match(launch(home).stdout, /build 1\.1\.0/);
+    const b = readBuilds(home);
+    assert.equal(b.current, '1.1.0'); assert.deepEqual(b.failed, []); assert.equal(b.pending.boots, 0);
+    assert.equal(markUp(home, '9.9.9'), false, 'another version is not marked');
+  });
+
+  test('a worker that stops because another one runs (exit 77) is not a failed start', () => {
+    const home = mk();
+    installVerified(home, '1.0.0', stub('1.0.0', 'process.exit(0);\n'), 'a'.repeat(64)); activate(home, '1.0.0'); confirm(home);
+    installVerified(home, '1.1.0', stub('1.1.0', "console.log('build 1.1.0'); process.exit(" + LOCKED + ");\n"), 'b'.repeat(64)); activate(home, '1.1.0');
+    for (let i = 0; i < 6; i++) assert.match(launch(home).stdout, /build 1\.1\.0/);
+    assert.equal(readBuilds(home).pending.boots, 0);
+  });
+
+  test('a state file whose write was cut off is read from its .bak; a torn .bak leaves the main file', () => {
+    const d = mk(), p = join(d, 'registry.json');
+    writeState(p, JSON.stringify({ n: 1 }));
+    writeState(p, JSON.stringify({ n: 2 }));
+    assert.deepEqual(readState(p, null), { n: 2 });
+    writeFileSync(p, '{"n": 3, "cut');
+    assert.deepEqual(readState(p, null), { n: 2 }, 'the flushed .bak of the last good write');
+    writeState(p, JSON.stringify({ n: 4 }));
+    writeFileSync(bakPath(p), '{"cut');
+    assert.deepEqual(readState(p, null), { n: 4 });
+    assert.deepEqual(readFileSync(bakPath(p), 'utf8'), '{"cut', 'reading changes nothing');
+  });
+
+  test('each read-change-write waits for the lock; a lock whose holder is gone is taken over', () => {
+    const d = mk(), p = join(d, 'keys.json');
+    writeFileSync(p + '.lock', JSON.stringify({ pid: process.ppid, at: Date.now() }));
+    assert.throws(() => withLock(p, () => 1, { waitMs: 150 }), (e) => e.reason === 'state_locked' && new RegExp(String(process.ppid)).test(e.message));
+    writeFileSync(p + '.lock', JSON.stringify({ pid: 2 ** 30, at: Date.now() }));
+    assert.equal(withLock(p, () => 'ran', { waitMs: 150 }), 'ran');
+    assert.equal(existsSync(p + '.lock'), false, 'released after');
+    writeFileSync(p + '.lock', JSON.stringify({ pid: process.ppid, at: Date.now() - 120_000 }));
+    assert.equal(withLock(p, () => 'ran', { waitMs: 150 }), 'ran', 'a lock held far too long is taken as stuck');
   });
 });
 
@@ -396,6 +559,11 @@ describe('switches and liveness', () => {
     unmark();
     assert.deepEqual(runningAgents(h, 'hub@x'), []);
   });
+  test('a run file whose id now runs another program does not count as open', () => {
+    const h = mk();
+    markRunning(h, 'hub@x', 'dev-1', 'agent-abc', process.pid, process.env, join(h, 'not-node.exe'), join(h, 'conclave.mjs'));
+    assert.deepEqual(runningAgents(h, 'hub@x'), []);
+  });
 });
 
 // ───────────── nothing outlives an uninstall ─────────────
@@ -408,7 +576,7 @@ describe('after an uninstall nothing comes back', () => {
     for (const home of [gone, left]) {
       const ac = new AbortController();
       const t = setTimeout(() => ac.abort(), 10_000);
-      const why = await runWorker({ home, signal: ac.signal, claudeJson: join(left, 'claude.json'), deps: { noBridge: true, intervalMs: 20, exec: noExec } });
+      const why = await runWorker({ home, signal: ac.signal, claudeJson: join(left, 'claude.json'), deps: { noBridge: true, noBroker: true, intervalMs: 20, exec: noExec } });
       clearTimeout(t);
       assert.equal(why, 'no_hubs');
     }
@@ -477,8 +645,8 @@ const GONE = 'ah_app_FAKEdisconnectedKEYforTESTS01';
 
 describe('the worker checks in and answers orders on the pinned poll', { skip: OPENSSL ? false : 'openssl is not available on this PC' }, () => {
   let pki, hub;
-  const seen = { checkIns: [], results: [], auth: new Set(), usage: [] };
-  let queue = [];
+  const seen = { checkIns: [], results: [], auth: new Set(), usage: [], hardware: [] };
+  let queue = [], measureOnly = false;
   before(async () => {
     pki = makePki();
     hub = https.createServer({ key: pki.key, cert: pki.cert }, (req, res) => {
@@ -489,7 +657,8 @@ describe('the worker checks in and answers orders on the pinned poll', { skip: O
         const json = (s, b) => { res.writeHead(s, { 'content-type': 'application/json' }); res.end(JSON.stringify(b)); };
         if (req.headers.authorization === `Bearer ${GONE}`) return json(401, { error: 'disconnected' });
         if (req.headers.authorization !== `Bearer ${APP}`) return json(401, { error: 'unauthorized' });
-        if (req.url === '/connector/v1/check-in') { seen.checkIns.push(JSON.parse(raw)); return json(200, { ok: true, orders: queue.length, ignored_agents: 0 }); }
+        if (req.url === '/connector/v1/check-in') { seen.onCheckIn?.(); seen.checkIns.push(JSON.parse(raw)); return json(200, { ok: true, orders: queue.length, ignored_agents: 0, ...(measureOnly ? { measure_only: true } : {}) }); }
+        if (req.url === '/connector/v1/hardware') { seen.hardware.push(JSON.parse(raw)); return json(200, { accepted: 1 }); }
         if (req.url === '/connector/v1/orders') { const o = queue; queue = []; return json(200, { orders: o }); }
         if (req.url === '/connector/v1/versions/approved') return json(200, { versions: ['9.9.9'] });
         if (req.url === '/connector/v1/usage') { seen.usage.push(JSON.parse(raw)); return json(200, { ok: true }); }
@@ -534,6 +703,58 @@ describe('the worker checks in and answers orders on the pinned poll', { skip: O
     assert.deepEqual([...seen.auth], [`Bearer ${APP}`]);
   });
 
+  test('a plain key file is encrypted only after the first check-in, so a rollback to the build before can still read it', async () => {
+    const home = freshHome();
+    const plainAtCheckIn = [];
+    writeFileSync(keyFilePath(home), JSON.stringify(readKeyFile(home).data) + '\n'); // as the build before wrote it
+    seen.checkIns.length = 0;
+    seen.onCheckIn = () => plainAtCheckIn.push(readFileSync(keyFilePath(home), 'utf8').includes(APP));
+    try { assert.equal(await worker(home), 'stopped'); } finally { seen.onCheckIn = null; }
+    assert.equal(plainAtCheckIn[0], true, 'still readable by the previous build when the hub is first asked');
+    assert.equal(readFileSync(keyFilePath(home), 'utf8').includes(APP), false, 'encrypted once the check-in went through');
+  });
+
+  test('a compute machine: samples go to its hub only while measuring is on, and orders but Update are refused', async () => {
+    const fixed = { at: 1795190000000, cpu_pct: 41.5, cpu_count: 8, mem_used_gb: 12.25, mem_total_gb: 32, gpus: [{ util_pct: 80, mem_used_gb: 6, mem_total_gb: 24 }] };
+    const waitFor = async (ok) => { const t0 = Date.now(); while (Date.now() - t0 < 10_000 && !ok()) await new Promise((r) => setTimeout(r, 25)); };
+    const run = (home) => { const ac = new AbortController(); const done = runWorker({ home, signal: ac.signal, log: () => {}, claudeJson: join(home, 'claude.json'), deps: { noBridge: true, intervalMs: 50, sampleMs: 10, sampler: () => () => fixed, exec: () => ({ status: 1, stdout: '', stderr: '' }), updateTo: async () => ({ ok: false, reason: 'download_failed' }) } }); return { ac, done }; };
+    measureOnly = true;
+    try {
+      // Measuring never turned on: the check-in says null and nothing is sent.
+      let home = freshHome();
+      seen.checkIns.length = 0; seen.hardware.length = 0;
+      let w = run(home);
+      await waitFor(() => seen.checkIns.length >= 4);
+      w.ac.abort(); await w.done;
+      assert.equal(seen.checkIns[0].hardware_opt_in, null);
+      assert.equal(seen.hardware.length, 0);
+      // Turned on: the fixed samples reach the hub, numbers only; a check is refused, an update is tried.
+      home = freshHome();
+      setSwitch(home, 'hardware', true);
+      seen.checkIns.length = 0; seen.results.length = 0;
+      queue = [{ id: 'pca_hwcheck', kind: 'check', payload: {} }, { id: 'pca_hwrestore', kind: 'restore', payload: { checkout_id: 'co_1', destination_id: 'dst_abcdef' } }];
+      w = run(home);
+      await waitFor(() => seen.hardware.length >= 1 && seen.results.length >= 2);
+      w.ac.abort(); await w.done;
+      assert.equal(seen.checkIns[0].hardware_opt_in, true);
+      assert.deepEqual(seen.hardware[0].samples[0], fixed);
+      assert.deepEqual(Object.keys(seen.hardware[0]), ['samples']);
+      for (const id of ['pca_hwcheck', 'pca_hwrestore']) {
+        const r = seen.results.find((x) => x.id === id);
+        assert.equal(r.state, 'failed');
+        assert.match(r.result.reason, /only measures itself/);
+      }
+      // Turned off again: nothing more is sent.
+      setSwitch(home, 'hardware', false);
+      const sent = seen.hardware.length;
+      seen.checkIns.length = 0;
+      w = run(home);
+      await waitFor(() => seen.checkIns.length >= 4);
+      w.ac.abort(); await w.done;
+      assert.equal(seen.hardware.length, sent);
+    } finally { measureOnly = false; queue = []; }
+  });
+
   test('orders: a check is answered with its rows, an update is refused while updates are off, a path is refused, a replay does nothing', async () => {
     const home = freshHome();
     setSwitch(home, 'auto-update', false);
@@ -575,6 +796,25 @@ describe('the worker checks in and answers orders on the pinned poll', { skip: O
     assert.ok(calls.length >= 2, 'tried again at the next check-in');
     assert.deepEqual(calls[0], { hubId: 'hub-svc', caSha256: caFingerprint(pki.ca) });
     assert.deepEqual(await run('ah_app_FAKErevokedKEYforSERVICEtest1'), []);
+  });
+
+  test('a disconnect with remote cleanup off marks the hub as disconnected, and the worker stops checking in with it', async () => {
+    const home = mk();
+    putHub(home, { hubId: 'hub-svc', origin: `https://127.0.0.1:${hub.address().port}`, caPem: pki.ca, appKey: GONE });
+    const calls = [], lines = [];
+    const ac = new AbortController();
+    const done = runWorker({ home, signal: ac.signal, log: (l) => lines.push(l), claudeJson: join(home, 'claude.json'), deps: { noBridge: true, intervalMs: 50, exec: () => ({ status: 1, stdout: '', stderr: '' }), disconnect: async (h, scope) => { calls.push(scope); return { state: 'cleanup_off', reported: true }; } } });
+    const t0 = Date.now();
+    while (Date.now() - t0 < 10_000 && !calls.length) await new Promise((r) => setTimeout(r, 25));
+    await new Promise((r) => setTimeout(r, 800)); // many more ticks
+    ac.abort();
+    await done;
+    assert.equal(calls.length, 1, 'the disconnect is not run again');
+    const section = Object.values(readKeyFile(home).data.hubs)[0];
+    assert.match(section.disconnected_at, /^\d{4}-/);
+    assert.equal(lines.filter((l) => /no more check-ins until it is paired again/.test(l)).length, 1, 'said once in the log');
+    putHub(home, { hubId: 'hub-svc', origin: `https://127.0.0.1:${hub.address().port}`, caPem: pki.ca, appKey: APP });
+    assert.equal(Object.values(readKeyFile(home).data.hubs)[0].disconnected_at, undefined, 'pairing again clears the mark');
   });
 
   test('the worker sends usage only after the PC user opted in: numbers per day for its own hub, no session id or folder', async () => {

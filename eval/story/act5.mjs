@@ -1,52 +1,13 @@
 // Act 5: disclosure — independent review, the checkpoint, the decision record, the last log line, completion (docs/showcase.md §4).
-import { Admin, REPO } from './lib.mjs';
-import { spawn, spawnSync } from 'node:child_process';
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { Admin } from './lib.mjs';
 
 const s = (id, title, run, opts = {}) => ({ id, title, run, ...opts });
 const V = '/vault';
 
-// ───── the restore client (docs/checkout.md §6), run for real when git and deploy/client are here ─────
-// The demo image has neither, so there the story picks up through the raw /onboard routes and reports the scan itself.
-const SETUP = join(REPO, 'deploy', 'client', 'setup.mjs');
-const HELPER = join(REPO, 'deploy', 'client', 'agent-hub-headers.mjs');
+// ───── the checkout restore: the story calls the hub routes the way the connector does ─────
+// The connector's own restore runs against the real hub in server/test/connector-restore-real.test.ts.
 const LAB_URL = 'https://git.relay.example/lab/cap-015.git';
 const LAB_BRANCH = 'integration/cap-015';
-const realClient = () => existsSync(SETUP) && existsSync(HELPER) && spawnSync('git', ['--version']).status === 0;
-const git = (dir, ...args) => {
-  const r = spawnSync('git', ['-C', dir, '-c', 'user.name=Odile', '-c', 'user.email=odile@relay.example', '-c', 'commit.gpgsign=false', '-c', 'core.hooksPath=', ...args], { encoding: 'utf8' });
-  if (r.status !== 0) throw new Error(`git ${args[0]}: ${r.stderr}`);
-  return r.stdout.trim();
-};
-/** The lab's clone: one commit per agent on the integration branch, and a tracked Claude Code hook the scan must find. */
-function labRepo(agents) {
-  const dir = join(mkdtempSync(join(tmpdir(), 'starship-lab-')), 'clone');
-  mkdirSync(join(dir, '.claude'), { recursive: true });
-  git(dir, 'init', '-q', '-b', LAB_BRANCH);
-  git(dir, 'remote', 'add', 'origin', LAB_URL);
-  writeFileSync(join(dir, '.claude', 'settings.json'), JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ type: 'command', command: 'node rig/arm.mjs' }] }] } }, null, 2));
-  const heads = [];
-  for (const l of agents) {
-    writeFileSync(join(dir, 'CAP-015.md'), `# CAP-015 capture log\n\n${agents.slice(0, heads.length + 1).map((x) => `- ${x}: block A`).join('\n')}\n`);
-    git(dir, 'add', '-A');
-    git(dir, 'commit', '-qm', `CAP-015: ${l} checkpoint`);
-    heads.push(git(dir, 'rev-parse', 'HEAD'));
-  }
-  return { dir, heads };
-}
-/** node setup.mjs restore in a separate process (the hub may run in this one), with its own HOME. */
-function runRestore(args, env) {
-  return new Promise((ok) => {
-    const p = spawn(process.execPath, [SETUP, 'restore', ...args], { env: { ...process.env, ...env }, stdio: ['ignore', 'pipe', 'pipe'] });
-    let out = '';
-    p.stdout.on('data', (d) => { out += d; });
-    p.stderr.on('data', (d) => { out += d; });
-    p.on('close', (code) => ok({ code, out }));
-  });
-}
-const readEnv = (file) => Object.fromEntries(readFileSync(file, 'utf8').split(/\r?\n/).filter((l) => /^[A-Z_][A-Z0-9_]*=/.test(l)).map((l) => [l.slice(0, l.indexOf('=')), l.slice(l.indexOf('=') + 1)]));
 
 import { movePlans, writePlan, bpKey } from './plans.mjs';
 
@@ -191,8 +152,8 @@ export default [
   s('5.12b', 'The operator adds a colleague: Grant access gives a generated password once, she picks her own, gets a project grant, no admin areas, and one team she decides for', async (c) => {
     // Collaborators (docs/multi-user.md §1.4, §2): the hub generates the first password and shows it to the operator once;
     // she replaces it with her own. A collaborator reaches their own data and the project views their grants open.
-    const username = `mira-${Date.now() % 1e6}`, password = 'a long story password 13';
-    const made = await c.op.post('/api/users', { username, display_name: 'Mira Okafor', org: 'Halcyon Relay Authority' });
+    const username = `nadia-${Date.now() % 1e6}`, password = 'a long story password 13';
+    const made = await c.op.post('/api/users', { username, display_name: 'Nadia Okafor', org: 'Halcyon Relay Authority' });
     c.eq(made.user.role, 'member', 'a new user is a collaborator (role member)');
     c.expect(typeof made.password === 'string' && made.password.length >= 20, 'Grant access hands the operator a generated password, once');
     c.expect(!JSON.stringify(await c.op.get(`/api/users/${made.user.id}`)).includes(made.password), 'the hub never shows that password again');
@@ -200,40 +161,40 @@ export default [
     const g = await c.op.put(`/api/users/${made.user.id}/grants`, { grants: [{ project_id: project.id, components: ['tasks', 'feed'] }] });
     c.eq(g.user.grants[0].components, ['blueprint', 'tasks', 'feed'], 'the grant is stored as a component list, Blueprint always on');
     c.expect((await c.op.get('/api/users')).users.some((u) => u.username === username), 'the operator lists the user');
-    const mira = new Admin(c.op.base, c.op.rec);
-    await mira.login(username, made.password);
-    await mira.post('/api/me/password', { current: made.password, new: password });
+    const nadia = new Admin(c.op.base, c.op.rec);
+    await nadia.login(username, made.password);
+    await nadia.post('/api/me/password', { current: made.password, new: password });
     const stale = new Admin(c.op.base, c.op.rec);
     c.eq(await stale.refused('POST', '/api/login', { username, password: made.password }), 'invalid_credentials', 'once she picks her own, the generated one stops working');
-    const me = await mira.get('/api/me');
+    const me = await nadia.get('/api/me');
     c.eq([me.role, me.grants.length, 'public_url' in me], ['member', 1, false], 'her /api/me has her role and grant, and no hub URL');
-    c.eq(await mira.refused('GET', '/api/keys'), 'admin_only', 'keys are admin only');
-    c.eq(await mira.refused('GET', '/api/users'), 'admin_only', 'users are admin only');
+    c.eq(await nadia.refused('GET', '/api/keys'), 'admin_only', 'keys are admin only');
+    c.eq(await nadia.refused('GET', '/api/users'), 'admin_only', 'users are admin only');
     // Scoped reads: she sees the granted project's teams and its Work in motion, nothing of other projects.
-    const mine = (await mira.get('/api/teams')).teams;
+    const mine = (await nadia.get('/api/teams')).teams;
     c.expect(mine.length > 0 && mine.every((t) => t.project_id === project.id), 'her team list holds only the granted project');
-    c.expect((await mira.get('/api/work/recent')).events.every((e) => !e.project || e.project.id === project.id), 'her Work in motion holds only the granted project');
+    c.expect((await nadia.get('/api/work/recent')).events.every((e) => !e.project || e.project.id === project.id), 'her Work in motion holds only the granted project');
     // Decider routing: the operator names her decider of one team; its items reach her Needs you, and she acts on them.
     const team = mine[0];
     const set = await c.op.put(`/api/teams/${team.id}/deciders`, { user_ids: [made.user.id] });
     c.eq([set.deciders, set.active_deciders, set.ceiling_is_default], [[made.user.id], [made.user.id], true], 'she decides for the team, inside the default ceiling');
     c.eq((await c.op.get(`/api/teams/${team.id}/deciders`)).ceiling.max_s, 7 * 86400, 'the default ceiling allows at most 7 days');
-    const needs = await mira.get('/api/needs-you');
+    const needs = await nadia.get('/api/needs-you');
     c.expect(Array.isArray(needs.items) && needs.items.every((d) => d.scope.team_id === team.id) && needs.total === needs.items.length, 'her Needs you holds only her team');
-    await mira.post(`/api/teams/${team.id}/status-request`, { note: 'A status for the partner review, please.' });
+    await nadia.post(`/api/teams/${team.id}/status-request`, { note: 'A status for the partner review, please.' });
     c.expect(Array.isArray((await c.op.get('/api/needs-you')).items), 'the operator has a Needs you list too');
     // Blueprint scoping: the granted project's Blueprint only; proposals routed to her team; project-level changes stay the operator's.
-    c.eq((await mira.get('/api/projects')).projects.map((p) => p.id), [project.id], 'her project list holds only the granted project');
-    c.eq((await mira.get(`/api/projects/${project.id}/blueprint`)).project.id, project.id, 'she reads its Blueprint');
-    c.expect(Array.isArray((await mira.get(`/api/projects/${project.id}/proposals`)).proposals) && needs.items.filter((r) => r.kind === 'proposal').every((r) => r.scope.team_id === team.id), 'she lists the proposals routed to her team');
-    c.eq(await mira.refused('GET', `/api/projects/${project.id}/export.md`), 'export_denied', 'exports are not part of her grant');
-    c.eq(await mira.refused('POST', `/api/projects/${project.id}/ops`, { version: 0, ops: [{ op: 'remove', key: 'SUM' }] }), 'not_decider', 'project-level changes stay with the operator');
+    c.eq((await nadia.get('/api/projects')).projects.map((p) => p.id), [project.id], 'her project list holds only the granted project');
+    c.eq((await nadia.get(`/api/projects/${project.id}/blueprint`)).project.id, project.id, 'she reads its Blueprint');
+    c.expect(Array.isArray((await nadia.get(`/api/projects/${project.id}/proposals`)).proposals) && needs.items.filter((r) => r.kind === 'proposal').every((r) => r.scope.team_id === team.id), 'she lists the proposals routed to her team');
+    c.eq(await nadia.refused('GET', `/api/projects/${project.id}/export.md`), 'export_denied', 'exports are not part of her grant');
+    c.eq(await nadia.refused('POST', `/api/projects/${project.id}/ops`, { version: 0, ops: [{ op: 'remove', key: 'SUM' }] }), 'not_decider', 'project-level changes stay with the operator');
     await c.op.put(`/api/teams/${team.id}/deciders`, { user_ids: [] });
     // She forgot it: the operator resets it, which signs her out everywhere and gives a new generated password once.
     const reset = await c.op.post(`/api/users/${made.user.id}/reset-password`);
-    c.eq(await mira.refused('GET', '/api/me'), 'unauthenticated', 'a reset ends her sessions');
-    await mira.login(username, reset.password);
-    c.eq((await mira.get('/api/me')).role, 'member', 'she signs in with the new generated password');
+    c.eq(await nadia.refused('GET', '/api/me'), 'unauthenticated', 'a reset ends her sessions');
+    await nadia.login(username, reset.password);
+    c.eq((await nadia.get('/api/me')).role, 'member', 'she signs in with the new generated password');
     await c.op.patch(`/api/users/${made.user.id}`, { org: 'Halcyon Relay Authority, signals' });
     await c.op.post(`/api/users/${made.user.id}/disable`);
     c.eq((await c.op.get(`/api/users/${made.user.id}`)).user.status, 'disabled', 'the operator disables her at the end');
@@ -247,7 +208,7 @@ export default [
     c.S.labCheckout = st.checkout.id;
     const none = { worktrees: [], unmerged_branches: [], uncommitted_files: [], build_output: [], scratch: [], processes: [] };
     // Odile's folder is the lab's clone; each agent's checkpoint is a real commit on integration/cap-015 when git is here.
-    c.S.labRepo = realClient() ? labRepo(c.S.labAgents) : { dir: null, heads: c.S.labAgents.map((_, i) => String(i + 1).repeat(40)) };
+    c.S.labRepo = { dir: null, heads: c.S.labAgents.map((_, i) => String(i + 1).repeat(40)) };
     for (const [i, l] of c.S.labAgents.entries()) {
       const s0 = await c.as(l).ok('checkout_status', {});
       c.expect(s0.checkout?.id === c.S.labCheckout && /Never push/.test(s0.steps), `${l} sees the checkout and the checkpoint steps`);
@@ -275,7 +236,7 @@ export default [
 
   s('5.15', 'Rendered for the new user, restored with new keys; each agent resumes once', async (c) => {
     const r = await c.op.post(`/api/checkouts/${c.S.labCheckout}/render`, { target: 'same_user' });
-    c.expect(/checkout_resume/.test(r.prompt?.text) && /setup\.mjs restore/.test(r.prompt?.text), 'the restore prompt runs setup.mjs restore and tells agents to call checkout_resume');
+    c.expect(/checkout_resume/.test(r.prompt?.text) && /connector/.test(r.prompt?.text) && !/setup[.]mjs restore/.test(r.prompt?.text), 'the restore prompt points to the connector and tells agents to call checkout_resume');
     const id = c.S.labCheckout, req = r.checkout.request_id, key = c.pcs.lab.appKey;
     const view = (await c.ob.ok('GET', `/requests/${req}?wait_s=0`, key)).checkout;
     c.expect(view?.agents?.length === c.S.labAgents.length, 'the PC reads the agents and their handouts from its request');
@@ -288,59 +249,18 @@ export default [
       c.expect(scans.filter((x) => x.folder !== 'odile').every((x) => x.decision === 'no_findings'), 'the other folders have no findings');
       await c.op.post(`/api/checkouts/${id}/scan/odile`, { decision: 'approve', findings_sha256: hook.findings_sha256 });
     };
-    if (c.S.labRepo.dir && realClient()) {
-      // The real client (deploy/client/setup.mjs), as the restore prompt runs it, with its own HOME and a second Claude Code config root.
-      const tmp = mkdtempSync(join(tmpdir(), 'starship-restore-'));
-      const home = join(tmp, 'home'), root = join(tmp, 'work'), cfgB = join(tmp, 'claude-b');
-      const conf = join(home, '.config', 'conclave');
-      mkdirSync(join(conf, 'onboarding'), { recursive: true });
-      mkdirSync(cfgB, { recursive: true });
-      writeFileSync(join(conf, 'keys.env'), `AGENT_HUB_APP_KEY=${key}\nAGENT_HUB_URL=${c.hub.base}/mcp\n`);
-      writeFileSync(join(conf, 'onboarding', 'state.json'), JSON.stringify({ version: '1', hub: c.hub.base, enrol: { confirmed: true }, requests: {} }));
-      cpSync(HELPER, join(conf, 'agent-hub-headers.mjs'));
-      const claudeA = join(home, '.claude.json'), aText = JSON.stringify({ projects: {} }, null, 2);
-      writeFileSync(claudeA, aText);
-      const st = await c.ob.ok('GET', `/requests/${req}?wait_s=0`, key);
-      const projectDir = join(root, String(st.project || view.team).replace(/[<>:"/\\|?*\x00-\x1f]/g, '-').trim());
-      mkdirSync(projectDir, { recursive: true });
-      renameSync(c.S.labRepo.dir, join(projectDir, 'odile'));
-      const env = { HOME: home, USERPROFILE: home, CLAUDE_CONFIG_DIR: cfgB, AGENT_HUB_URL: '', AGENT_HUB_APP_KEY: '' };
-      const args = ['--hub', c.hub.base, '--checkout', id, '--request', req, '--root', root, '--max-minutes', '0'];
-      const first = await runRestore(args, env);
-      c.expect(first.code === 3 && /scan odile: hooks \.claude\/settings\.json/.test(first.out), `the first run stops at the config scan (exit ${first.code}): ${first.out.slice(-300)}`);
-      c.expect(!existsSync(join(projectDir, 'odile', '.mcp.json')), 'nothing is written into the clone before the scan is decided');
-      await approveScan();
-      const second = await runRestore(args, env);      c.expect(second.code === 0 && /Restored team/.test(second.out), `the rerun restores the team (exit ${second.code}): ${second.out.slice(-400)}`);
-      c.expect(/ok {3}repo odile: every recorded commit found/.test(second.out) && /handouts: 3 match/.test(second.out), 'the handout hashes and every recorded commit are checked');
-      c.expect((second.out.match(/^ {2}cd .*claude /gm) ?? []).length === c.S.labAgents.length && second.out.includes(cfgB), 'one start command per agent, under the second config root');
-      for (const l of c.S.labAgents) {
-        const dir = join(projectDir, l.toLowerCase());
-        const mcp = JSON.parse(readFileSync(join(dir, '.mcp.json'), 'utf8'));
-        const loc = JSON.parse(readFileSync(join(dir, '.claude', 'settings.local.json'), 'utf8'));
-        c.expect(/agent-hub-headers\.mjs/.test(JSON.stringify(mcp.mcpServers?.['agent-hub']?.headersHelper ?? '')), `${l}'s .mcp.json logs in through the headersHelper`);
-        c.expect(loc.permissions?.defaultMode === 'acceptEdits' && existsSync(join(dir, 'CLAUDE.local.md')), `${l}'s settings.local.json and CLAUDE.local.md are written`);
-      }
-      const trusted = Object.values(JSON.parse(readFileSync(join(cfgB, '.claude.json'), 'utf8')).projects ?? {}).filter((x) => x.hasTrustDialogAccepted).length;
-      c.expect(trusted >= c.S.labAgents.length && readFileSync(claudeA, 'utf8') === aText, 'trust is written in the second config root only');
-      const written = readEnv(join(conf, 'keys.env'));
-      for (const a of view.agents) {
-        const name = nameOf(a.agent_id);
-        c.expect(name && c.S.labAgents.includes(name) && written[a.session_var], `the restore key for ${a.agent_id} is in keys.env`);
-        c.keys[name] = { id: null, secret: written[a.session_var] };
-      }
-    } else {
-      // No git or no deploy/client here (the demo image): the same routes, called the way setup.mjs calls them.
-      const hook = { kind: 'hooks', path: '.claude/settings.json', detail: 'hooks: SessionStart' };
-      await c.ob.ok('POST', `/requests/${req}/scan`, key, { folders: view.agents.map((a) => ({ folder: a.folder, findings: a.folder === 'odile' ? [hook] : [] })) });
-      await approveScan();
-      const p = await c.ob.ok('POST', '/pickup', key, { request_id: req });
-      const conf = await c.ob.ok('POST', '/pickup/confirm', key, { pickup_id: p.pickup_id, written: p.agents.map((a) => a.session_var) });
-      c.expect(conf.trust?.odile === true, 'the confirm allows trust for the approved folder');
-      for (const a of p.agents) {
-        const name = nameOf(a.agent_id);
-        c.expect(name && c.S.labAgents.includes(name), `the restore key ${a.agent_id} is for a lab agent`);
-        c.keys[name] = { id: a.key_id ?? null, secret: a.secret };
-      }
+    // The connector's own restore runs against the real hub in server/test/connector-restore-real.test.ts; the story calls the hub routes the way the connector does.
+    // No git or no deploy/client here (the demo image): the same routes, called the way setup.mjs calls them.
+    const hook = { kind: 'hooks', path: '.claude/settings.json', detail: 'hooks: SessionStart' };
+    await c.ob.ok('POST', `/requests/${req}/scan`, key, { folders: view.agents.map((a) => ({ folder: a.folder, findings: a.folder === 'odile' ? [hook] : [] })) });
+    await approveScan();
+    const p = await c.ob.ok('POST', '/pickup', key, { request_id: req });
+    const conf = await c.ob.ok('POST', '/pickup/confirm', key, { pickup_id: p.pickup_id, written: p.agents.map((a) => a.session_var) });
+    c.expect(conf.trust?.odile === true, 'the confirm allows trust for the approved folder');
+    for (const a of p.agents) {
+      const name = nameOf(a.agent_id);
+      c.expect(name && c.S.labAgents.includes(name), `the restore key ${a.agent_id} is for a lab agent`);
+      c.keys[name] = { id: a.key_id ?? null, secret: a.secret };
     }
     const coord = c.S.labAgents[0];
     await c.as(coord).no('checkout_status', {}, /key_inactive|login_required|denied/); // the old seat stops at confirm

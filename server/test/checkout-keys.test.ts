@@ -10,9 +10,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { buildApp, type App } from '../src/app.js';
-import type { Config } from '../src/config.js';
+import { loadConfig, type Config } from '../src/config.js';
 import { EXPIRY_MS } from '../src/checkout/checkout.js';
-import { CODE_TTL_MS, TARGETS, validRef } from '../src/checkout/render.js';
+import { TARGETS, validRef } from '../src/checkout/render.js';
 import type { Credential } from '../src/keys/keys.js';
 import { RESTORE_TEMPLATE, scanClean } from './restoreTemplate.js';
 import { testConfig, adminLogin } from './hub.js';
@@ -157,55 +157,71 @@ describe('Keys.issueSuccessor and suspended tokens', () => {
   });
 });
 
+/** An enrolled PC to move to: its own key picks the request up. */
+const targetPc = async () => {
+  const t = await api('POST', '/pcs/add', { name: `target-pc-${++seq}` });
+  return { pc: t.body.pc.id as string, key: (await enrol(t.body.code)).key as string, keyId: t.body.key.id as string };
+};
+
 describe('the target table', () => {
   it('lists the targets with their rules, defaults per agent, and refuses other targets for a repo with no remote', async () => {
     expect(TARGETS.same_user).toMatchObject({ rotate: 'default_on', push_list: false, needs_remote: false });
-    expect(TARGETS.same_pc_other_user).toMatchObject({ rotate: 'forced', push_list: true, needs_remote: true });
+    expect(Object.keys(TARGETS)).toEqual(['same_user', 'other_pc']);
     expect(TARGETS.other_pc).toMatchObject({ rotate: 'forced', push_list: true, needs_remote: true });
     const s = await onboarded();
     const id = await ready(s.teamId, { noRemote: true });
     const v = await api('GET', `/checkouts/${id}`);
     expect(v.status).toBe(200);
     expect(v.body.options.targets.same_user).toMatchObject({ allowed: true, reason: null });
-    expect(v.body.options.targets.same_pc_other_user).toMatchObject({ allowed: false, reason: 'repo_no_remote' });
+    expect(v.body.options.targets.same_pc_other_user).toBeUndefined();
     expect(v.body.options.targets.other_pc).toMatchObject({ allowed: false, reason: 'repo_no_remote' });
     expect(v.body.options.repo_no_remote.sort()).toEqual(s.agents.map((a) => a.id).sort());
     expect(v.body.options.agents[s.agents[0]!.id]).toEqual({ provider: 'claude_code', model: 'opus', permissions: 'acceptEdits' });
-    const r = await api('POST', `/checkouts/${id}/render`, { target: 'other_pc', new_pc_name: `nr-${seq}` });
+    const target = await onboarded();
+    const r = await api('POST', `/checkouts/${id}/render`, { target: 'other_pc', machine_id: target.pc });
     expect(r.status).toBe(409);
     expect(r.body.error).toBe('repo_no_remote');
-    expect(app.keys.machines().some((m) => m.name === `nr-${seq}`)).toBe(false); // nothing created
     expect((await api('POST', `/checkouts/${id}/render`, { target: 'same_user' })).status).toBe(200);
   });
   it('validates the render: rotation forced off same_user, machine_id only for other_pc, permissions only lowered', async () => {
     const s = await onboarded();
     const id = await ready(s.teamId);
     const w = s.agents[1]!.id;
-    expect((await api('POST', `/checkouts/${id}/render`, { target: 'same_pc_other_user', rotate_agent_keys: false })).status).toBe(400);
+    expect((await api('POST', `/checkouts/${id}/render`, { target: 'other_pc', machine_id: (await targetPc()).pc, rotate_agent_keys: false })).status).toBe(400);
     expect((await api('POST', `/checkouts/${id}/render`, { target: 'same_user', machine_id: s.pc })).status).toBe(400);
     expect((await api('POST', `/checkouts/${id}/render`, { target: 'other_pc', machine_id: s.pc })).status).toBe(400); // that is the source
     expect((await api('POST', `/checkouts/${id}/render`, { target: 'moon' })).status).toBe(400);
     expect((await api('POST', `/checkouts/${id}/render`, { target: 'same_user', agents: { [w]: { permissions: 'bypassPermissions' } } })).status).toBe(400);
     expect((await api('POST', `/checkouts/${id}/render`, { target: 'same_user', agents: { agt_nobody: {} } })).status).toBe(400);
     expect((await api('POST', `/checkouts/${id}/render`, { target: 'same_user', agents: { [w]: { provider: 'gemini' } } })).status).toBe(400);
-    // Codex is prepared, not offered, until the F4 spike (R5).
+    // Codex is offered on every hub since the second Codex move trial passed (docs/checkout.md §9 F4).
     const cx = await api('POST', `/checkouts/${id}/render`, { target: 'same_user', agents: { [w]: { provider: 'codex', model: 'gpt-5-codex', permissions: 'plan' } } });
-    expect(cx.status).toBe(400);
-    expect(cx.body.error).toBe('codex_unverified');
-    expect((await api('GET', `/checkouts/${id}`)).body.options.providers).toEqual(['claude_code']);
+    expect(cx.status, JSON.stringify(cx.body)).toBe(200);
+    expect(cx.body.checkout.choices.agents[w]).toEqual({ provider: 'codex', model: 'gpt-5-codex', permissions: 'plan' });
+    const opts = (await api('GET', `/checkouts/${id}`)).body.options;
+    expect(opts.providers).toEqual(['claude_code', 'codex']);
+    expect(opts).not.toHaveProperty('codex_trial');
     const ok = await api('POST', `/checkouts/${id}/render`, { target: 'same_user', agents: { [w]: { model: 'sonnet', permissions: 'plan' } } });
     expect(ok.status, JSON.stringify(ok.body)).toBe(200);
     expect(ok.body.checkout.choices.agents[w]).toEqual({ provider: 'claude_code', model: 'sonnet', permissions: 'plan' });
     expect(ok.body.checkout.choices.agents[s.agents[0]!.id]).toEqual({ provider: 'claude_code', model: 'opus', permissions: 'acceptEdits' });
   });
-  it('an agent that ran on Codex defaults to Claude Code without its model while Codex is unverified', async () => {
+  it('an agent that ran on Codex keeps Codex and its model by default, and the render is not audited as a trial', async () => {
     const s = await onboarded();
     const id = await ready(s.teamId, { codexAt: 1 });
     const v = await api('GET', `/checkouts/${id}`);
-    expect(v.body.options.agents[s.agents[1]!.id]).toEqual({ provider: 'claude_code', model: null, permissions: 'default' });
+    expect(v.body.options.agents[s.agents[1]!.id]).toEqual({ provider: 'codex', model: 'gpt-5-codex', permissions: 'default' });
     const r = await api('POST', `/checkouts/${id}/render`, { target: 'same_user' });
     expect(r.status, JSON.stringify(r.body)).toBe(200);
-    expect(r.body.checkout.choices.agents[s.agents[1]!.id]).toEqual({ provider: 'claude_code', model: null, permissions: 'default' });
+    expect(r.body.checkout.choices.agents[s.agents[1]!.id]).toEqual({ provider: 'codex', model: 'gpt-5-codex', permissions: 'default' });
+    expect(auditOf('checkout.codex_trial')).toHaveLength(0);
+  });
+  it('the Codex move trial switch is gone: the console is not told, and a production hub ignores CODEX_MOVE_TRIAL', async () => {
+    expect((await api('GET', '/me')).body).not.toHaveProperty('codex_trial');
+    const dir = mkdtempSync(join(tmpdir(), 'ahcxg-'));
+    expect(() => loadConfig({ NODE_ENV: 'production', CODEX_MOVE_TRIAL: '1', VAULT_DIR: dir })).not.toThrow(/CODEX_MOVE_TRIAL/);
+    expect(loadConfig({ CODEX_MOVE_TRIAL: '1', VAULT_DIR: dir })).not.toHaveProperty('codexMoveTrial');
+    expect(readFileSync(join(process.cwd(), 'public', 'index.html'), 'utf8')).not.toContain('trialBar');
   });
   it('render needs a ready checkout', async () => {
     const s = await onboarded();
@@ -298,64 +314,18 @@ describe('same_user', () => {
   });
 });
 
-describe('same_pc_other_user', () => {
-  it('a second app key on the same PC with a 30-minute code; the source key goes at restored only when no live slot uses it', async () => {
-    const s = await onboarded();
-    const id = await ready(s.teamId, { unreviewed: true });
-    const before = Date.now();
-    const r = await api('POST', `/checkouts/${id}/render`, { target: 'same_pc_other_user' });
-    expect(r.status, JSON.stringify(r.body)).toBe(200);
-    const ch = r.body.checkout.choices;
-    expect(ch.machine_id).toBe(s.pc);
-    expect(ch.created_app_key_id).not.toBe(s.keyId);
-    const second = app.keys.credential(ch.created_app_key_id)!;
-    expect(second).toMatchObject({ kind: 'app_key', machine_id: s.pc, status: 'active' });
-    expect(second.onboarding_enabled_at).not.toBeNull();
-    expect(r.body.prompt.code_expires_at).toBeGreaterThanOrEqual(before + CODE_TTL_MS);
-    const code = codeIn(r.body.prompt.text)!;
-    expect(code).not.toBeNull();
-    expect(r.body.approval_needed).toBe(false);
-    // The push list: per repo, the integration branch at its tip and the unreviewed checkout branch.
-    expect(r.body.push_list).toHaveLength(1);
-    const repo = r.body.push_list[0];
-    expect(repo).toMatchObject({ remote_name: 'origin', url: 'git@git.example.org:team/core.git', clone_folder: 'core' });
-    expect(repo.branches).toEqual([
-      { branch: 'integration/core', heads: expect.arrayContaining([head('a'), head('b'), head('e')]), tip: head('b'), unreviewed: false },
-      { branch: `checkout/${id}`, heads: [head('f')], tip: head('f'), unreviewed: true },
-    ]);
-    expect(repo.commands).toEqual(['git push origin integration/core', `git push origin checkout/${id}`]);
-    expect(r.body.prompt.text).toContain('(not approved yet)');
-    const req = app.onboarding.request(r.body.checkout.request_id)!;
-    expect(req).toMatchObject({ state: 'approved', app_credential_id: second.id, machine_id: s.pc });
-    // The source user's key cannot pick it up; the other user's key, once enrolled, can.
-    expect((await ob('POST', '/pickup', { key: s.key, body: { request_id: req.id } })).status).toBe(404);
-    const e = await enrol(code);
-    expect(e.status).toBe(200);
-    const got = await collect(e.key, req.id);
-    expect(got.every((a) => app.keys.credential(credOf(a.secret).id)!.bound_machine_id === s.pc)).toBe(true);
-    for (const h of app.checkouts.handouts(id)) app.checkouts.consume(h.id, h.new_credential_id, sys);
-    expect(app.checkouts.checkout(id)!.status).toBe('restored');
-    expect(app.keys.credential(s.keyId)).toMatchObject({ status: 'revoked' }); // no live slot left on the source key
-    expect(app.keys.credential(second.id)!.status).toBe('active');
-  });
-  it('keeps the source key while another team still runs on it', async () => {
-    const s = await onboarded();
-    await onboardTeam(s.key); // a second team of the same user on the same key
-    const id = await ready(s.teamId);
-    const r = await api('POST', `/checkouts/${id}/render`, { target: 'same_pc_other_user' });
-    const e = await enrol(codeIn(r.body.prompt.text)!);
-    await collect(e.key, r.body.checkout.request_id);
-    for (const h of app.checkouts.handouts(id)) app.checkouts.consume(h.id, h.new_credential_id, sys);
-    expect(app.checkouts.checkout(id)!.status).toBe('restored');
-    expect(app.keys.credential(s.keyId)!.status).toBe('active');
-  });
-  it('an expired code is refused', async () => {
+describe('another OS user on the same PC', () => {
+  it('gets no code and no key: the answer says that user pairs the connector first, and nothing is created', async () => {
     const s = await onboarded();
     const id = await ready(s.teamId);
+    const keys = app.db.prepare('SELECT COUNT(*) n FROM credentials').get() as { n: number }, codes = app.db.prepare('SELECT COUNT(*) n FROM enrolment_codes').get() as { n: number };
     const r = await api('POST', `/checkouts/${id}/render`, { target: 'same_pc_other_user' });
-    app.db.prepare('UPDATE enrolment_codes SET expires_at=? WHERE app_credential_id=?').run(Date.now() - 1, r.body.checkout.choices.created_app_key_id);
-    expect((await enrol(codeIn(r.body.prompt.text)!)).status).toBe(401);
-    expect(auditOf('onboarding.enrol_refused').some((a) => JSON.parse(a.details).reason === 'expired')).toBe(true);
+    expect(r.status).toBe(409);
+    expect(r.body).toMatchObject({ error: 'invalid_state', reason: 'other_user_pairs_first', message: expect.stringMatching(/That user installs the connector and pairs it.*approve a destination/) });
+    expect(JSON.stringify(r.body)).not.toMatch(/cnv_enrol_/);
+    expect(app.db.prepare('SELECT COUNT(*) n FROM credentials').get()).toEqual(keys);
+    expect(app.db.prepare('SELECT COUNT(*) n FROM enrolment_codes').get()).toEqual(codes);
+    expect(app.checkouts.checkout(id)!.status).toBe('ready');
   });
 });
 
@@ -378,52 +348,37 @@ describe('other_pc', () => {
     expect(err(() => app.keys.login(appCred(s.key), nk))).toBe('bound_elsewhere'); // the source PC cannot use it
     expect(app.keys.login(appCred(tk), nk).token).toMatch(/^ah_tok_/);
     const d = await api('GET', `/checkouts/${id}`);
-    expect(d.body.target).toMatchObject({ target: 'other_pc', new_pc: false, approval: 'not_needed', request: { state: 'collected' } });
+    expect(d.body.target).toMatchObject({ target: 'other_pc', request: { state: 'collected' } });
   });
-  it('a new PC: a 30-minute code; nothing is released until the operator approves the enrolled PC', async () => {
+  it('a new PC is not rendered for: no PC, key or code is created, and the answer says to add the PC with the connector first', async () => {
     const s = await onboarded();
     const id = await ready(s.teamId);
     const name = `fresh-pc-${seq}`;
+    const machines = app.keys.machines().length, keys = app.db.prepare('SELECT COUNT(*) n FROM credentials').get() as { n: number }, codes = app.db.prepare('SELECT COUNT(*) n FROM enrolment_codes').get() as { n: number };
     const r = await api('POST', `/checkouts/${id}/render`, { target: 'other_pc', new_pc_name: name });
-    expect(r.status, JSON.stringify(r.body)).toBe(200);
-    expect(r.body.approval_needed).toBe(true);
-    expect(r.body.prompt.text).toContain('approves this PC');
-    const pc = app.keys.machines().find((m) => m.name === name)!;
-    expect(r.body.checkout.target_machine_id).toBe(pc.id);
-    const req = app.onboarding.request(r.body.checkout.request_id)!;
-    expect(req.state).toBe('submitted');
-    expect((await api('POST', `/checkouts/${id}/approve-pc`)).status).toBe(409); // not enrolled yet
-    const kinds = async () => (await api('GET', '/checkouts?open=1')).body.checkouts.find((c: { id: string }) => c.id === id).needs_operator as { kind: string; pc?: { name: string }; enrolled_from?: string }[];
-    expect((await kinds()).map((x) => x.kind)).toEqual([]); // Attention waits for the enrolment, not before
-    const e = await enrol(codeIn(r.body.prompt.text)!, '10.77.0.9');
-    expect(e.status).toBe(200);
-    const p0 = await ob('POST', '/pickup', { key: e.key, body: { request_id: req.id } });
-    expect(p0.status).toBe(409); // waiting for approval
-    expect(app.keys.credentials({ agentId: s.agents[0]!.id })).toHaveLength(1);
-    const d = await api('GET', `/checkouts/${id}`);
-    expect(d.body.target).toMatchObject({ approval: 'waiting', pc: { name }, enrolment: { enrolled_from: '10.77.0.9' } });
-    expect(await kinds()).toEqual([expect.objectContaining({ kind: 'approve_pc', pc: expect.objectContaining({ name }), enrolled_from: '10.77.0.9' })]);
-    const a = await api('POST', `/checkouts/${id}/approve-pc`);
-    expect(a.status, JSON.stringify(a.body)).toBe(200);
-    expect(await kinds()).toEqual([]);
-    expect(JSON.parse(auditOf('checkout.pc_approved', id)[0]!.details)).toMatchObject({ pc: name, enrolled_from: '10.77.0.9' });
-    const got = await collect(e.key, req.id);
-    expect(app.keys.credential(credOf(got[0]!.secret).id)!.bound_machine_id).toBe(pc.id);
-    expect(app.checkouts.checkout(id)!.status).toBe('restoring');
+    expect(r.status).toBe(409);
+    expect(r.body).toMatchObject({ error: 'invalid_state', reason: 'add_pc_first', message: expect.stringMatching(/Add this PC with the connector first.*approve a destination/) });
+    expect(JSON.stringify(r.body)).not.toMatch(/cnv_enrol_/);
+    expect(app.keys.machines().length).toBe(machines);
+    expect(app.db.prepare('SELECT COUNT(*) n FROM credentials').get()).toEqual(keys);
+    expect(app.db.prepare('SELECT COUNT(*) n FROM enrolment_codes').get()).toEqual(codes);
+    expect(app.checkouts.checkout(id)!.status).toBe('ready'); // nothing rendered
+    // Neither name nor id: also refused, with the plain reason.
+    expect((await api('POST', `/checkouts/${id}/render`, { target: 'other_pc' })).status).toBe(400);
   });
 });
 
 describe('a new render, cancel and expiry', () => {
-  it('a new render revokes everything issued under the previous one', async () => {
+  it('a new render cancels the previous request and what was issued under it', async () => {
     const s = await onboarded();
     const id = await ready(s.teamId);
-    const r1 = await api('POST', `/checkouts/${id}/render`, { target: 'other_pc', new_pc_name: `first-${seq}` });
-    const code1 = codeIn(r1.body.prompt.text)!;
+    const tp = await targetPc();
+    const r1 = await api('POST', `/checkouts/${id}/render`, { target: 'other_pc', machine_id: tp.pc });
+    expect(r1.status, JSON.stringify(r1.body)).toBe(200);
     const r2 = await api('POST', `/checkouts/${id}/render`, { target: 'same_user' });
     expect(r2.status, JSON.stringify(r2.body)).toBe(200);
     expect(app.onboarding.request(r1.body.checkout.request_id)!.state).toBe('cancelled');
-    expect(app.keys.credential(r1.body.checkout.choices.created_app_key_id)!.status).toBe('revoked');
-    expect((await enrol(code1)).status).toBe(401);
+    expect((await ob('POST', '/pickup', { key: tp.key, body: { request_id: r1.body.checkout.request_id } })).status).toBe(409);
     expect(auditOf('checkout.render_superseded', id)).toHaveLength(1);
     // Issued successors of a superseded render are revoked and membership goes back.
     const old = memberKey(s.teamId, s.agents[0]!.id);
@@ -516,7 +471,7 @@ describe('push list refs', () => {
     const id = await ready(s.teamId);
     // checkout_progress refuses such a ref; this one is planted in the stored handout, as if written before the checks.
     app.db.prepare("UPDATE handouts SET body=json_set(body,'$.checkpoint.integration_branch','--upload-pack=x') WHERE checkout_id=?").run(id);
-    const r = await api('POST', `/checkouts/${id}/render`, { target: 'same_pc_other_user' });
+    const r = await api('POST', `/checkouts/${id}/render`, { target: 'other_pc', machine_id: (await targetPc()).pc });
     expect(r.status).toBe(400);
     expect(app.checkouts.checkout(id)!.status).toBe('ready');
   });
@@ -571,12 +526,12 @@ describe('review fixes', () => {
   it('keeps secrets and codes out of the audit log, the stored choices and the checkout views', async () => {
     const s = await onboarded();
     const id = await ready(s.teamId);
-    const r = await api('POST', `/checkouts/${id}/render`, { target: 'same_pc_other_user' });
+    const tp = await targetPc();
+    const r = await api('POST', `/checkouts/${id}/render`, { target: 'other_pc', machine_id: tp.pc });
     expect(r.status).toBe(200);
-    const code = codeIn(r.body.prompt.text)!;
-    const e = await enrol(code);
-    const got = await collect(e.key, r.body.checkout.request_id);
-    const secrets = [code, e.key, ...got.map((a) => a.secret)];
+    expect(codeIn(r.body.prompt.text)).toBeNull();
+    const got = await collect(tp.key, r.body.checkout.request_id);
+    const secrets = [tp.key, ...got.map((a) => a.secret)];
     const audit = (app.db.prepare('SELECT details FROM audit_events').all() as { details: string | null }[]).map((x) => x.details ?? '').join('\n');
     const choices = app.checkouts.checkout(id)!.choices ?? '';
     const view = JSON.stringify((await api('GET', `/checkouts/${id}`)).body);
@@ -594,39 +549,6 @@ describe('review fixes', () => {
     const res = await fetch(`${base}/api/checkouts/${id}/render`, { method: 'POST', headers: { 'content-type': 'application/json', cookie }, body: JSON.stringify({ target: 'same_user' }) });
     expect(res.status).toBe(403);
     expect(app.checkouts.checkout(id)!.status).toBe('ready');
-  });
-
-  it('an issued code cannot be replayed after it expires, nor after the new PC is approved', async () => {
-    const s = await onboarded();
-    const id = await ready(s.teamId);
-    const r = await api('POST', `/checkouts/${id}/render`, { target: 'same_pc_other_user' });
-    const code = codeIn(r.body.prompt.text)!, n = nonce(), from = freshIp();
-    expect((await ob('POST', '/enrol', { body: { code, nonce: n }, from })).status).toBe(200);
-    expect((await ob('POST', '/enrol', { body: { code, nonce: n }, from })).status).toBe(200); // a lost response may be retried
-    app.db.prepare('UPDATE enrolment_codes SET expires_at=? WHERE app_credential_id=?').run(Date.now() - 1, r.body.checkout.choices.created_app_key_id);
-    expect((await ob('POST', '/enrol', { body: { code, nonce: n }, from })).status).toBe(401);
-
-    const s2 = await onboarded();
-    const id2 = await ready(s2.teamId);
-    const r2 = await api('POST', `/checkouts/${id2}/render`, { target: 'other_pc', new_pc_name: `replay-pc-${seq}` });
-    const code2 = codeIn(r2.body.prompt.text)!, n2 = nonce(), from2 = freshIp();
-    expect((await ob('POST', '/enrol', { body: { code: code2, nonce: n2 }, from: from2 })).status).toBe(200);
-    expect((await api('POST', `/checkouts/${id2}/approve-pc`)).status).toBe(200);
-    expect((await ob('POST', '/enrol', { body: { code: code2, nonce: n2 }, from: freshIp() })).status).toBe(409);
-    expect(app.onboarding.keyEnrolment(r2.body.checkout.choices.created_app_key_id)).toMatchObject({ status: 'confirmed', enrolled_from: from2 });
-  });
-
-  it("the other OS user's key is never taken as the PC's own key for a later move", async () => {
-    const s = await onboarded();
-    const id = await ready(s.teamId);
-    const r = await api('POST', `/checkouts/${id}/render`, { target: 'same_pc_other_user' });
-    const second = r.body.checkout.choices.created_app_key_id as string;
-    await enrol(codeIn(r.body.prompt.text)!);
-    expect(app.onboarding.pcKey(s.pc)!.id).toBe(s.keyId);
-    // Once the source key is gone, the PC has no onboarding key of its own user rather than the other user's.
-    app.keys.setStatus(s.keyId, 'revoked', 'test', sys);
-    expect(app.onboarding.pcKey(s.pc)).toBeNull();
-    expect(app.keys.credential(second)!.status).toBe('active');
   });
 
   it('slots are named by role as onboarding names them', async () => {
@@ -683,15 +605,17 @@ describe('onboarding and checkout review fixes', () => {
   it('a PC key cannot withdraw or amend the request of a checkout', async () => {
     const s = await onboarded();
     const id = await ready(s.teamId);
-    const r = await api('POST', `/checkouts/${id}/render`, { target: 'other_pc', new_pc_name: `fresh-pc-${seq}` });
-    const e = await enrol(codeIn(r.body.prompt.text)!);
+    const tp = await targetPc();
+    const r = await api('POST', `/checkouts/${id}/render`, { target: 'other_pc', machine_id: tp.pc });
+    const e = { key: tp.key };
     const rid = r.body.checkout.request_id as string;
+    const state0 = app.onboarding.request(rid)!.state;
     const w = await ob('POST', `/requests/${rid}/withdraw`, { key: e.key });
     expect(w.status).toBe(409);
     expect(w.body.message).toMatch(/belongs to a checkout/);
     const a = await ob('PUT', `/requests/${rid}`, { key: e.key, body: { version: 1, kind: 'new_team' } });
     expect(a.status).toBe(409);
-    expect(app.onboarding.request(rid)!.state).toBe('submitted');
+    expect(app.onboarding.request(rid)!.state).toBe(state0);
   });
   it('render refuses when the PC key already has a pending request', async () => {
     const s = await onboarded();
@@ -704,15 +628,6 @@ describe('onboarding and checkout review fixes', () => {
     expect(r.body.message).toMatch(/pending request/);
     expect(app.checkouts.checkout(id)!.status).toBe('ready');
   });
-  it('revoking a PC\'s code leaves the checkout\'s codes alone, and the PC row never shows them', async () => {
-    const s = await onboarded();
-    const id = await ready(s.teamId);
-    const r = await api('POST', `/checkouts/${id}/render`, { target: 'other_pc', new_pc_name: `fresh-pc-${seq}` });
-    const pcId = r.body.checkout.target_machine_id as string;
-    expect((await api('GET', `/pcs/${pcId}/enrolment`)).body.enrolment).toBeNull();
-    expect((await api('DELETE', `/pcs/${pcId}/enrolment`)).status).toBe(409);
-    expect((await enrol(codeIn(r.body.prompt.text)!)).status).toBe(200);
-  });
   it('the enrol error tells a revoked and an expired code from an unknown one, and an issued code is handed out three times at most', async () => {
     const msg = async (code: string) => (await ob('POST', '/enrol', { body: { code, nonce: nonce() }, from: freshIp() })).body.message as string;
     const add = await api('POST', '/pcs/add', { name: `err-pc-${++seq}` });
@@ -720,28 +635,15 @@ describe('onboarding and checkout review fixes', () => {
     const rev = await api('POST', '/pcs/add', { name: `err-pc-${++seq}` });
     await api('DELETE', `/pcs/${rev.body.pc.id}/enrolment`);
     expect(await msg(rev.body.code)).toMatch(/revoked/);
-    const s = await onboarded();
-    const id = await ready(s.teamId);
-    const r = await api('POST', `/checkouts/${id}/render`, { target: 'same_pc_other_user' });
-    app.db.prepare('UPDATE enrolment_codes SET expires_at=? WHERE app_credential_id=?').run(Date.now() - 1, r.body.checkout.choices.created_app_key_id);
-    expect(await msg(codeIn(r.body.prompt.text)!)).toMatch(/expired/);
+    const old = await api('POST', '/pcs/add', { name: `err-pc-${++seq}` });
+    app.db.prepare('UPDATE enrolment_codes SET expires_at=? WHERE app_credential_id=?').run(Date.now() - 1, old.body.key.id);
+    expect(await msg(old.body.code)).toMatch(/expired/);
     // Same nonce, never confirmed: three issues, then a refusal.
     const n = nonce(), from = freshIp();
     for (let i = 0; i < 3; i++) expect((await ob('POST', '/enrol', { body: { code: add.body.code, nonce: n }, from })).status).toBe(200);
     const fourth = await ob('POST', '/enrol', { body: { code: add.body.code, nonce: n }, from });
     expect(fourth.status).toBe(409);
     expect(fourth.body.message).toMatch(/re-enrol/);
-  });
-  it('one clock decides when a render-issued code expires', async () => {
-    const s = await onboarded();
-    const id = await ready(s.teamId);
-    const was = app.checkouts.now;
-    app.checkouts.now = () => Date.now() - 2 * 3600_000; // a clock two hours behind: the 30-minute code is still valid by it
-    try {
-      const r = await api('POST', `/checkouts/${id}/render`, { target: 'same_pc_other_user' });
-      expect(r.status, JSON.stringify(r.body)).toBe(200);
-      expect((await enrol(codeIn(r.body.prompt.text)!)).status).toBe(200);
-    } finally { app.checkouts.now = was; }
   });
   it('a PC added without a key (POST /api/pcs) is refused as a target with a way forward', async () => {
     const s = await onboarded();

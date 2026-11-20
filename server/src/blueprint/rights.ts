@@ -130,6 +130,8 @@ function upsertRight(op: Extract<Op, { op: 'upsert' }>, c: RightCtx): OpRight {
     || (op.parent_key !== undefined && op.parent_key !== cur.parent_key) || (op.position !== undefined && op.position !== cur.position)
     || changedFields.some((k) => k !== 'evidence');
   const k = `${op.key}`;
+  // A project-level item (no team part) in a project with several teams is nobody's part: the coordinator may propose its status or evidence, as it proposes its text, instead of being refused (§4).
+  const projectLevel = (team ?? null) === null && (!cur || (cur.team_id ?? null) === null);
   const r = (verdict: Verdict, why: string): OpRight => ({ verdict, why: verdict === A ? '' : why });
   // Outside references only (§4): a coordinator changes them on its own part's items whatever their status. Archived
   // items are refused before rights (blueprint.ts refuseArchived); reports stay bp_report's.
@@ -149,8 +151,8 @@ function upsertRight(op: Extract<Op, { op: 'upsert' }>, c: RightCtx): OpRight {
     case 'fr': case 'nfr': case 'hypothesis': case 'question': {
       if (member) return moved ? r(D, `as a member you cannot move ${k} to ${to}`) : r(P, `${k}: members propose`);
       if (!own) {
-        if (moved && !act) return r(D, `${k} is outside your team's part; its status is its owner's`);
-        if (evidence) return r(D, `${k} is outside your team's part; its evidence is its owner's`);
+        if (moved && !act) return projectLevel ? r(P, `${k} is project-level, not in your team's part; the operator applies a status change`) : r(D, `${k} is outside your team's part; its status is its owner's`);
+        if (evidence) return projectLevel ? r(P, `${k} is project-level, not in your team's part; the operator applies evidence`) : r(D, `${k} is outside your team's part; its evidence is its owner's`);
         return r(P, `${k} is outside your team's part`);
       }
       const open = OPEN_STATUS[kind]!;
@@ -162,7 +164,7 @@ function upsertRight(op: Extract<Op, { op: 'upsert' }>, c: RightCtx): OpRight {
     }
     case 'ac': {
       if (member) return moved ? r(D, `as a member you cannot move ${k} to ${to}`) : r(P, `${k}: members propose`);
-      if (!own) return moved || evidence ? r(D, `${k} is outside your team's part`) : r(P, `${k} is outside your team's part`);
+      if (!own) return (moved || evidence) && !projectLevel ? r(D, `${k} is outside your team's part`) : r(P, `${k} is outside your team's part`);
       return r(text && parent?.status !== 'draft' ? P : A, `${parentKey} is ${parent?.status}; editing its criteria needs the operator`);
     }
     case 'finding':

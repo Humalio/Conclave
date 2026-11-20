@@ -5,7 +5,7 @@ import type { Db } from '../db/db.js';
 import type { Keys } from '../keys/keys.js';
 import type { Actor } from '../audit/audit.js';
 import type { Teams, TaskRow } from '../teams/teams.js';
-import { tagFilter, normTaskTags, parseTags } from '../teams/teams.js';
+import { tagFilter, parseTags, parseTagList } from '../teams/teams.js';
 import { wakeText } from '../teams/turns.js';
 import { SHORT_SUMMARY_MAX } from '../teams/shortSummary.js';
 import { KeyError } from '../keys/keys.js';
@@ -13,7 +13,9 @@ import type { Component } from './users.js';
 import type { Routing } from './routing.js';
 import { Keywords } from '../teams/keywords.js';
 import { Audit } from '../audit/audit.js';
+import { deliveryWhy } from '../connector/deliveryWhy.js';
 import { sniff, type TaskAttachments } from '../shares/taskAttachments.js';
+import type { TeamStart } from '../teams/teamStart.js';
 
 export interface TeamsDeps {
   db: Db; keys: Keys; teams: Teams; routing?: Routing;
@@ -23,6 +25,8 @@ export interface TeamsDeps {
   setupOf?: (teamId: string) => unknown;
   /** Task attachments (docs/specification.md, "Task attachments"): counts on the board, the sets on the operator's task screen, and Attach. */
   attachments?: TaskAttachments;
+  /** Start team (docs/connector.md, "Reason orders"): one check-in turn per member, woken by its PC's connector. */
+  teamStart?: TeamStart;
 }
 
 /** At most this many pinned teams per operator. */
@@ -43,7 +47,8 @@ const patch = z.object({
   name: z.string().trim().min(1).max(80).optional(), goal: z.string().trim().min(1).max(4000).optional(), limits: limits.optional(), checkpoints: z.array(z.enum(['done'])).optional(),
   keywords: z.array(z.string().max(100)).max(20).optional(),
   lease_minutes: z.number().int().min(1).max(1440).optional(), max_review_rounds: z.number().int().min(1).max(20).optional(), stall_minutes: z.number().int().min(1).max(1440).optional(),
-  close_on_approve: z.boolean().optional(), coordinator_reviews: z.boolean().optional(), delivery_mode: z.enum(['poll', 'on_demand']).optional(), feedback_nudge: z.boolean().optional(), coordinator_decides_blueprint: z.boolean().optional(),
+  close_on_approve: z.boolean().optional(), coordinator_reviews: z.boolean().optional(), feedback_nudge: z.boolean().optional(), coordinator_decides_blueprint: z.boolean().optional(),
+  coordinator_records_done: z.boolean().optional(),
   recruiting: z.enum(['off', 'propose', 'auto']).optional(), recruit_max: z.number().int().min(1).max(20).optional(), recruit_roles: z.array(z.enum(['worker', 'reviewer', 'stakeholder'])).min(1).optional(),
   recruit_template_id: z.string().max(100).nullable().optional(), recruit_days: z.number().int().min(1).max(90).optional(),
 });
@@ -75,7 +80,7 @@ export function registerTeams(api: FastifyInstance, d: TeamsDeps, actor: (r: Fas
   const memberBrief = (t: ReturnType<typeof teams.mustTeam>) => ({ id: t.id, name: t.name, status: t.status, project_id: t.project_id ?? null, tasks: false });
   const memberView = (t: ReturnType<typeof teams.mustTeam>) => {
     const v = teams.view(t);
-    return { ...memberSummary(t), delivery_mode: v.delivery_mode, checkpoints: v.checkpoints, close_on_approve: v.close_on_approve,
+    return { ...memberSummary(t), checkpoints: v.checkpoints, close_on_approve: v.close_on_approve,
       members: v.members.map((m) => ({ agent_id: m.agent_id, label: m.label, role: m.role, joined_at: m.joined_at, last_activity_at: m.last_activity_at, stalled: m.stalled })),
       board: withCounts(v.board), status_report: v.status_report, status_requested_at: v.status_requested_at, plan: v.plan };
   };
@@ -92,21 +97,23 @@ export function registerTeams(api: FastifyInstance, d: TeamsDeps, actor: (r: Fas
   /**
    * The operator's view of a task's open turn (docs/dashboard-ux.md, waiting review): who holds it, since when, whether
    * they have seen it, its due time, for a review the submission it waits on (round: the nth task_submit, as the task
-   * screen numbers its rounds) and, for an on-demand holder who has not seen it, the hand-off's wake text. Null when
-   * nobody holds the task.
+   * screen numbers its rounds), for a holder who has not seen it the hand-off's wake text, and whether the connector
+   * delivered it to the holder's session (delivered_at) or why not yet (delivery_reason). Null when nobody holds the task.
    */
-  const turnsOf = (ids: string[], onDemand: boolean) => {
+  const turnsOf = (ids: string[]) => {
     const v = teams.turns.views(ids), rounds = new Map<string, number>();
     const reviews = ids.filter((id) => v.get(id)?.turn.phase === 'review');
     if (reviews.length) for (const r of d.db.prepare(`SELECT task_id, COUNT(*) n FROM task_events WHERE tool='task_submit' AND task_id IN (${reviews.map(() => '?').join(',')}) GROUP BY task_id`).all(...reviews) as { task_id: string; n: number }[]) rounds.set(r.task_id, r.n);
     return (id: string) => {
       const x = v.get(id)?.turn;
       return x ? { phase: x.phase, holder: x.holder, holder_label: d.keys.agent(x.holder)?.label ?? x.holder, since: x.since, seen_at: x.seen_at, due_at: x.due_at,
-        round: x.phase === 'review' ? rounds.get(id) ?? null : null, wake_text: onDemand && x.seen_at === null ? wakeText(x.phase, id) : null } : null;
+        delivered_at: x.delivered_at, delivery_reason: x.delivery_reason,
+        ...(x.delivered_at || x.seen_at ? { pc_offline_since: null, waiting_behind: null } : deliveryWhy(d.db, x.holder, id)),
+        round: x.phase === 'review' ? rounds.get(id) ?? null : null, wake_text: x.seen_at === null ? wakeText(x.phase, id) : null } : null;
     };
   };
   const adminView = (t: ReturnType<typeof teams.mustTeam>) => {
-    const v = teams.view(t), turn = turnsOf(v.board.map((k) => k.id), t.delivery_mode === 'on_demand');
+    const v = teams.view(t), turn = turnsOf(v.board.map((k) => k.id));
     return withKw({ ...v, stall_warnings: stallWarnings(t.id), board: withCounts(v.board).map((k) => ({ ...k, turn: turn(k.id) })) });
   };
   const setKw = (req: FastifyRequest, id: string, list: string[]) => {
@@ -204,6 +211,15 @@ export function registerTeams(api: FastifyInstance, d: TeamsDeps, actor: (r: Fas
   });
   api.post('/api/teams/:id/resume', async (req) => ({ team: teams.view(teams.resume(p(req).id, actor(req))) }));
   api.post('/api/teams/:id/stop', async (req) => ({ team: teams.view(teams.stop(p(req).id, actor(req))) }));
+  // Start team: the operator only (an admin route), audited; a paused team is resumed first.
+  api.post('/api/teams/:id/start-turns', async (req) => {
+    if (!d.teamStart) throw new KeyError('invalid_state', 'This hub does not talk to connectors.');
+    return d.teamStart.start(p(req).id, actor(req));
+  });
+  api.get('/api/teams/:id/start-turns', async (req) => {
+    if (!d.teamStart) throw new KeyError('invalid_state', 'This hub does not talk to connectors.');
+    return d.teamStart.state(p(req).id);
+  });
   api.post('/api/teams/:id/members', async (req) => {
     teams.addMember(p(req).id, body(member, req), actor(req));
     return { team: teams.view(teams.mustTeam(p(req).id)), warnings: teams.chatWarnings(p(req).id) };
@@ -226,7 +242,7 @@ export function registerTeams(api: FastifyInstance, d: TeamsDeps, actor: (r: Fas
     // A member gets the count only; the files, their names and the byte route are the operator's.
     const count = d.attachments?.count(t.id) ?? 0;
     if (req.member) return { task: { ...teams.taskView(t), attachments_count: count }, events: events.map((e) => (e.actor_kind === 'admin' ? { ...e, actor_id: null } : e)) };
-    return { task: { ...teams.taskView(t), attachments_count: count, attachments: d.attachments?.consoleView(t.id) ?? { brief: null, rounds: [] }, turn: turnsOf([t.id], teams.team(t.team_id!)?.delivery_mode === 'on_demand')(t.id) }, events };
+    return { task: { ...teams.taskView(t), attachments_count: count, attachments: d.attachments?.consoleView(t.id) ?? { brief: null, rounds: [] }, turn: turnsOf([t.id])(t.id) }, events };
   });
   // The operator's Attach: images and HTML mockups added to the brief as its next version (a path given again replaces
   // that file). At most 1 MB of files a call, the task's version guards a stale screen, and every limit is the hub's.
@@ -263,6 +279,15 @@ export function registerTeams(api: FastifyInstance, d: TeamsDeps, actor: (r: Fas
   api.post('/api/teams/:id/tasks/:taskId/accept', async (req) => ({ task: teams.taskView(teams.adminAccept(p(req).id, p(req).taskId!, body(backlogNote, req).note?.trim() || null, actor(req))) }));
   api.post('/api/teams/:id/tasks/:taskId/discard', async (req) => ({ task: teams.taskView(teams.adminDiscard(p(req).id, p(req).taskId!, body(backlogNote, req).note?.trim() || null, actor(req))) }));
   api.post('/api/teams/:id/tasks/:taskId/demote', async (req) => ({ task: teams.taskView(teams.adminDemote(p(req).id, p(req).taskId!, body(backlogNote, req).note?.trim() || null, actor(req))) }));
+  // Record past work as done (docs/teams.md, "Record past work"): the operator, always. No review round, no files; audited.
+  const recordBody = z.object({
+    title: z.string().trim().min(1).max(200), description: z.string().max(20000).optional(), summary: z.string().trim().min(1).max(20000),
+    refs: z.array(z.string().max(16)).max(20).optional(), tags: z.array(z.string().max(24)).max(8).optional(), fixes: z.string().max(100).optional(),
+  }).strict();
+  api.post('/api/teams/:id/tasks/record', async (req) => {
+    const b = body(recordBody, req);
+    return { task: teams.taskView(teams.recordDone({ kind: 'admin', actor: actor(req) }, { team_id: p(req).id, ...b })) };
+  });
   // Postpone a backlog task and return it to active: it stays backlog (postponed_at), versioned and audited, no notice.
   const postponeBody = z.object({ note: z.string().max(1000).nullable().optional(), version: z.number().int().min(1).optional() }).strict();
   api.post('/api/teams/:id/tasks/:taskId/postpone', async (req) => {
@@ -281,7 +306,7 @@ export function registerTeams(api: FastifyInstance, d: TeamsDeps, actor: (r: Fas
   const hasTag = "EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(k.tags) THEN k.tags ELSE '[]' END) j WHERE j.value=?)";
   const blQuery = z.object({
     list: z.enum(['active', 'postponed']).optional(), project: z.string().max(100).optional(), team: z.string().max(100).optional(), tag: z.string().max(64).optional(),
-    limit: z.coerce.number().int().min(1).max(200).optional(), cursor: z.string().max(100).optional(),
+    q: z.string().max(200).optional(), limit: z.coerce.number().int().min(1).max(200).optional(), cursor: z.string().max(100).optional(),
   });
   // The cursor is the last row's (created_at, rowid), opaque to the console, and names its list.
   const blCursor = (list: string, at: number, rowid: number) => Buffer.from(`${list}:${at}:${rowid}`).toString('base64url');
@@ -291,8 +316,13 @@ export function registerTeams(api: FastifyInstance, d: TeamsDeps, actor: (r: Fas
     if (!m || m[1] !== list) throw new KeyError('invalid_argument', 'cursor is a next_cursor from this list');
     return [Number(m[2]), Number(m[3])];
   };
+  // The display name of a tag where some project's list names it (Project settings, Tags); a tag no list names has none.
+  const tagNames = () => { const m = new Map<string, string>(); for (const r of d.db.prepare('SELECT task_tags FROM projects').all() as { task_tags: string }[]) for (const e of parseTagList(r.task_tags)) if (!m.has(e.tag)) m.set(e.tag, e.name); return m; };
+  const named = <T extends { tag: string }>(rows: T[]) => { const m = tagNames(); return rows.map((r) => (m.has(r.tag) ? { ...r, name: m.get(r.tag)! } : r)); };
   api.get('/api/tasks/backlog', async (req) => {
     const q = blQuery.parse(req.query ?? {}), list = q.list ?? 'active', tag = tagFilter(q.tag) ?? null, project = q.project || null, team = q.team || null, limit = q.limit ?? 50;
+    // The search: words in the title or the brief, as typed (LIKE, its wildcards escaped), with the other filters.
+    const text = (q.q || '').trim(), like = text ? '%' + text.replace(/[\\%_]/g, (c) => '\\' + c) + '%' : '';
     const after = blCursorIn(list, q.cursor);
     // One WHERE for the filters, so each list, count and page names the same tasks. k is the task, t its team.
     const filt = (o: { tag?: boolean; project?: boolean } = {}) => {
@@ -300,6 +330,7 @@ export function registerTeams(api: FastifyInstance, d: TeamsDeps, actor: (r: Fas
       if (o.project !== false && project) { w.push('t.project_id=?'); a.push(project); }
       if (team) { w.push('k.team_id=?'); a.push(team); }
       if (o.tag !== false && tag) { w.push(hasTag); a.push(tag); }
+      if (like) { w.push("(k.title LIKE ? ESCAPE '\\' OR COALESCE(k.description, '') LIKE ? ESCAPE '\\')"); a.push(like, like); }
       return { w: w.map((x) => ` AND ${x}`).join(''), a };
     };
     const inList = (l: string) => (l === 'postponed' ? "k.status='backlog' AND k.postponed_at IS NOT NULL" : "k.status='backlog' AND k.postponed_at IS NULL");
@@ -327,7 +358,7 @@ export function registerTeams(api: FastifyInstance, d: TeamsDeps, actor: (r: Fas
     return {
       list, tasks: shown.map(view), total: list === 'postponed' ? postponedTotal : activeTotal, active_total: activeTotal, postponed_total: postponedTotal, all_total: allTotal,
       next_cursor: more && last ? blCursor(list, last.created_at, last.rid) : null,
-      relayed: relayed.map(view), relayed_days: RELAYED_DAYS, tag, project, tags: tagRows, projects: projectRows,
+      relayed: relayed.map(view), relayed_days: RELAYED_DAYS, tag, project, q: text || null, tags: named(tagRows), projects: projectRows,
       team_name: team ? (d.db.prepare('SELECT name FROM teams WHERE id=?').get(team) as { name: string } | undefined)?.name ?? null : null,
       project_name: project ? (d.db.prepare('SELECT name FROM projects WHERE id=?').get(project) as { name: string } | undefined)?.name ?? null : null,
     };
@@ -343,17 +374,22 @@ export function registerTeams(api: FastifyInstance, d: TeamsDeps, actor: (r: Fas
     for (const k of L) for (const g of parseTags(k.tags)) counts.set(g, (counts.get(g) ?? 0) + 1);
     const out = tag ? L.filter((k) => parseTags(k.tags).includes(tag)) : L;
     return { tasks: out.map((k) => teams.taskView(k)), total: out.length, tag: tag ?? null,
-      tags: [...counts].map(([g, n]) => ({ tag: g, n })).sort((a, b) => b.n - a.n || a.tag.localeCompare(b.tag)) };
+      tags: named([...counts].map(([g, n]) => ({ tag: g, n })).sort((a, b) => b.n - a.n || a.tag.localeCompare(b.tag))) };
   });
-  // The operator files a task: replace its tags (at most 8; [] clears them), on a task in any status. Audited.
+  // The operator files a task: replace its tags (1 or 2 from the project list, else at most 2; [] clears them), on a task in any status. Audited.
   api.put('/api/teams/:id/tasks/:taskId/tags', async (req) => {
-    const b = body(z.object({ tags: z.array(z.string().max(64)).max(8), version: z.number().int().min(1).optional() }).strict(), req);
-    return { task: teams.taskView(teams.adminSetTags(p(req).id, p(req).taskId!, normTaskTags(b.tags), b.version, actor(req))) };
+    const b = body(z.object({ tags: z.array(z.string().max(64)).max(64), version: z.number().int().min(1).optional() }).strict(), req);
+    return { task: teams.taskView(teams.adminSetTags(p(req).id, p(req).taskId!, b.tags, b.version, actor(req))) };
   });
   // The operator sets a task's "In short" (at most 280 characters of plain text; null or "" clears it), any status. Audited.
   api.put('/api/teams/:id/tasks/:taskId/short-summary', async (req) => {
     const b = body(z.object({ short_summary: z.string().max(SHORT_SUMMARY_MAX).nullable(), version: z.number().int().min(1).optional() }).strict(), req);
     return { task: teams.taskView(teams.adminSetShortSummary(p(req).id, p(req).taskId!, b.short_summary, b.version, actor(req))) };
+  });
+  // Reassign (one delivery model: nothing returns to open by itself): a task waiting on or started by its worker goes to another.
+  api.post('/api/teams/:id/tasks/:taskId/reassign', async (req) => {
+    const b = body(z.object({ agent_id: z.string().min(1).max(100) }).strict(), req);
+    return { task: teams.taskView(teams.adminReassign(p(req).id, p(req).taskId!, b.agent_id, actor(req))) };
   });
   // Lift a block (F-34): the task returns to the status it was blocked from.
   api.post('/api/teams/:id/tasks/:taskId/unblock', async (req) => {
@@ -371,7 +407,17 @@ export function registerTeams(api: FastifyInstance, d: TeamsDeps, actor: (r: Fas
     return { denied: true };
   });
   api.post('/api/teams/:id/plan-request', async (req) => {
-    const b = body(z.object({ note: z.string().trim().max(500).optional() }), req);
+    // With `scope` (the keys, frozen at send time) it is a refine request: `note` (what should change) is required, up to 2000 characters.
+    const b = body(z.object({
+      note: z.string().trim().max(2000).optional(), scope: z.array(z.string().max(60)).min(1).max(1000).optional(),
+      checks: z.object({ consistency: z.boolean().optional(), duplicates: z.boolean().optional(), missing_ac: z.boolean().optional() }).strict().optional(),
+    }).strict(), req);
+    if (b.scope) {
+      const checks = { consistency: true, duplicates: true, missing_ac: false, ...b.checks };
+      const r = teams.requestRefine(p(req).id, { note: b.note ?? '', keys: b.scope, checks }, routed(req, p(req).id));
+      return { team: teamOut(req, r.team), request_id: r.request_id };
+    }
+    if ((b.note?.length ?? 0) > 500 || b.checks) throw new KeyError('invalid_argument', 'A plan request holds a note of at most 500 characters; checks come with a scope.');
     return { team: teamOut(req, teams.requestPlan(p(req).id, b.note || null, routed(req, p(req).id))) };
   });
   api.get('/api/teams/:id/status', async (req) => {

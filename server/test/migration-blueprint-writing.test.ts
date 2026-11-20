@@ -10,7 +10,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { migrate } from '../src/db/db.js';
 import { buildApp } from '../src/app.js';
-import { ON_DEMAND_PLAYBOOKS, BP_RULE_COORDINATOR, BP_RULE_WORKER, HANDOFF_LINE } from '../src/teams/teams.js';
+import { ON_DEMAND_PLAYBOOKS, BP_RULE_COORDINATOR, BP_RULE_WORKER, HANDOFF_LINE, REFINE_LINE } from '../src/teams/teams.js';
 import { migrate0, V0_MIGRATIONS } from './fixtures/v0/db0.js';
 import { testConfig } from './hub.js';
 
@@ -24,7 +24,7 @@ vi.spyOn(console, 'warn').mockImplementation(() => {});
 
 const RULE = { coordinator: BP_RULE_COORDINATOR, worker: BP_RULE_WORKER } as const;
 /** The on-demand text before this change: the constant without the rule, and without the hand-off line 0107 added later. */
-const before0107 = (s: string) => s.replace(' ' + HANDOFF_LINE, '');
+const before0107 = (s: string) => s.replace(' ' + REFINE_LINE, '').replace(' ' + HANDOFF_LINE, '');
 const OLD = { coordinator: before0107(ON_DEMAND_PLAYBOOKS.coordinator!).replace(' ' + BP_RULE_COORDINATOR, ''), worker: before0107(ON_DEMAND_PLAYBOOKS.worker!).replace(' ' + BP_RULE_WORKER, '') };
 const BASE_ONLY = tmp('conclave-0102-base-');
 copyFileSync(join(MIGRATIONS, '0100_v1_baseline.sql'), join(BASE_ONLY, '0100_v1_baseline.sql'));

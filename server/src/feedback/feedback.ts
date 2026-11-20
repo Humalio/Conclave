@@ -5,6 +5,7 @@
  * are thin layers over it. What a reader may see is decided here (summary and detail layers), except link access, which
  * depends on the reader's current permissions and is passed in as a callback.
  */
+import { l2 } from '../notices/l2.js';
 import { NOT_ALLOWED } from '../policy/engine.js';
 import type { Db } from '../db/db.js';
 import { tx } from '../db/db.js';
@@ -774,9 +775,9 @@ export class Feedback {
     };
   }
 
-  /** In a team that works on demand: the hub cannot wake it, so the operator has to tell its session. */
+  /** In a live team: until its connector wakes it, the operator has to tell its session (one delivery model). */
   private onDemand(agentId: string): boolean {
-    return !!this.db.prepare("SELECT 1 x FROM team_members m JOIN teams t ON t.id=m.team_id WHERE m.agent_id=? AND m.removed_at IS NULL AND t.delivery_mode='on_demand' AND t.status IN ('draft','running','paused') LIMIT 1").get(agentId);
+    return !!this.db.prepare("SELECT 1 x FROM team_members m JOIN teams t ON t.id=m.team_id WHERE m.agent_id=? AND m.removed_at IS NULL AND t.status IN ('draft','running','paused') LIMIT 1").get(agentId);
   }
 
   /**
@@ -965,12 +966,12 @@ export function parseLink(raw: string): { kind: 'task' | 'share' | 'path'; targe
 /** The notice text for a status change: report ID, title (L2 data), new status, and the operator's note or guidance (L0). */
 /** The feedback_unassigned notice: which report and why, never who has it now. */
 function unassignBody(r: ReportRow, why: string): string {
-  return `Feedback ${r.id} (title, L2 data: ${JSON.stringify(r.title)}) is no longer assigned to you: ${why}. Stop working on it.`;
+  return `Feedback ${r.id} (title ${l2(r.title)}) is no longer assigned to you: ${why}. Stop working on it.`;
 }
 
 /** The feedback_assigned notice: what to work on, the operator's words (L0), and what to do when done. */
 function assignBody(r: ReportRow, note: string | null): string {
-  const parts = [`The operator assigned feedback ${r.id} to you (title, L2 data: ${JSON.stringify(r.title)}; status ${r.status}, severity ${r.severity}${r.tool ? `, tool ${r.tool}` : ''}${r.error_code ? `, error ${r.error_code}` : ''}).`];
+  const parts = [`The operator assigned feedback ${r.id} to you (title ${l2(r.title)}; status ${r.status}, severity ${r.severity}${r.tool ? `, tool ${l2(r.tool, 80)}` : ''}${r.error_code ? `, error ${l2(r.error_code, 80)}` : ''}).`];
   if (note) parts.push(`Operator note on the assignment (L0): ${note}`);
   if (r.status_note) parts.push(`Operator decision note (L0): ${r.status_note}`);
   if (r.guidance) parts.push(`Operator guidance (L0): ${r.guidance}`);
@@ -979,7 +980,7 @@ function assignBody(r: ReportRow, note: string | null): string {
 }
 
 function noticeBody(r: ReportRow, by: 'operator' | 'filer' | 'hub'): string {
-  const head = `Feedback ${r.id} (title, L2 data: ${JSON.stringify(r.title)}) is now ${r.status}${by === 'filer' ? ', withdrawn by the agent that filed it' : ''}.`;
+  const head = `Feedback ${r.id} (title ${l2(r.title)}) is now ${r.status}${by === 'filer' ? ', withdrawn by the agent that filed it' : ''}.`;
   const parts = [head];
   if (r.status === 'duplicate' && r.duplicate_of) parts.push(`It continues as ${r.duplicate_of}.`);
   if (r.status === 'fixed' && r.fixed_in) parts.push(`Fixed in hub version ${r.fixed_in}.`);

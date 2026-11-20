@@ -38,6 +38,16 @@ const team = (workers = 1) => {
   app.teams.start(t.id, admin);
   return { id: t.id, name: t.name, lead, workers: ws, all: [lead, ...ws] };
 };
+/** An enrolled PC (a connector pairing would give the same row and onboarding key): the id to render a checkout to. */
+const enrolledPc = async () => {
+  const add = await api('POST', '/pcs/add', { name: `host-pc-${++seq}` });
+  const nn = `n${Math.random().toString(36).slice(2)}${Math.random().toString(36).slice(2)}`.slice(0, 24).padEnd(20, 'x');
+  const from = `10.7.0.${(seq % 250) + 1}`;
+  const e = await fetch(`${base}/onboard/enrol`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-forwarded-for': from, 'x-forwarded-proto': 'https' }, body: JSON.stringify({ code: add.body.code, nonce: nn }) });
+  await fetch(`${base}/onboard/enrol/confirm`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-forwarded-for': from, 'x-forwarded-proto': 'https' }, body: JSON.stringify({ nonce: nn }) });
+  if (e.status !== 200) throw new Error('enrol ' + e.status);
+  return add.body.pc.id as string;
+};
 const none = { worktrees: [], unmerged_branches: [], uncommitted_files: [], build_output: [], scratch: [], processes: [] };
 const clean = { integration_branch: 'integration/core', integration_head: 'a'.repeat(40), merge_commits: [], worktrees_left: 0, clean: true, leftover_check: none };
 const handIn = (agentId: string, url?: string) => {
@@ -155,31 +165,31 @@ describe('the allowlist at checkout_handout and render', () => {
   });
   it('render refuses once the operator takes the host off the list, and goes on when it is back', async () => {
     setHosts(['github.com', 'git.example.org']);
+    const pc = await enrolledPc();
     const t = team(1);
     const c = app.checkouts.start(t.id, admin);
     handIn(t.lead, 'git@git.example.org:team/core.git');
     handIn(t.workers[0]!, 'https://github.com/team/core.git');
     expect(app.checkouts.checkout(c.id)!.status).toBe('ready');
     setHosts(['GitHub.com']);
-    const r = await api('POST', `/checkouts/${c.id}/render`, { target: 'other_pc', new_pc_name: `host-pc-${seq}` });
+    const r = await api('POST', `/checkouts/${c.id}/render`, { target: 'other_pc', machine_id: pc });
     expect(r.status).toBe(400);
     expect(r.body).toMatchObject({ error: 'repo_host_not_allowed', agents: [t.lead], hosts: ['git.example.org'] });
     expect(JSON.parse(auditOf('checkout.repo_host_refused').at(-1)!.details)).toEqual({ at: 'render', agents: [t.lead], hosts: ['git.example.org'] });
     expect(app.checkouts.checkout(c.id)!.status).toBe('ready'); // nothing rendered, no PC or key created
-    expect(app.keys.machines().some((m) => m.name === `host-pc-${seq}`)).toBe(false);
     setHosts(['github.com', 'git.example.org']);
-    const ok = await api('POST', `/checkouts/${c.id}/render`, { target: 'other_pc', new_pc_name: `host-pc-${seq}` });
+    const ok = await api('POST', `/checkouts/${c.id}/render`, { target: 'other_pc', machine_id: pc });
     expect(ok.status, JSON.stringify(ok.body)).toBe(200);
     expect(app.checkouts.checkout(c.id)!.status).toBe('rendered');
     // A rendered checkout rendered again checks the list as it stands then.
     setHosts([]);
-    expect((await api('POST', `/checkouts/${c.id}/render`, { target: 'other_pc', new_pc_name: `host-pc-${seq}` })).body.error).toBe('repo_host_not_allowed');
+    expect((await api('POST', `/checkouts/${c.id}/render`, { target: 'other_pc', machine_id: pc })).body.error).toBe('repo_host_not_allowed');
     setHosts(['github.com']);
     app.checkouts.cancel(c.id, null, admin);
     // Not ready or rendered: render answers with the state, not the allowlist, and audits nothing.
     setHosts([]);
     const n = auditOf('checkout.repo_host_refused').length;
-    expect((await api('POST', `/checkouts/${c.id}/render`, { target: 'other_pc', new_pc_name: `host-pc-${seq}` })).body.error).toBe('invalid_state');
+    expect((await api('POST', `/checkouts/${c.id}/render`, { target: 'other_pc', machine_id: pc })).body.error).toBe('invalid_state');
     expect(auditOf('checkout.repo_host_refused').length).toBe(n);
     setHosts(['github.com']);
   });

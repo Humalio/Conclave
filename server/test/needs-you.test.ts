@@ -185,8 +185,12 @@ describe('For awareness and dismissal', () => {
   it('missed milestones and stall warnings are off until switched on, and only the admin switches them', async () => {
     const res = await call(admin, 'POST', `/projects/${cnv}/ops`, { version: ver(cnv), ops: [{ op: 'upsert', kind: 'milestone', key: 'M1', status: 'missed' }] });
     expect(res.status).toBe(200);
-    const old = Date.now() - 3 * 3600_000;
-    app.db.prepare('UPDATE team_members SET joined_at=?, last_work_next_at=NULL WHERE team_id=? AND agent_id=?').run(old, one, worker.id);
+    // One delivery model: a member stalls only while it holds started work past its check-in time.
+    const k = app.teams.create_task(who(coord), { team_id: one, title: 'Stalls', operator_request: { source: 'test' } });
+    app.teams.assign(who(coord), { task_id: k.id, agent_id: worker.id });
+    app.teams.start_task(who(worker), k.id);
+    app.db.prepare('UPDATE tasks SET lease_expires_at=? WHERE id=?').run(Date.now() - 60_000, k.id);
+    app.db.prepare('UPDATE task_turns SET due_at=? WHERE task_id=? AND closed_at IS NULL').run(Date.now() - 60_000, k.id);
     const kinds = async (s: S) => (await needs(s)).awareness.items.map((i: any) => i.kind);
     expect(await kinds(admin)).not.toContain('missed_milestone');
     expect(await kinds(admin)).not.toContain('stalled');
@@ -236,7 +240,7 @@ describe('For awareness and dismissal', () => {
     const stall = (await needs(dana)).awareness.items.find((i: any) => i.kind === 'stalled');
     expect((await call(dana, 'POST', '/needs-you/dismiss', { record: stall.record, episode: stall.episode })).status).toBe(200);
     expect((await needs(dana)).awareness.items.some((i: any) => i.kind === 'stalled')).toBe(false);
-    app.db.prepare('UPDATE team_members SET last_work_next_at=? WHERE team_id=? AND agent_id=?').run(Date.now() - 2 * 3600_000, one, worker.id);
+    app.db.prepare('UPDATE team_members SET last_work_next_at=? WHERE team_id=? AND agent_id=?').run(Date.now() + 1000, one, worker.id); // news, but the work is still overdue
     expect((await needs(dana)).awareness.items.find((i: any) => i.kind === 'stalled')).toMatchObject({ record: stall.record });
   });
 });

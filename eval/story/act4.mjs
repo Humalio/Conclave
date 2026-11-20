@@ -10,7 +10,7 @@ const nonce = () => `story${randomBytes(12).toString('hex')}`;
 const LAB_PROJECT = 'The Echo Case';
 const labRequest = (name, extra = {}) => ({
   kind: 'new_team', project: { name: LAB_PROJECT, existing: true },
-  team: { name, goal: 'Run the independent capture (CAP-015) on Q-9 receivers for the Echo Case.', delivery_mode: 'on_demand' },
+  team: { name, goal: 'Run the independent capture (CAP-015) on Q-9 receivers for the Echo Case.' },
   roles: [
     { name: 'coordinator', team_role: 'coordinator', count: 1, job: 'Runs the capture and reports to The Annex.', folders: [{ path: `${V}/Captures`, access: 'write' }, { path: `${V}/The Annex`, access: 'read' }] },
     { name: 'tester', team_role: 'worker', count: 1, job: 'Runs the Q-9 receiver and logs every transmission.', folders: [{ path: `${V}/Captures`, access: 'write' }] },
@@ -114,7 +114,7 @@ export default [
     const a0 = (await B.ok('task_create', { team_id: team, title: 'Spare clamp set: receiving inspection', claimable: true, tags: ['Inspection', 'clamps'] })).task;
     c.eq([a0.status, a0.tags], ['backlog', ['inspection', 'clamps']], 'a coordinator\'s proposal lands in the backlog, filed under the tags it chose');
     // The creator refiles it while it waits; the tag filter finds it for agents and for the operator.
-    const a = (await B.ok('task_update', { task_id: a0.id, version: a0.version, tags: ['inspection', 'clamps', 'receiving'] })).task;
+    const a = (await B.ok('task_update', { task_id: a0.id, version: a0.version, tags: ['clamps', 'receiving'] })).task;
     c.expect((await D.ok('task_list', { team_id: team, tag: 'receiving' })).tasks.map((t) => t.id).join() === a.id, 'task_list filters by tag');
     await B.no('task_assign', { task_id: a.id, agent_id: c.A('Dario') }, 'invalid_state');
     await D.no('task_claim', { task_id: a.id, version: a.version }, 'invalid_state');
@@ -130,8 +130,8 @@ export default [
     c.eq((await c.op.post(`/api/teams/${team}/tasks/${a.id}/accept`, { note: 'Yes, before the clamps go in.' })).task.status, 'open', 'the operator accepts it');
     await B.no('task_update', { task_id: a.id, version: a2.version + 1, tags: ['other'] }, 'invalid_state');
     // Accepted, its tags are the operator's to change.
-    const a3 = (await c.op.put(`/api/teams/${team}/tasks/${a.id}/tags`, { tags: ['inspection', 'clamps', 'm4'], version: a2.version + 1 })).task;
-    c.eq(a3.tags, ['inspection', 'clamps', 'm4'], 'the operator refiles an accepted task');
+    const a3 = (await c.op.put(`/api/teams/${team}/tasks/${a.id}/tags`, { tags: ['clamps', 'm4'], version: a2.version + 1 })).task;
+    c.eq(a3.tags, ['clamps', 'm4'], 'the operator refiles an accepted task');
     await D.ok('task_claim', { task_id: a.id, version: a3.version });
     const x = (await B.ok('task_create', { team_id: team, title: 'Repaint the dish frames' })).task;
     c.eq((await c.op.post(`/api/teams/${team}/tasks/${x.id}/discard`, { note: 'Not this quarter.' })).task.status, 'discarded', 'the operator discards one; it stays in the history');
@@ -150,7 +150,9 @@ export default [
     const compute = { access: 'ssh lab-west (the alias is in your ~/.ssh/config)', timezone: 'Europe/Lisbon', windows: [{ days: ['mon', 'tue', 'wed', 'thu', 'fri'], from: '20:00', to: '07:00' }], memory_gb: 128, cpus: 32, gpu: 'two 48 GB cards', notes: 'Clear /scratch when you finish.', teams: [team] };
     const pv = await c.op.post('/api/hardware/preview', { ...compute, pc_id: pc });
     c.expect(pv.text.includes('Mon–Fri 20:00–07:00'), 'the preview shows the windows in words');
-    const reg = await c.op.put(`/api/hardware/${pc}`, compute);
+    // The hub enforces opening hours, so a replay outside Mon–Fri 20:00–07:00 Lisbon time could not hold the machine.
+    // The operator registers it open at any time; the night window above is only previewed.
+    const reg = await c.op.put(`/api/hardware/${pc}`, { ...compute, windows: [] });
     c.expect(reg.machines.some((m) => m.id === pc), 'pc-lab-west is offered for compute');
     const [t1, t2] = [(await B.ok('task_create', { team_id: team, title: 'Simulate the dish surge at 3 MV' })).task, (await B.ok('task_create', { team_id: team, title: 'Fit the power budget model' })).task];
     // Relay Engineering takes proposals into its backlog since 4.2d: the operator accepts both first.
@@ -249,16 +251,19 @@ export default [
     await c.op.post(`/api/teams/${c.T('fp')}/pause`);
   }),
 
-  s('4.11', 'A message to a paused polling team is held', async (c) => {
+  s('4.11', 'A message to a member of a paused team arrives through message_read; work_next says paused', async (c) => {
     await c.as('Orla').ok('message_send', { to: c.A('Teodor'), body: 'When we resume: rerun the power fit with the Q-9 receivers.', client_msg_id: 'orla-teodor-resume' });
     let w;
     for (let i = 0; i < 10; i++) {
       w = await c.as('Teodor').ok('work_next', { wait_seconds: 0 });
       if (!w.item) break;
-      c.expect(!JSON.stringify(w.item).includes('rerun the power fit'), 'the message must be held while paused');
+      c.expect(!JSON.stringify(w.item).includes('rerun the power fit'), 'no message is queued as a work item');
       await c.as('Teodor').ok('work_ack', { item_id: w.item.item_id });
     }
     c.eq(w.status, 'paused', 'work_next says paused');
+    const read = await c.as('Teodor').ok('message_read', { wait_seconds: 0 });
+    c.expect(JSON.stringify(read).includes('rerun the power fit'), 'the message arrives through message_read while paused');
+    if (read.next_cursor) await c.as('Teodor').ok('message_ack', { cursor: read.next_cursor });
   }, { rows: ['teams'] }),
 
   s('4.12', 'Lockdown drill: writes off', async (c) => {
@@ -290,15 +295,15 @@ export default [
     c.expect(/approved/.test(JSON.stringify(st)), 'Vesna\'s grant survives');
     await c.as('Vesna').ok('file_read', { path: `${V}/Classified/Director/What answers us.md` });
     await c.as('Lusa').ok('session_whoami', {});
-    c.eq((await c.as('Teodor').ok('work_next', { wait_seconds: 0 })).status, 'paused', 'the held message is still held');
+    c.eq((await c.as('Teodor').ok('work_next', { wait_seconds: 0 })).status, 'paused', 'work_next still says paused');
   }, { rows: ['policy', 'console-lockdown'] }),
 
-  s('4.14', 'Lockdown off, Signals Lab resumes; the held message arrives once', async (c) => {
+  s('4.14', 'Lockdown off, Signals Lab resumes; the message read while paused does not come again', async (c) => {
     await c.op.post('/api/lockdown', { scope: 'writes', on: false });
     await c.op.post(`/api/teams/${c.T('fp')}/resume`);
     const seen = [];
     for (let i = 0; i < 10; i++) { const w = await c.as('Teodor').ok('work_next', { wait_seconds: 0 }); if (!w.item) break; seen.push(JSON.stringify(w.item)); await c.as('Teodor').ok('work_ack', { item_id: w.item.item_id }); }
-    c.eq(seen.filter((x) => x.includes('rerun the power fit')).length, 1, 'the held message arrives once');
+    c.eq(seen.filter((x) => x.includes('rerun the power fit')).length, 0, 'the message is not delivered a second time');
   }, { rows: ['teams'] }),
 
   s('4.15', 'Dunmore proposes a recruit; it waits for the operator', async (c) => {
@@ -374,6 +379,9 @@ export default [
     const held = JSON.stringify(await c.as(coord).ok('team_info', { team_id: c.T('lab') }));
     c.expect(held.includes('"paused_until":' + until) && held.includes('usage limit'), 'team_info shows the end time and the reason');
     await c.as(coord).ok('team_resume', { team_id: c.T('lab') });
+    // Reset (connector design 3c): the coordinator resets a member of its own team; the order waits for that PC (with no PC, the person's steps).
+    const reset = JSON.stringify(await c.as(coord).ok('agent_reset', { team_id: c.T('lab'), agent_id: c.A(c.S.labAgents[1]) }));
+    c.expect(/"order":"pca_|"by_hand":true/.test(reset), "a coordinator resets its own team's agent");
     await setPlan(c, 'lab', coord);
     await c.as(coord).ok('task_create', { team_id: c.T('lab'), title: 'CAP-015 block A', description: 'Q-9 receiver Q-1, 200 transmissions at power 0.25, log checks at 100 and 200.', refs: ['NC-R1', 'NC-M1'].map(bpKey) });
   }, { rows: ['onboarding'] }),

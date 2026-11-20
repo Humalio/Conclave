@@ -3,7 +3,7 @@
 #
 #   deploy/setup.sh                                   # asks for anything not given
 #   deploy/setup.sh --vault ~/Notes --mode local
-#   deploy/setup.sh --demo --mode lan --host 192.168.1.20
+#   deploy/setup.sh --demo --mode lan --host hub.example.internal
 #   deploy/setup.sh --vault /srv/notes --mode domain --host hub.example.com --email you@example.com
 #
 # Modes

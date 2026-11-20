@@ -42,34 +42,28 @@ const CHAT_WARNING = 'Do not paste this prompt, or the key it gives, into a chat
 export interface PickupPrompt {
   hubUrl: string; setupSha256: string | null; code: string; expiresAt: number; pc: string; sessionVar: string;
   agent: string; client: PromptClient; folder?: string | null; tools: string; reason: 'new' | 'rotated' | 'reissued';
+  /** Through a registered relay (docs/relay.md): hubUrl is then the relay's origin, and the prompt names its CA and release base. */
+  relay?: { name: string; origin: string; ca_sha256: string; release_base: string };
 }
 
 /** The prompt for a key with a known PC: the pickup code and the steps, never the key, never session_login. */
 export function pickupPrompt(p: PickupPrompt): string {
   const what = p.reason === 'new' ? 'a new Conclave session key' : p.reason === 'rotated' ? 'the rotated Conclave session key' : 'a fresh Conclave session key';
-  const restart = p.client === 'codex'
-    ? [`Then restart the Codex bridge on ${p.pc} so it reads the new key.`]
-    : p.client === 'claude_code'
-      ? [`The agent's Claude Code helper reads the new key at its next login. If its session shows no hub tools, run /mcp and reconnect agent-hub.`]
-      : [`If the agent runs in Codex, restart the Codex bridge on ${p.pc}.`, `If it runs in Claude Code, its helper reads the new key at its next login; if the session shows no hub tools, run /mcp and reconnect agent-hub.`];
+  const restart = `Then restart the agent's client on ${p.pc}, so its session starts again with the new key. If the session shows no hub tools, run \`conclave check\` in the agent's folder${p.folder ? ` (${p.folder})` : ''} and report its output.`;
   const expires = new Date(p.expiresAt).toISOString().slice(0, 16).replace('T', ' ') + ' UTC';
   return [
     `Install ${what} for the agent "${p.agent}" on this PC (${p.pc}).`,
     '',
     `Hub: ${p.hubUrl}`,
-    `setup.mjs SHA-256: ${p.setupSha256 ?? 'unknown: ask the administrator'}`,
+    ...(p.relay ? [`Through relay "${p.relay.name}". Relay CA certificate SHA-256: ${p.relay.ca_sha256}`, `Release base (signed connector updates): ${p.relay.release_base}`] : []),
     `Key pickup code (single use, works only on ${p.pc}, until ${expires}): ${p.code}`,
-    `The key goes into ~/.config/conclave/keys.env as ${p.sessionVar}.`,
+    `The Conclave connector on ${p.pc} keeps the key in its own key file, for the agent's entry ${p.sessionVar}. The agent never reads it.`,
     '',
     'Rules: never print, log or commit the key or this code; never write the key into a file inside a repository. ' + CHAT_WARNING,
     '',
     'Steps:',
-    `1. If ~/.config/conclave/setup.mjs is missing or its SHA-256 differs, download ${p.hubUrl}/onboard/client/setup.mjs there and check the hash above.`,
-    '2. Write the code above into ~/.config/conclave/onboarding/key-code (one line, nothing else).',
-    '3. Run: node ~/.config/conclave/setup.mjs key',
-    `   It swaps the code for the key, writes it into keys.env as ${p.sessionVar} and deletes the code file. It prints only the variable name.`,
-    `4. Set ${p.sessionVar} on ${p.pc}: check that the agent's .agent-hub.json${p.folder ? ` (in ${p.folder})` : ''} names "session_var": "${p.sessionVar}"; if it names another variable, change it to ${p.sessionVar}.`,
-    ...restart.map((l, i) => `${i ? '   ' : '5. '}${l}`),
+    `1. Give the code to the connector on ${p.pc} as docs/connector.md describes ("Collecting a rotated key"). It swaps the code for the key and stores it; nothing prints it.`,
+    `2. ${restart}`,
     '',
     p.tools,
   ].join('\n');
@@ -83,7 +77,7 @@ export function secretPrompt(p: { secret: string; agent: string; tools: string; 
     '',
     `Key: ${p.secret}`,
     '',
-    'Put it into ~/.config/conclave/keys.env on the agent\'s PC, under the variable its .agent-hub.json names as "session_var", then restart the agent\'s client. A client without a headers helper or bridge calls session_login with it first.',
+    'Give it to the Conclave connector on the agent\'s PC (docs/connector.md: it keeps the key in its own key file), then restart the agent\'s client. The agent itself never reads the key or calls session_login.',
     'Never print, log or commit the key, and never write it into a file inside a repository. ' + CHAT_WARNING,
     '',
     p.tools,

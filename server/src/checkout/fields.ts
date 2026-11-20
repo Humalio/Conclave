@@ -12,11 +12,6 @@ export type Provider = typeof PROVIDERS[number];
 export const PERMISSIONS = ['plan', 'default', 'acceptEdits', 'bypassPermissions'] as const;
 export type Permission = typeof PERMISSIONS[number];
 
-/**
- * Codex (docs/checkout.md §6 step 5, §9 F4): prepared, unverified until the F4 spike (R5). Render offers only these
- * providers and refuses `codex` with `codex_unverified`, so no checkout can reach a client that nobody has run.
- */
-export const OFFERED_PROVIDERS: readonly Provider[] = ['claude_code'];
 export type CodexApproval = 'on-request' | 'never';
 export type CodexSandbox = 'read-only' | 'workspace-write';
 export interface CodexPermission { level: 'ask' | 'standard' | 'auto'; approval_policy: CodexApproval; sandbox_mode: CodexSandbox }

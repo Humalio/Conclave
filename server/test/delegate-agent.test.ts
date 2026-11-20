@@ -140,7 +140,7 @@ const pcWithKey = async () => {
 
 beforeAll(async () => {
   const dir = mkdtempSync(join(tmpdir(), 'ahdlg-'));
-  mkdirSync(join(dir, 'vault', '05 Papers', 'P1'), { recursive: true });
+  mkdirSync(join(dir, 'vault', 'Papers', 'P1'), { recursive: true });
   const client = join(dir, 'client');
   mkdirSync(client);
   writeFileSync(join(client, 'agent-hub-headers.mjs'), 'export const helper = 1;\n');
@@ -189,7 +189,7 @@ describe('Delegate to an enrolled PC', () => {
     expect(pr.status, JSON.stringify(pr.body)).toBe(200);
     expect(codeIn(pr.body.prompt)).toBeNull(); // an enrolled PC: no enrolment code
     noSecret(pr.body);
-    expect(pr.body.needs_pc_confirmation).toBe(false);
+    expect(pr.body.needs_pc_confirmation).toBeUndefined();
     expect(app.checkouts.checkout(id)!.prompt_opened_at).not.toBeNull();
     // The admin's list shows the step, never the prompt.
     const list = await api('GET', '/delegations');
@@ -222,7 +222,7 @@ describe('Delegate to an enrolled PC', () => {
     // Take back: the key it runs with and its tokens are revoked at once, and the ceiling ends.
     const tb = await api('POST', `/delegations/${id}/take-back`, {});
     expect(tb.status, JSON.stringify(tb.body)).toBe(200);
-    expect(tb.body.pc_retired).toBe(false); // an already-enrolled PC is never retired by default
+    expect(tb.body.pc_retired).toBeUndefined();
     expect(app.keys.credential(credOf(nk).id)!.status).toBe('revoked');
     expect(code(() => app.keys.resolveToken(appCred(pc.key), tok))).not.toBe('ok');
     expect(app.keys.credential(tb.body.new_key_id)!.bound_machine_id).toBe(s.pc);
@@ -237,70 +237,21 @@ describe('Delegate to an enrolled PC', () => {
 });
 
 describe('Delegate to a new PC', () => {
-  it('a 30-minute code from opening; approve-pc waits for the member\'s yes; Take back retires the PC', async () => {
+  it('is refused: the person adds the PC with the connector first; no PC, key or code is created', async () => {
     const s = await onboarded();
     const lena = await member(s.teamId);
-    const name = `lena-laptop-${seq}`;
-    const d = await api('POST', `/agents/${s.dev}/delegate`, { user_id: lena.id, new_pc_name: name });
-    expect(d.status, JSON.stringify(d.body)).toBe(200);
-    const id = d.body.delegation.id as string;
-    handout(s.dev);
-    const t0 = Date.now();
-    const pr = await call(lena.s, 'POST', `/me/delegations/${id}/prompt`);
-    expect(pr.status, JSON.stringify(pr.body)).toBe(200);
-    const c = codeIn(pr.body.prompt);
-    expect(c).not.toBeNull();
-    expect(pr.body.code_expires_at).toBeGreaterThanOrEqual(t0 + CODE_TTL_MS - 5000);
-    expect(pr.body.code_expires_at).toBeLessThanOrEqual(Date.now() + CODE_TTL_MS);
-    expect(CODE_TTL_MS).toBe(30 * 60_000);
-    const e = await enrol(c!, '10.77.1.40');
-    expect(e.status).toBe(200);
-    // Before the member says it is theirs, the admin cannot approve it.
-    const a0 = await api('POST', `/checkouts/${id}/approve-pc`);
-    expect(a0.status).toBe(409);
-    expect(a0.body.error).toBe('pc_not_confirmed');
-    const row = (await call(lena.s, 'GET', '/me/delegations')).body.delegations[0];
-    expect(row.confirm_pc).toMatchObject({ name, enrolled_from: '10.77.1.40' });
-    // Re-opening the prompt after the PC enrolled would break the restore: refused.
-    expect((await call(lena.s, 'POST', `/me/delegations/${id}/prompt`)).body.error).toBe('prompt_in_use');
-    const yes = await call(lena.s, 'POST', `/me/delegations/${id}/pc`, { mine: true });
-    expect(yes.status, JSON.stringify(yes.body)).toBe(200);
-    expect(auditOf('checkout.pc_confirmed', id)).toHaveLength(1);
-    expect((await call(lena.s, 'POST', `/me/delegations/${id}/pc`, { mine: true })).status).toBe(409); // answered once
-    const a = await api('POST', `/checkouts/${id}/approve-pc`);
-    expect(a.status, JSON.stringify(a.body)).toBe(200);
-    const req = app.checkouts.checkout(id)!.request_id!;
-    const got = await collect(e.key, req);
-    const pc = app.keys.machines().find((m) => m.name === name)!;
-    expect(app.keys.credential(credOf(got[0]!.secret).id)!.bound_machine_id).toBe(pc.id);
-    const h = app.checkouts.handouts(id)[0]!;
-    app.checkouts.consume(h.id, h.new_credential_id, sys);
-    const tb = await api('POST', `/delegations/${id}/take-back`, {});
-    expect(tb.status, JSON.stringify(tb.body)).toBe(200);
-    expect(tb.body.pc_retired).toBe(true); // enrolled for this delegation, no other key there
-    expect(app.keys.machine(pc.id)!.status).toBe('retired');
-    expect(app.keys.credential(credOf(got[0]!.secret).id)!.status).toBe('revoked');
-    expect(code(() => appCred(e.key))).not.toBe('ok'); // the PC's app key is gone too
-  });
-  it('a member who says No raises an alert and the PC stays unapproved', async () => {
-    const s = await onboarded();
-    const lena = await member(s.teamId);
-    const d = await api('POST', `/agents/${s.dev}/delegate`, { user_id: lena.id, new_pc_name: `not-mine-${seq}` });
-    const id = d.body.delegation.id as string;
-    handout(s.dev);
-    const pr = await call(lena.s, 'POST', `/me/delegations/${id}/prompt`);
-    await enrol(codeIn(pr.body.prompt)!);
-    expect((await call(lena.s, 'POST', `/me/delegations/${id}/pc`, { mine: false })).status).toBe(200);
-    expect((await api('POST', `/checkouts/${id}/approve-pc`)).body.error).toBe('pc_not_confirmed');
-    expect(app.db.prepare("SELECT COUNT(*) n FROM security_alerts WHERE type='delegate_pc_refused' AND subject=?").get(id)).toMatchObject({ n: 1 });
-    expect((await api('POST', `/delegations/${id}/take-back`, {})).status).toBe(200);
-    expect(away(s.teamId, s.dev)).toBeNull();
+    const machines = app.keys.machines().length;
+    const d = await api('POST', `/agents/${s.dev}/delegate`, { user_id: lena.id, new_pc_name: `lena-laptop-${seq}` });
+    expect(d.status).toBe(409);
+    expect(d.body).toMatchObject({ error: 'invalid_state', reason: 'add_pc_first', message: expect.stringMatching(/Add this PC with the connector first.*approve a destination/) });
+    expect(app.keys.machines().length).toBe(machines);
+    expect((await api('POST', `/agents/${s.dev}/delegate`, { user_id: lena.id })).status).toBe(400);
   });
 });
 
 describe('End to end over MCP: the delegated agent resumes on the PC of the member, and Take back shuts out both keys', () => {
   // The resume check on a throwaway hub: every code and key is issued and used in memory by the test, nothing printed or written.
-  for (const path of ['an enrolled PC', 'a new PC'] as const) {
+  for (const path of ['an enrolled PC'] as const) {
     it(`${path}: delegate, open the prompt, restore, checkout_resume, then Take back`, async () => {
       const s = await onboarded();
       const lena = await member(s.teamId);
@@ -355,64 +306,23 @@ describe('End to end over MCP: the delegated agent resumes on the PC of the memb
       expect((await mcpLogin(pcKey, got[0]!.secret)).ok).toBe(false);
       expect((await mcpLogin(s.key, s.devSecret)).ok).toBe(false);
       expect(app.keys.credential(tb.body.new_key_id)!.status).not.toBe('revoked');
-      expect(tb.body.pc_retired).toBe(!known);
+      expect(tb.body.pc_retired).toBeUndefined();
       noSecret(tb.body);
     });
   }
 });
 
-describe('Take back with retire_pc: a refused retire changes nothing', () => {
-  it('retire_pc on a PC that was already enrolled is refused before anything is revoked', async () => {
+describe('Take back takes no options', () => {
+  it('retire_pc is refused: a PC is never enrolled by a delegation, so there is nothing to retire', async () => {
     const s = await onboarded();
     const lena = await member(s.teamId);
     const pc = await pcWithKey();
     const id = (await api('POST', `/agents/${s.dev}/delegate`, { user_id: lena.id, machine_id: pc.id })).body.delegation.id as string;
     handout(s.dev);
-    const cred = app.teams.members(s.teamId).find((m) => m.agent_id === s.dev)!.credential_id;
-    const r = await api('POST', `/delegations/${id}/take-back`, { retire_pc: true });
-    expect(r.body.error).toBe('invalid_argument');
-    expect(r.body.message).toContain('Nothing was taken back');
-    // Nothing changed: the delegation stands, the agent is still away, its key is untouched.
+    expect((await api('POST', `/delegations/${id}/take-back`, { retire_pc: true })).status).toBe(400);
     expect(app.checkouts.checkout(id)).toMatchObject({ status: 'ready', released_at: null });
-    expect(away(s.teamId, s.dev)).not.toBeNull();
-    expect(app.keys.credential(cred)!.status).not.toBe('revoked');
     expect(auditOf('checkout.take_back', id)).toHaveLength(0);
-    // Without retire_pc it goes through.
     expect((await api('POST', `/delegations/${id}/take-back`, {})).status).toBe(200);
-  });
-  it('retire_pc on a new PC that holds another agent key is refused before the delegated key is revoked', async () => {
-    const s = await onboarded();
-    const lena = await member(s.teamId);
-    const name = `shared-pc-${seq}`;
-    const id = (await api('POST', `/agents/${s.dev}/delegate`, { user_id: lena.id, new_pc_name: name })).body.delegation.id as string;
-    handout(s.dev);
-    const pr = await call(lena.s, 'POST', `/me/delegations/${id}/prompt`);
-    const e = await enrol(codeIn(pr.body.prompt)!);
-    expect((await call(lena.s, 'POST', `/me/delegations/${id}/pc`, { mine: true })).status).toBe(200);
-    expect((await api('POST', `/checkouts/${id}/approve-pc`)).status).toBe(200);
-    const got = await collect(e.key, app.checkouts.checkout(id)!.request_id!);
-    const h = app.checkouts.handouts(id)[0]!;
-    app.checkouts.consume(h.id, h.new_credential_id, sys);
-    expect(app.checkouts.checkout(id)!.status).toBe('restored');
-    // The lead's key is moved onto the same PC: that PC now holds another agent's key.
-    const pcRow = app.keys.machines().find((m) => m.name === name)!;
-    const leadCred = app.teams.members(s.teamId).find((m) => m.agent_id === s.lead)!.credential_id;
-    app.keys.setBinding(leadCred, pcRow.id, sys);
-    const delegated = credOf(got[0]!.secret).id;
-    const r = await api('POST', `/delegations/${id}/take-back`, { retire_pc: true });
-    expect(r.body.error).toBe('invalid_state');
-    expect(r.body.message).toContain('Nothing was taken back');
-    // Nothing changed: still restored and standing, the delegated key live, the PC active.
-    expect(app.checkouts.checkout(id)).toMatchObject({ status: 'restored', released_at: null });
-    expect(app.keys.credential(delegated)!.status).not.toBe('revoked');
-    expect(app.keys.machine(pcRow.id)!.status).toBe('active');
-    expect(auditOf('checkout.take_back', id)).toHaveLength(0);
-    // Without retire_pc: taken back, the PC kept because another agent's key is there.
-    const ok2 = await api('POST', `/delegations/${id}/take-back`, {});
-    expect(ok2.status, JSON.stringify(ok2.body)).toBe(200);
-    expect(ok2.body.pc_retired).toBe(false);
-    expect(app.keys.credential(delegated)!.status).toBe('revoked');
-    expect(app.keys.machine(pcRow.id)!.status).toBe('active');
   });
 });
 
@@ -466,13 +376,13 @@ describe('Away routing and contributor mode in tasks', () => {
     const mk = (claimable = false) => app.teams.create_task(lead, { team_id: s.teamId, title: `Task ${++seq}`, claimable, operator_request: { source: 'test' } });
     const d = await api('POST', `/agents/${s.dev}/delegate`, { user_id: lena.id, machine_id: pc.id });
     const id = d.body.delegation.id as string;
-    // The dev holds a task whose lease has passed when it goes away: the lapsed sweep leaves it alone.
+    // The dev holds a started task past its check-in time when it goes away: the overdue sweep leaves it alone.
     const held = mk();
     app.teams.assign(lead, { task_id: held.id, agent_id: s.dev });
     app.db.prepare("UPDATE tasks SET status='in_progress', lease_expires_at=? WHERE id=?").run(Date.now() - 1000, held.id);
     handout(s.dev);
-    const turns = (app.teams as unknown as { turns: { sweep(now?: number): { lapsed: { agent_id: string }[]; overdue: { id: string }[] } } }).turns;
-    expect(turns.sweep().lapsed.map((x) => x.agent_id)).not.toContain(s.dev);
+    const turns = (app.teams as unknown as { turns: { sweep(now?: number): { overdue: { id: string }[] } } }).turns;
+    expect(turns.sweep().overdue.map((x) => x.id)).not.toContain(held.id);
     expect(app.teams.task(held.id)!.assignee_agent_id).toBe(s.dev); // it keeps its holder
     expect(code(() => app.teams.assign(lead, { task_id: mk().id, agent_id: s.dev }))).toBe('agent_away');
     const open = mk(true);
@@ -536,7 +446,7 @@ describe('Contributor mode in the vault and rooms', () => {
     const s = await onboarded();
     const lena = await member(s.teamId);
     const pc = await pcWithKey();
-    const drafts = '/05 Papers/P1/contrib/Dev/';
+    const drafts = '/Papers/P1/contrib/Dev/';
     const d = await api('POST', `/agents/${s.dev}/delegate`, { user_id: lena.id, machine_id: pc.id, drafts_folder: drafts });
     expect(d.status, JSON.stringify(d.body)).toBe(200);
     const id = d.body.delegation.id as string;
@@ -550,7 +460,7 @@ describe('Contributor mode in the vault and rooms', () => {
     const v = `/${app.vault.alias}`;
     expect(ownerAllows(cap, 'fs.create', `path:${v}${drafts}note.md`)).toBe(true);
     expect(ownerAllows(cap, 'fs.read', `path:${v}${drafts}note.md`)).toBe(true);
-    expect(ownerAllows(cap, 'fs.create', `path:${v}/05 Papers/P1/paper.md`)).toBe(false);
+    expect(ownerAllows(cap, 'fs.create', `path:${v}/Papers/P1/paper.md`)).toBe(false);
     const room = (app.db.prepare('SELECT room_id r FROM teams WHERE id=?').get(s.teamId) as { r: string | null }).r;
     if (room) {
       expect(ownerAllows(cap, 'room.read_history', `room:${room}`)).toBe(true);

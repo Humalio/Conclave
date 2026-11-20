@@ -29,7 +29,9 @@ import type { BpRouting } from './bpRouting.js';
 import { Keywords } from '../teams/keywords.js';
 import { registerBlueprintViewsApi } from './blueprintViewsApi.js';
 
-export interface BlueprintApiDeps { db: Db; blueprint: Blueprint; routing?: Routing; bpRouting?: BpRouting; sources?: Sources; meetings?: Meetings }
+export interface BlueprintApiDeps { db: Db; blueprint: Blueprint; teams?: Teams; routing?: Routing; bpRouting?: BpRouting; sources?: Sources; meetings?: Meetings }
+
+import type { Teams } from '../teams/teams.js';
 
 const SETTINGS_KEY = 'blueprint_limits';
 
@@ -193,6 +195,18 @@ export function registerBlueprintApi(api: FastifyInstance, d: BlueprintApiDeps, 
     if (keywords) setKw(req, id, keywords);
     return { project: projectOut(p) };
   });
+  // The project's fixed task-tag list (Project settings, Tags; admin only): the list with the tags its tasks carry, a preview
+  // of a list and map that changes nothing, and the save that runs the map over every task (docs/specification.md, "Task tags").
+  const tagBody = z.object({ tags: z.array(z.object({ tag: z.string().max(64).optional(), name: z.string().max(64).optional() }).strict()).max(50), map: z.record(z.string().max(64), z.string().max(64).nullable()).optional() }).strict();
+  if (d.teams) {
+    const T = d.teams;
+    api.get('/api/projects/:id/task-tags', async (req) => { op(req); return T.projectTagState(project(req).id); });
+    api.post('/api/projects/:id/task-tags/preview', async (req) => { op(req); const b = body(tagBody, req); return T.previewTagMap(project(req).id, b.tags, b.map); });
+    api.put('/api/projects/:id/task-tags', async (req) => {
+      op(req); const b = body(tagBody, req);
+      return T.applyTagMap(project(req).id, b.tags, b.map, actor(req));
+    });
+  }
   // The known keywords (hub setting): editing the list takes a removed keyword off every project and team.
   const kwOut = () => ({ keywords: K.known(), default: K.defaults(), usage: K.usage() });
   api.get('/api/settings/keywords', async (req) => { op(req); return kwOut(); });
@@ -384,8 +398,9 @@ export function registerBlueprintApi(api: FastifyInstance, d: BlueprintApiDeps, 
     if (who.via) bp.deps.audit?.event(who, 'blueprint.proposal_decide', { kind: 'bp_proposal', id: pr.id }, { project: pr.project_id, status: what });
   };
   api.post('/api/proposals/:id/apply', async (req) => {
-    const b = body(z.object({ note: z.string().max(2000).nullable().optional() }).strict(), req);
-    const who = decider(req), r = bp.applyProposal(params(req).id, bpActor(who), b.note ?? null);
+    // `ops`: the op numbers (1-based) to apply; the others are declined (partial apply, docs/blueprint.md §2.6).
+    const b = body(z.object({ note: z.string().max(2000).nullable().optional(), ops: z.array(z.number().int().min(1)).min(1).max(500).optional() }).strict(), req);
+    const who = decider(req), r = bp.applyProposal(params(req).id, bpActor(who), b.note ?? null, b.ops?.map((i) => i - 1));
     audited(who, r.proposal.status === 'stale' ? 'stale' : 'applied', r.proposal);
     return decided(r);
   });

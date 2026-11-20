@@ -16,7 +16,7 @@ ALTER TABLE checkouts ADD COLUMN pc_refused_at INTEGER;
 ALTER TABLE checkouts ADD COLUMN released_at INTEGER;
 ALTER TABLE checkouts ADD COLUMN released_by TEXT;
 ALTER TABLE checkouts ADD COLUMN release_reason TEXT;
--- Contributor mode's drafts folder ("/05 Papers/P1/contrib/Rowan/"): the admin's explicit folder grant for the delegate,
+-- Contributor mode's drafts folder ("/05 Papers/P1/contrib/Astra/"): the admin's explicit folder grant for the delegate,
 -- Contribute on that folder only, made at Delegate and removed at Take back. Null: the agent writes nothing in the vault.
 ALTER TABLE checkouts ADD COLUMN drafts_path TEXT;
 -- One open checkout per team (team scope) and per agent (agent scope); the two refuse each other in code.

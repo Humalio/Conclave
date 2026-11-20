@@ -7,9 +7,11 @@ import type { Config } from '../config.js';
 import type { Onboarding, ApproveIn } from '../onboarding/onboarding.js';
 import { renderPrompt, type ClientFiles } from '../onboarding/http.js';
 import type { Connector } from '../connector/connector.js';
+import { KeyError } from '../keys/keys.js';
+import { through, type ThroughRelay, type Relays } from '../relay/relays.js';
 import { PAIRING_MS, caCheck, connectorPrompt } from '../connector/identity.js';
 
-export interface OnboardingApiDeps { keys: Keys; onboarding: Onboarding; files: ClientFiles; config: Config; connector?: Connector }
+export interface OnboardingApiDeps { keys: Keys; onboarding: Onboarding; files: ClientFiles; config: Config; connector?: Connector; relays?: Relays }
 
 const folder = z.object({ path: z.string(), access: z.enum(['read', 'write']) });
 const role = z.object({ name: z.string(), team_role: z.enum(['coordinator', 'worker', 'reviewer', 'stakeholder']), count: z.number().int(), job: z.string(), reviews: z.array(z.string()).optional(), folders: z.array(folder).optional() });
@@ -26,10 +28,18 @@ export function registerOnboardingApi(api: FastifyInstance, d: OnboardingApiDeps
   const { keys, onboarding: ob, files, config } = d;
   const idOf = (req: FastifyRequest) => (req.params as { id: string }).id;
   const body = <T extends z.ZodType>(s: T, req: FastifyRequest): z.infer<T> => s.parse(req.body ?? {});
-  const prompt = (code: string, pc: string) => renderPrompt(files, { hubUrl: config.publicUrl, lanUrl: config.lanUrl, code, pc });
+  // "Through relay X": the prompt and the pairing block carry the relay's origin, its CA fingerprint and the release base instead of the hub's.
+  const relayOf = (id: string | null | undefined): ThroughRelay | null => {
+    if (!id) return null;
+    const r = d.relays?.get(id);
+    if (!r) throw new KeyError('not_found', 'No such relay.');
+    return through(r);
+  };
+  const prompt = (code: string, pc: string, relay: ThroughRelay | null = null) => renderPrompt(files, relay ? { hubUrl: relay.origin, code, pc, relay } : { hubUrl: config.publicUrl, lanUrl: config.lanUrl, code, pc });
   // The connector's pairing block (docs/connector.md, "Pairing"): the same code, its 30 minutes, the hub check the PC's user
   // types, and the prompt with no code. Null when nothing can be pinned (no CA served, or no HTTPS origin).
-  const pairing = (code: string, pc: string) => {
+  const pairing = (code: string, pc: string, relay: ThroughRelay | null = null) => {
+    if (relay) return { pairing: { code, code_expires_at: Date.now() + PAIRING_MS, ca_check: caCheck(relay.ca_sha256), hub_origin: relay.origin, relay: { id: relay.id, name: relay.name, release_base: relay.release_base } }, connector_prompt: connectorPrompt({ pc, hubUrl: relay.origin, relay: relay.name }) };
     const ca = files.ca(), hub = ob.hubInfo();
     if (!ca || !hub.origin) return { pairing: null, connector_prompt: null };
     return { pairing: { code, code_expires_at: Date.now() + PAIRING_MS, ca_check: caCheck(ca.sha256), hub_origin: hub.origin }, connector_prompt: connectorPrompt({ pc, hubUrl: hub.origin }) };
@@ -37,16 +47,18 @@ export function registerOnboardingApi(api: FastifyInstance, d: OnboardingApiDeps
 
   // Add PC: the code appears only in this response (and in Re-enrol's).
   api.post('/api/pcs/add', async (req) => {
-    const b = body(z.object({ name: z.string(), description: z.string().max(500).nullable().optional() }), req);
+    const b = body(z.object({ name: z.string(), description: z.string().max(500).nullable().optional(), relay_id: z.string().nullable().optional() }), req);
+    const relay = relayOf(b.relay_id);
     const r = ob.addPc(b.name, b.description ?? null, actor(req));
     // The connector download (null until set) and the pairing block (docs/connector.md, "Add PC").
-    return { pc: r.pc, key: { id: r.key.id, label: r.key.label, onboarding_enabled_at: r.key.onboarding_enabled_at }, code: r.code, prompt: prompt(r.code, r.pc.name),
-      download_url: config.connectorReleaseUrl ?? null, ...pairing(r.code, r.pc.name) };
+    return { pc: r.pc, key: { id: r.key.id, label: r.key.label, onboarding_enabled_at: r.key.onboarding_enabled_at }, code: r.code, prompt: prompt(r.code, r.pc.name, relay),
+      download_url: config.connectorReleaseUrl ?? null, ...pairing(r.code, r.pc.name, relay) };
   });
   api.post('/api/pcs/:id/re-enrol', async (req) => {
+    const relay = relayOf(body(z.object({ relay_id: z.string().nullable().optional() }), req).relay_id);
     const r = ob.reEnrol(idOf(req), actor(req));
     d.connector?.endDisconnect(idOf(req), actor(req)); // Re-enrol PC ends a disconnect (docs/connector.md)
-    return { pc: r.pc, key: { id: r.key.id, label: r.key.label }, code: r.code, prompt: prompt(r.code, r.pc.name), reopened: r.reopened, ...pairing(r.code, r.pc.name) };
+    return { pc: r.pc, key: { id: r.key.id, label: r.key.label }, code: r.code, prompt: prompt(r.code, r.pc.name, relay), reopened: r.reopened, ...pairing(r.code, r.pc.name, relay) };
   });
   api.get('/api/onboarding/pcs', async () => ({ pcs: ob.pcStates() }));
   api.get('/api/pcs/:id/enrolment', async (req) => ({ enrolment: ob.enrolment(idOf(req)) }));

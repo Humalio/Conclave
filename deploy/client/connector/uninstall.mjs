@@ -36,12 +36,12 @@ import { userEnv as realUserEnv } from './git.mjs';
 
 export const journalPath = (home) => join(home, 'removal.json');
 /** The connector's own files in its folder, removed last by a full uninstall (never anything else in that folder). */
-export const OWN_FILES = ['keys.json', 'registry.json', 'manifest.json', 'tokens', 'git', 'connector.log', 'preferences.json', 'processes.json', 'conclave.mjs', 'connector', 'app', 'run', 'orders', 'sessions.json', 'usage-events.jsonl'];
+export const OWN_FILES = ['keys.json', 'keys.json.bak', 'keys.json.lock', 'keys.master', 'approvals.json', 'pending.json', 'registry.json', 'registry.json.bak', 'registry.json.lock', 'manifest.json', 'tokens', 'git', 'connector.log', 'preferences.json', 'preferences.json.bak', 'preferences.json.lock', 'processes.json', 'processes.json.bak', 'processes.json.lock', 'conclave.mjs', 'connector', 'app', 'run', 'orders', 'sessions.json', 'usage-events.jsonl'];
 /** What belongs to the installation, not to a hub or a folder: undone only by a full uninstall. */
 const INSTALL_KINDS = ['service_entry', 'portable_git', 'user_env', 'app_build', 'launcher'];
 /** Kinds in the order they are undone: the folders' entries first, the records that say who owns them last. */
 /** The logon service goes first, so nothing restarts the worker while the rest is removed; the builds and launcher last. */
-const ORDER = ['service_entry', 'mcp_entry', 'mcp_approval', 'codex_entry', 'hook', 'git_exclude', 'instructions', 'codex_instructions', 'trust_flag', 'registry_entry', 'token_cache', 'user_env', 'portable_git', 'app_build', 'launcher', 'key_section'];
+const ORDER = ['service_entry', 'mcp_entry', 'mcp_approval', 'codex_entry', 'hook', 'git_exclude', 'instructions', 'codex_instructions', 'codex_role', 'trust_flag', 'registry_entry', 'token_cache', 'user_env', 'portable_git', 'app_build', 'launcher', 'key_section'];
 const RETRIES = 3;
 
 const sameScope = (a, b) => a && b && a.kind === b.kind && (a.kind === 'all' || (a.hubId === b.hubId && a.caSha256 === b.caSha256));
@@ -160,6 +160,7 @@ function instructionsFile(s) {
 const UNDO = {
   instructions: instructionsFile,
   codex_instructions: instructionsFile,
+  codex_role: instructionsFile,
   user_env(s, _h, ctx) {
     // Undone only while it holds the value setup set; a value the user changed is theirs and stays.
     const ue = ctx.userEnv, cur = ue.get(s.pointer);

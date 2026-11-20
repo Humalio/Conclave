@@ -25,6 +25,11 @@ import { validateEntry, record, undoDecision, entries, noRedirect } from './conn
 import { registerFolder, repairFolder } from './connector/register.mjs';
 import { runCheck } from './connector/check.mjs';
 import { speakUp, withRequestId } from './connector/mcpserver.mjs';
+import { startBroker, askBroker, brokerAddress } from './connector/broker.mjs';
+import { brokerSecretPath, brokerProof } from './connector/brokerclient.mjs';
+import { connect as netConnect } from 'node:net';
+import { pendingList, approveFolder as allowFolder, approveFolderByConnector } from './connector/approvals.mjs';
+process.env.CONCLAVE_KEY_STORE = 'file'; // tests keep the key file's secret in a private file: no PowerShell, keychain or secret service
 import { line, REASONS, ORDER } from './connector/reasons.mjs';
 import { canonicalFolder, folderIdentity, WIN } from './connector/paths.mjs';
 
@@ -63,16 +68,26 @@ function stubHub(pki, { valid = new Set([SES]), appKey = APP } = {}) {
     req.on('data', (c) => { raw += c; });
     req.on('end', () => {
       const msg = JSON.parse(raw);
+      const json = (status, body) => { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(body)); };
+      if (req.url.startsWith('/connector/v1/turn-tokens')) {
+        // The connector's broker, signed in with the app key: issue, renew and revoke a turn token.
+        const act = req.url.slice('/connector/v1/turn-tokens'.length).replace(/^\//, '') || 'issue';
+        hub.requests.push({ tool: 'turn_' + act, args: msg, auth: req.headers.authorization, session: null });
+        if (hub.redirect) { res.writeHead(307, { location: hub.redirect }); return res.end(); }
+        if (req.headers.authorization !== `Bearer ${appKey}`) return json(401, { error: 'unauthorized' });
+        if (act === 'issue') {
+          if (!hub.valid.has(msg.session_key)) return json(401, { error: 'unauthorized' });
+          const t = `tok-${++hub.n}`; hub.issued.add(t); return json(200, { token: t, agent_id: 'agent-1', label: 'Stub agent', expires_at: Date.now() + 900_000 });
+        }
+        if (act === 'renew') { if (!hub.issued.has(msg.token)) return json(404, { error: 'unknown' }); hub.renewed = (hub.renewed ?? 0) + 1; return json(200, { expires_at: Date.now() + 900_000 }); }
+        if (act === 'revoke') { hub.issued.delete(msg.token); (hub.revoked ??= []).push({ token: msg.token, reason: msg.reason }); return json(200, { ok: true }); }
+        return json(404, { error: 'unknown' });
+      }
       const tool = msg.method === 'tools/call' ? msg.params.name : msg.method;
       hub.requests.push({ tool, args: msg.params?.arguments, auth: req.headers.authorization, session: req.headers['x-agent-hub-session'] });
       if (hub.redirect) { res.writeHead(307, { location: hub.redirect }); return res.end(); }
-      const json = (status, body) => { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(body)); };
       const ok = (result) => json(200, { jsonrpc: '2.0', id: msg.id, result });
-      if (req.headers.authorization !== `Bearer ${appKey}`) return json(401, { error: 'unauthorized' });
-      if (tool === 'session_login') {
-        if (!hub.valid.has(msg.params.arguments.session_key)) return json(401, { error: 'unauthorized' });
-        const t = `tok-${++hub.n}`; hub.issued.add(t); return ok({ content: [], structuredContent: { session_token: t } });
-      }
+      // A session holds a turn token only: no app key on the way to /mcp.
       const tok = req.headers['x-agent-hub-session'];
       if (hub.rejectAll401 || !hub.issued.has(tok)) return json(401, { error: 'unauthorized' });
       if (tool === 'session_whoami') return ok({ content: [], structuredContent: { agent_id: 'agent-1' } });
@@ -100,6 +115,14 @@ function setup(pki, hub, { label = 'dev-1', hubId = 'hub-one', key = SES } = {})
   registerFolder(home, folder, { hubId, caSha256: ca, agent: label, claudeJson, win: WIN });
   return { base, home, folder: canonicalFolder(folder), hubKey, claudeJson, ca, label, hubId };
 }
+
+/** The connector's broker for a test home (the worker starts it in a real connector); every session of that home asks it for its token. */
+const broker = async (s, { clicks = false, ...deps } = {}) => {
+  // Most cases are about the relay, not the click: the folder is allowed as if the PC user had clicked. `clicks: true` leaves it waiting.
+  if (!clicks) approveFolderByConnector(s.home, s.folder, resolveFolder(s.home, s.folder).binding);
+  return startBroker({ home: s.home, deps: { renewMs: 3_600_000, ...deps } });
+};
+const withBroker = async (s, fn, deps) => { const b = await broker(s, deps); try { return await fn(b); } finally { await b.close(); } };
 
 /** Runs `conclave mcp` against `s`, writes the messages, and returns the parsed stdout lines, stderr and the log. */
 function runMcp(s, folder, msgs, env = {}) {
@@ -301,21 +324,170 @@ describe('pinned HTTPS', { concurrency: false }, () => {
 
 // ───────────── the mcp relay ─────────────
 describe('conclave mcp', { concurrency: false }, () => {
-  test('relays initialize, tools/list and a call; the hub sees the app key and a session token; nothing leaks', tlsOpts, async () => {
+  test('relays initialize, tools/list and a call; the hub sees a turn token only, never a key; nothing leaks', tlsOpts, async () => {
     const pki = makePki('Relay CA'), hub = await stubHub(pki);
     try {
       const s = setup(pki, hub);
-      const r = await runMcp(s, s.folder, [INIT, { jsonrpc: '2.0', method: 'notifications/initialized' }, LIST, call(3, 'session_help', { a: 1 })]);
+      const r = await withBroker(s, () => runMcp(s, s.folder, [INIT, { jsonrpc: '2.0', method: 'notifications/initialized' }, LIST, call(3, 'session_help', { a: 1 })]));
       assert.equal(r.code, 0);
       assert.deepEqual(r.msgs.map((m) => m.id).sort(), [1, 2, 3]);
       assert.equal(r.msgs.find((m) => m.id === 1).result.serverInfo.name, 'stub');
       assert.deepEqual(r.msgs.find((m) => m.id === 3).result.structuredContent, { echoed: { a: 1 } });
       for (const l of r.lines) assert.doesNotThrow(() => JSON.parse(l), 'stdout is JSON-RPC only');
-      const login = hub.requests.find((q) => q.tool === 'session_login');
-      assert.equal(login.auth, `Bearer ${APP}`);
-      assert.ok(hub.requests.filter((q) => q.tool !== 'session_login').every((q) => /^tok-/.test(q.session)));
+      const issue = hub.requests.find((q) => q.tool === 'turn_issue');
+      assert.equal(issue.auth, `Bearer ${APP}`, 'only the connector signs in with the app key');
+      const mcp = hub.requests.filter((q) => !q.tool.startsWith('turn_'));
+      assert.ok(mcp.length >= 3 && mcp.every((q) => /^tok-/.test(q.session) && q.auth === undefined), 'a session sends a turn token and no Authorization');
+      assert.equal(hub.revoked?.length, 1, 'the turn token is revoked when the session ends');
+      assert.equal(hub.revoked[0].reason, 'turn_ended');
       noSecrets(r);
       assert.match(r.log, /ok folder=/);
+    } finally { await hub.close(); }
+  }, 30000);
+  test('a session works with an unreadable key file and holds no key; the key file is encrypted at rest', tlsOpts, async () => {
+    const pki = makePki('Env CA'), hub = await stubHub(pki);
+    try {
+      const s = setup(pki, hub);
+      await withBroker(s, async () => {
+        // the broker is already running; the session process could not read a key even if it tried
+        const kf = readFileSync(keyFilePath(s.home));
+        writeFileSync(keyFilePath(s.home), 'not a key file');
+        try {
+          const r = await runMcp(s, s.folder, [INIT, call(2, 'session_help')]);
+          assert.ok(r.msgs.find((m) => m.id === 2).result);
+        } finally { writeFileSync(keyFilePath(s.home), kf); }
+      });
+      const raw = readFileSync(keyFilePath(s.home), 'utf8');
+      assert.ok(!raw.includes(SES) && !raw.includes(APP), 'the key file is encrypted at rest');
+    } finally { await hub.close(); }
+  }, 30000);
+  test('without the connector running a session gets the fixed line and nothing reaches a hub', tlsOpts, async () => {
+    const pki = makePki('NoBroker CA'), hub = await stubHub(pki);
+    try {
+      const s = setup(pki, hub);
+      const r = await runMcp(s, s.folder, [INIT, call(2, STATUS)]);
+      assert.match(r.msgs.find((m) => m.id === 1).result.instructions, /connector is not running/i);
+      assert.equal(hub.requests.length, 0);
+    } finally { await hub.close(); }
+  }, 30000);
+  test("the first registration of a folder waits for the PC user's click; a click opens it", tlsOpts, async () => {
+    const pki = makePki('Click CA'), hub = await stubHub(pki);
+    try {
+      const s = setup(pki, hub);
+      await withBroker(s, async () => {
+        const first = await runMcp(s, s.folder, [INIT, call(2, STATUS)]);
+        assert.match(first.msgs.find((m) => m.id === 1).result.instructions, /click|conclave setup/i);
+        assert.equal(hub.requests.length, 0, 'no token before the click');
+        const p = pendingList(s.home);
+        assert.equal(p.folders.length, 1);
+        assert.equal(allowFolder(s.home, p.folders[0].key), true);
+        const ok = await runMcp(s, s.folder, [INIT, call(2, 'session_help')]);
+        assert.ok(ok.msgs.find((m) => m.id === 2).result);
+      }, { clicks: true });
+    } finally { await hub.close(); }
+  }, 30000);
+  test('the broker answers only a session that holds its secret, and a session believes only the broker that holds it', tlsOpts, async () => {
+    const pki = makePki('Broker auth CA'), hub = await stubHub(pki);
+    try {
+      const s = setup(pki, hub);
+      // The folder's binding records the hub's origin: a session pins it from there, not from the broker's answer.
+      assert.equal(resolveFolder(s.home, s.folder).binding.origin, normalizeOrigin(hub.origin));
+      const b = await broker(s);
+      try {
+        const secret = readFileSync(brokerSecretPath(s.home), 'utf8').trim();
+        assert.match(secret, /^[0-9a-f]{64}$/);
+        if (!WIN) assert.equal(statSync(brokerSecretPath(s.home)).mode & 0o077, 0, 'the secret is readable by this user only');
+        const raw = (req) => new Promise((res, rej) => {
+          let buf = '';
+          const c = netConnect(brokerAddress(s.home), () => c.write(JSON.stringify(req) + '\n'));
+          c.setEncoding('utf8'); c.on('data', (d) => { buf += d; }); c.on('end', () => res(JSON.parse(buf))); c.on('error', rej);
+        });
+        // A process that does not hold the secret (no proof, a wrong proof, a replayed proof for another nonce) gets nothing.
+        const nonce = 'a'.repeat(32);
+        for (const req of [{ op: 'turn', folder: s.folder, pid: process.pid },
+          { op: 'turn', folder: s.folder, pid: process.pid, nonce, auth: brokerProof('b'.repeat(64), 'client', nonce) },
+          { op: 'turn', folder: s.folder, pid: process.pid, nonce: 'c'.repeat(32), auth: brokerProof(secret, 'client', nonce) }]) {
+          const a = await raw(req);
+          assert.deepEqual(a, { ok: false, reason: 'bad_request' });
+        }
+        assert.equal(b.runs.size, 0, 'no turn was started for an unproven request');
+        // The real session proves it holds the secret and checks the broker's proof.
+        const a = await askBroker(s.home, { op: 'turn', folder: s.folder, pid: process.pid });
+        assert.equal(a.ok, true); assert.equal(a.proof, undefined);
+      } finally { await b.close(); }
+      // Something else listening at an address, without the secret: a session never believes its answer.
+      const fakeAt = WIN ? `\\\\.\\pipe\\conclave-fake-${process.pid}` : join(s.base, 'fake.sock');
+      const fake = createNet((c) => c.on('data', () => c.end(JSON.stringify({ ok: true, token: 'stolen-turn', origin: 'https://evil.example', ca_pem: 'x', proof: 'f'.repeat(64) }) + '\n')));
+      await new Promise((r) => fake.listen(fakeAt, r));
+      try {
+        assert.deepEqual(await askBroker(s.home, { op: 'turn', folder: s.folder, pid: process.pid }, { address: fakeAt }), { ok: false, reason: 'broker_unverified' });
+      } finally { await new Promise((r) => fake.close(r)); }
+      // With no secret (the connector has never run here) a session does not even connect.
+      rmSync(brokerSecretPath(s.home));
+      assert.deepEqual(await askBroker(s.home, { op: 'turn', folder: s.folder, pid: process.pid }, { address: fakeAt }), { ok: false, reason: 'connector_not_running' });
+    } finally { await hub.close(); }
+  }, 30000);
+  test('a long connector folder listens in the private runtime folder, never in a shared temporary folder', () => {
+    const long = '/home/someone/' + 'x'.repeat(120);
+    assert.equal(brokerAddress(long, 'linux', {}), null);
+    assert.equal(brokerAddress(long, 'linux', { XDG_RUNTIME_DIR: '/tmp' + 'y'.repeat(100) }), null);
+    assert.match(brokerAddress(long, 'linux', { XDG_RUNTIME_DIR: '/run/user/1000' }), /^[\\/]run[\\/]user[\\/]1000[\\/]conclave-[^\\/]+\.sock$/);
+    assert.match(brokerAddress('/home/someone/.config/conclave', 'linux', {}), /broker\.sock$/);
+    assert.match(brokerAddress(long, 'win32', {}), /^\\\\\.\\pipe\\conclave-broker-/);
+  });
+  test('a long turn keeps its token through renewal; a hub refusal ends the run', tlsOpts, async () => {
+    const pki = makePki('Renew CA'), hub = await stubHub(pki);
+    try {
+      const s = setup(pki, hub);
+      const b = await broker(s);
+      try {
+        const a = await askBroker(s.home, { op: 'turn', folder: s.folder, pid: process.pid });
+        assert.equal(a.ok, true);
+        await b.renewAll(); await b.renewAll();
+        assert.equal(hub.renewed, 2);
+        assert.equal(b.runs.size, 1);
+        hub.issued.clear(); // the hub no longer knows the token (revoked, team paused)
+        await b.renewAll();
+        assert.equal(b.runs.size, 0, 'a refused renewal ends the run');
+      } finally { await b.close(); }
+    } finally { await hub.close(); }
+  }, 30000);
+  test('a refused renewal (pause, lockdown, suspended key) stops the wake run in that folder and still scans its transcript', tlsOpts, async () => {
+    const pki = makePki('Refuse CA'), hub = await stubHub(pki);
+    try {
+      const s = setup(pki, hub);
+      const stopped = [];
+      const b = await broker(s, { onRefused: async (run) => { stopped.push({ folder: run.folder, hubKey: run.hubKey }); return true; } });
+      try {
+        await askBroker(s.home, { op: 'turn', folder: s.folder, pid: process.pid });
+        const t = join(s.base, 'transcript-refused.jsonl');
+        writeFileSync(t, JSON.stringify({ role: 'assistant', text: `here is the key ${SES}` }) + '\n');
+        await askBroker(s.home, { op: 'transcript', folder: s.folder, path: t });
+        const revokes = (hub.revoked?.length ?? 0);
+        hub.issued.clear(); // the hub refuses the renewal
+        await b.renewAll();
+        assert.deepEqual(stopped, [{ folder: s.folder, hubKey: s.hubKey }], 'the wake is told, with the folder and the hub');
+        assert.equal(b.runs.size, 0);
+        assert.equal((hub.revoked?.length ?? 0), revokes, 'the refused token is not revoked again');
+      } finally { await b.close(); }
+    } finally { await hub.close(); }
+  }, 30000);
+  test('a run whose process is gone is ended and its token revoked; a key in its transcript revokes it as a leak', tlsOpts, async () => {
+    const pki = makePki('Leak CA'), hub = await stubHub(pki);
+    try {
+      const s = setup(pki, hub);
+      let up = true;
+      const b = await broker(s, { alive: () => up });
+      try {
+        await askBroker(s.home, { op: 'turn', folder: s.folder, pid: process.pid });
+        const t = join(s.base, 'transcript.jsonl');
+        writeFileSync(t, JSON.stringify({ role: 'assistant', text: `here is the key ${SES}` }) + '\n');
+        await askBroker(s.home, { op: 'transcript', folder: s.folder, path: t });
+        up = false;
+        await b.renewAll();
+        assert.equal(b.runs.size, 0);
+        assert.equal(hub.revoked.at(-1).reason, 'leak_found');
+      } finally { await b.close(); }
     } finally { await hub.close(); }
   }, 30000);
   test('task_submit and task_review get a stable request id, so a retry returns the first result', () => {
@@ -326,33 +498,30 @@ describe('conclave mcp', { concurrency: false }, () => {
     assert.equal(withRequestId(call(1, 'task_submit', { request_id: 'mine' })).params.arguments.request_id, 'mine');
     assert.equal(withRequestId(call(1, 'task_list', {})).params.arguments.request_id, undefined);
   });
-  test('a cached token is reused; a rotated key in the key file means a fresh login', tlsOpts, async () => {
+  test('a rotated key in the key file means the next turn signs in with it', tlsOpts, async () => {
     const pki = makePki('Cache CA'), hub = await stubHub(pki, { valid: new Set([SES, SES2]) });
     try {
       const s = setup(pki, hub);
-      await runMcp(s, s.folder, [INIT]);
-      assert.equal(hub.requests.filter((q) => q.tool === 'session_login').length, 1);
-      await runMcp(s, s.folder, [INIT]);
-      assert.equal(hub.requests.filter((q) => q.tool === 'session_login').length, 1, 'the second start only checked the cached token');
-      putAgentKey(s.home, s.hubKey, s.label, SES2);
-      await runMcp(s, s.folder, [INIT]);
-      assert.equal(hub.requests.filter((q) => q.tool === 'session_login').length, 2, 'a rotation drops the cached token');
+      await withBroker(s, async () => {
+        await runMcp(s, s.folder, [INIT]);
+        putAgentKey(s.home, s.hubKey, s.label, SES2);
+        await runMcp(s, s.folder, [INIT]);
+      });
+      assert.deepEqual(hub.requests.filter((q) => q.tool === 'turn_issue').map((q) => q.args.session_key), [SES, SES2]);
     } finally { await hub.close(); }
   }, 30000);
-  test('a token the hub stops accepting is replaced once and the call is sent again; a second 401 speaks up', tlsOpts, async () => {
+  test('a hub that refuses every call: one new turn token, then the fixed line', tlsOpts, async () => {
     const pki = makePki('Expire CA'), hub = await stubHub(pki);
     try {
       const s = setup(pki, hub);
-      const first = await runMcp(s, s.folder, [INIT, call(2, 'session_help')]);
-      assert.ok(first.msgs.find((m) => m.id === 2).result);
-      hub.issued.clear(); // the hub forgets every token: cached one is stale
-      const second = await runMcp(s, s.folder, [INIT, call(2, 'session_help')]);
-      assert.ok(second.msgs.find((m) => m.id === 2).result, 'the stale cached token was replaced by one login');
-      hub.rejectAll401 = true;
-      const third = await runMcp(s, s.folder, [INIT, call(2, 'session_help'), call(3, 'session_help')]);
-      const e2 = third.msgs.find((m) => m.id === 2).error;
-      assert.match(e2.message, /refused this agent's key/);
-      noSecrets(third);
+      await withBroker(s, async () => {
+        const first = await runMcp(s, s.folder, [INIT, call(2, 'session_help')]);
+        assert.ok(first.msgs.find((m) => m.id === 2).result);
+        hub.rejectAll401 = true;
+        const third = await runMcp(s, s.folder, [INIT, call(2, 'session_help'), call(3, 'session_help')]);
+        assert.match(third.msgs.find((m) => m.id === 2).error.message, /refused this agent's key/);
+        noSecrets(third);
+      });
     } finally { await hub.close(); }
   }, 30000);
   test("a folder from another hub gets the fixed line in the session and nothing is sent to any hub", tlsOpts, async () => {
@@ -361,7 +530,8 @@ describe('conclave mcp', { concurrency: false }, () => {
       const s = setup(pki, hub);
       // the same folder is bound to a hub this PC has no key for
       bindFolder(s.home, s.folder, { hubId: 'hub-demo', caSha256: 'c'.repeat(64), agent: s.label });
-      const r = await runMcp(s, s.folder, [INIT, LIST, call(3, STATUS)]);
+      const b = await broker(s);
+      let r; try { r = await runMcp(s, s.folder, [INIT, LIST, call(3, STATUS)]); } finally { await b.close(); }
       assert.equal(hub.requests.length, 0, 'no key was sent anywhere');
       assert.match(r.msgs.find((m) => m.id === 1).result.instructions, /belongs to a hub that this PC has no key for\. Run: conclave check/);
       assert.equal(r.msgs.find((m) => m.id === 2).result.tools[0].name, STATUS);
@@ -388,17 +558,17 @@ describe('conclave mcp', { concurrency: false }, () => {
     const pki = makePki('Why CA'), hub = await stubHub(pki, { valid: new Set() });
     try {
       const s = setup(pki, hub);
-      const refused = await runMcp(s, s.folder, [INIT]);
+      const refused = await withBroker(s, () => runMcp(s, s.folder, [INIT]));
       assert.match(refused.msgs[0].result.instructions, /refused this agent's key/);
     } finally { await hub.close(); }
     const down = await stubHub(pki); const port = down.origin; await down.close();
     const s2 = setup(pki, { origin: port });
-    const unreachable = await runMcp(s2, s2.folder, [INIT]);
+    const unreachable = await withBroker(s2, () => runMcp(s2, s2.folder, [INIT]));
     assert.match(unreachable.msgs[0].result.instructions, /could not be reached\. Run: conclave check --probe/);
     const evil = makePki('Evil CA'), hub3 = await stubHub(evil);
     try {
       const s3 = setup(pki, hub3);
-      const tls = await runMcp(s3, s3.folder, [INIT]);
+      const tls = await withBroker(s3, () => runMcp(s3, s3.folder, [INIT]));
       assert.match(tls.msgs[0].result.instructions, /certificate does not match what this PC pinned/);
     } finally { await hub3.close(); }
   }, 60000);
@@ -575,6 +745,7 @@ describe('register, repair and check', { concurrency: false }, () => {
     try {
       const s = setup(pki, hub);
       const snap = (d) => readdirSync(d, { recursive: true }).sort().map((p) => { const st = statSync(join(d, p)); return `${p}:${st.isFile() ? readFileSync(join(d, p), 'utf8') : 'dir'}`; }).join('\n');
+      const b = await broker(s);
       const before = [snap(s.home), snap(s.folder), readFileSync(s.claudeJson, 'utf8')];
       const ok = await runCheck(s.home, s.folder, { claudeJson: s.claudeJson, win: WIN });
       assert.equal(ok.ok, true);
@@ -584,6 +755,8 @@ describe('register, repair and check', { concurrency: false }, () => {
       assert.deepEqual([snap(s.home), snap(s.folder)], [before[0], before[1]], 'a probe caches nothing either');
       hub.valid.clear();
       assert.equal((await runCheck(s.home, s.folder, { claudeJson: s.claudeJson, win: WIN, probe: true })).reason, 'login_refused');
+      await b.close();
+      assert.equal((await runCheck(s.home, s.folder, { claudeJson: s.claudeJson, win: WIN, probe: true })).reason, 'connector_not_running');
       assert.equal((await runCheck(s.home, join(s.base, 'nowhere'), { claudeJson: s.claudeJson })).reason, 'not_registered');
       for (const r of ORDER) assert.ok(REASONS[r], `${r} has a fixed sentence`);
       for (const r of Object.keys(REASONS)) { assert.ok(!/ah_(app|ses)_/.test(line(r))); assert.match(line(r), /Run: conclave /); }
@@ -650,7 +823,9 @@ describe('register, repair and check', { concurrency: false }, () => {
     const pki = makePki('CLI CA'), hub = await stubHub(pki);
     try {
       const s = setup(pki, hub);
-      const run = (args) => new Promise((res) => { const c = spawn(process.execPath, [CLI, ...args], { env: { ...process.env, CONCLAVE_HOME: s.home, CLAUDE_CONFIG_DIR: dirname(s.claudeJson) } }); let o = ''; c.stdout.on('data', (d) => { o += d; }); c.stderr.on('data', (d) => { o += d; }); c.on('close', (code) => res({ code, o })); });
+      // The PC's own NODE_EXTRA_CA_CERTS stays out: a missing file makes Node warn on stderr. The JSON is read from stdout only.
+      const env = { ...process.env, CONCLAVE_HOME: s.home, CLAUDE_CONFIG_DIR: dirname(s.claudeJson) }; delete env.NODE_EXTRA_CA_CERTS;
+      const run = (args) => new Promise((res) => { const c = spawn(process.execPath, [CLI, ...args], { env }); let o = '', out = ''; c.stdout.on('data', (d) => { o += d; out += d; }); c.stderr.on('data', (d) => { o += d; }); c.on('close', (code) => res({ code, o, out })); });
       assert.equal((await run([])).code, 2);
       assert.equal((await run(['bogus'])).code, 2);
       assert.equal((await run(['mcp'])).code, 2);
@@ -658,7 +833,7 @@ describe('register, repair and check', { concurrency: false }, () => {
       const bad = await run(['check', '--folder', join(s.base, 'nope')]);
       assert.equal(bad.code, 1); assert.match(bad.o, /PROBLEM: .*isn't registered/);
       const j = await run(['check', '--folder', s.folder, '--json']);
-      assert.equal(JSON.parse(j.o).ok === true || JSON.parse(j.o).reason !== undefined, true);
+      assert.equal(JSON.parse(j.out).ok === true || JSON.parse(j.out).reason !== undefined, true);
       assert.ok(!j.o.includes(APP) && !j.o.includes(SES));
     } finally { await hub.close(); }
   }, 30000);

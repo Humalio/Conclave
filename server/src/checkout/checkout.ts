@@ -35,7 +35,7 @@ const REPO_HOSTS_KEY = 'checkout.repo_hosts';
 
 /** One step of an open checkout that waits on the operator (GET /api/checkouts?open=1, Attention on Home). */
 export interface NeedsOperator {
-  kind: 'leftovers' | 'handouts_missing' | 'handouts_complete' | 'approve_pc' | 'prompt_expiring';
+  kind: 'leftovers' | 'handouts_missing' | 'handouts_complete' | 'prompt_expiring';
   /** When the step started waiting. */
   at: number;
   agent_id?: string; count?: number; of?: number; expires_at?: number; pc?: { id: string; name: string } | null; enrolled_from?: string | null;

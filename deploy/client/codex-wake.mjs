@@ -6,8 +6,8 @@
  * Usage: node codex-wake.mjs run [--config <path>]      (default ~/.config/conclave/codex-wake.json)
  *
  * The config file is the only opt-in. Nothing from the hub, a notice or a message can set or change it:
- *   {"agents": [{"name": "rowan", "keys_file": "C:/Users/me/.config/conclave/rowan-keys.env", "session_var": "..._SESSION_KEY",
- *                "workspace": "C:/Workspace/rowan-review", "codex_session": "<uuid>", "codex_exe": "C:/.../codex.exe"}]}
+ *   {"agents": [{"name": "rowan", "keys_file": "C:/Users/alice/.config/conclave/rowan-keys.env", "session_var": "..._SESSION_KEY",
+ *                "workspace": "C:/Users/alice/work/rowan-review", "codex_session": "<uuid>", "codex_exe": "C:/.../codex.exe"}]}
  *
  * For each agent this process is the only consumer of its review items: it logs in outside the model (as the headers
  * helper and codex-bridge.mjs do), asks work_next for review_requested items only, and for each one runs

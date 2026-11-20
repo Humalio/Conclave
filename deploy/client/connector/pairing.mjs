@@ -16,7 +16,7 @@ import https from 'node:https';
 import { X509Certificate } from 'node:crypto';
 import { platform, arch } from 'node:os';
 import { connect, request, reasonOfError } from './hubclient.mjs';
-import { readKeyFile, putHub, normalizeOrigin, caFingerprint, hubKeyOf, HUB_ID_RE } from './keyfile.mjs';
+import { readKeyFile, putHub, normalizeOrigin, caFingerprint, pemBlocks, singleCaPem, hubKeyOf, HUB_ID_RE } from './keyfile.mjs';
 import { CONNECTOR_VERSION } from './version.mjs';
 
 export const CODE_RE = /^cnv_enrol_[a-z2-7]{26}$/;
@@ -28,6 +28,7 @@ export const PAIR_LINES = {
   bad_code: 'The pairing code starts with cnv_enrol_. Copy it again from the console.',
   ca_mismatch: 'This is not the hub you were given: its certificate does not match. Nothing was sent.',
   no_ca: 'The hub does not serve its certificate (/onboard/ca.crt), so it cannot be checked. Nothing was sent.',
+  ca_bundle: 'The hub serves more than one certificate where it should serve exactly one, so it cannot be pinned. Nothing was sent.',
   tls_refused: 'The hub\'s certificate was not issued by the hub\'s own CA. Nothing was sent.',
   hub_unreachable: 'The hub cannot be reached from this PC. Check the address and the network, then try again.',
   origin_mismatch: 'The hub answers for another address than the one entered. Nothing was sent.',
@@ -71,7 +72,9 @@ export async function checkHub(home, { origin: given, check }, { timeoutMs = 15_
   let ca;
   try { ca = await fetchUnpinned(origin, '/onboard/ca.crt', timeoutMs); } catch (e) { return { ok: false, reason: reasonOfError(e) === 'tls_refused' ? 'tls_refused' : 'hub_unreachable' }; }
   if (ca.status !== 200) return { ok: false, reason: 'no_ca' };
-  const caPem = ca.text, caSha256 = caFingerprint(caPem);
+  // Exactly one PEM block: a second certificate would be trusted too, behind the first one's fingerprint.
+  if (pemBlocks(ca.text) > 1) return { ok: false, reason: 'ca_bundle' };
+  const caPem = singleCaPem(ca.text), caSha256 = caFingerprint(caPem);
   if (!caSha256) return { ok: false, reason: 'no_ca' };
   try { if (!new X509Certificate(caPem).ca) return { ok: false, reason: 'ca_mismatch' }; } catch { return { ok: false, reason: 'no_ca' }; }
   if (!caSha256.startsWith(want)) return { ok: false, reason: 'ca_mismatch' };

@@ -12,7 +12,11 @@ import type { Teams } from '../teams/teams.js';
 import { checkoutStep, type CheckoutStep } from '../checkout/step.js';
 import type { Delegations } from '../checkout/delegate.js';
 
-export interface CheckoutApiDeps { checkouts: Checkouts; checkoutKeys: CheckoutKeys; delegations?: Delegations; teams?: Teams; label?: (agentId: string) => string }
+export interface CheckoutApiDeps {
+  checkouts: Checkouts; checkoutKeys: CheckoutKeys; delegations?: Delegations; teams?: Teams; label?: (agentId: string) => string;
+  /** Move team with no one at the keyboard: after a render, sends Restore when the target PC's user approved exactly one destination. */
+  restoreNow?: (checkoutId: string, actor: Actor) => { id: string } | null;
+}
 
 const agentChoice = z.object({ provider: z.string().optional(), model: z.string().nullable().optional(), permissions: z.string().optional() }).strict();
 const renderBody = z.object({
@@ -24,17 +28,10 @@ export function registerCheckoutApi(api: FastifyInstance, d: CheckoutApiDeps, ac
   const { checkouts: co, checkoutKeys: ck } = d;
   const idOf = (req: FastifyRequest) => (req.params as { id: string }).id;
   const body = <T extends z.ZodType>(s: T, req: FastifyRequest): z.infer<T> => s.parse(req.body ?? {});
-  /* A new PC that enrolled and shows its name and address: only the operator's approval releases its keys. */
-  const pcWaits = (c: { id: string; status: string; rendered_at: number | null; updated_at: number }) => {
-    if (c.status !== 'rendered' || !(co.view(c.id).choices as { new_pc?: boolean } | null)?.new_pc) return null;
-    const g = ck.details(c.id).target, e = g?.enrolment;
-    return g?.new_pc && g.approval === 'waiting' && e && (e.status === 'issued' || e.status === 'confirmed')
-      ? { pc: g.pc ? { id: g.pc.id, name: g.pc.name } : null, enrolled_from: e.enrolled_from ?? null, at: e.used_at ?? c.rendered_at ?? c.updated_at } : null;
-  };
   /* The current step in one sentence, with the operator's one action or who acts next (checkout/step.ts). */
   const stepOf = (id: string): CheckoutStep => {
-    const v = co.view(id), pc = pcWaits(co.mustCheckout(id));
-    return checkoutStep({ status: v.status, approvePc: pc ? { name: pc.pc?.name ?? null } : null, label: (a) => d.label?.(a) ?? a,
+    const v = co.view(id);
+    return checkoutStep({ status: v.status, label: (a) => d.label?.(a) ?? a,
       handouts: v.handouts.map((h) => ({ agent_id: h.agent_id, status: h.status, waiting: h.status === 'merged' ? ((h.report as { leftovers?: { approved?: boolean; refused?: unknown }[] } | null)?.leftovers ?? []).filter((l) => !l.approved && !l.refused).length : 0 })) });
   };
   const full = (id: string) => ({ checkout: { ...co.view(id), step: stepOf(id) }, ...ck.details(id) });
@@ -52,8 +49,6 @@ export function registerCheckoutApi(api: FastifyInstance, d: CheckoutApiDeps, ac
       const t = d.teams?.team(c.team_id);
       const H = co.handouts(c.id);
       const needs = (open || ['collecting', 'ready', 'rendered', 'restoring'].includes(c.status)) ? co.needsOperator(c, now) : [];
-      const pc = pcWaits(c);
-      if (pc) needs.push({ kind: 'approve_pc', ...pc });
       return { id: c.id, team_id: c.team_id, team: t?.name ?? null, status: c.status, scope: c.scope ?? 'team', agent_id: c.agent_id ?? null, created_at: c.created_at, expires_at: c.expires_at, overdue_at: c.overdue_at,
         handouts: { total: H.length, written: H.filter((h) => h.status === 'written' || h.status === 'consumed').length }, needs_operator: needs, step: stepOf(c.id) };
     }) };
@@ -85,12 +80,14 @@ export function registerCheckoutApi(api: FastifyInstance, d: CheckoutApiDeps, ac
     co.refuseLeftovers(p.id, p.agent, b.report_sha256, b.note, actor(req), b.items);
     return full(p.id);
   });
-  // The prompt (and a code, for another user or a new PC) appears only in this response.
+  // The prompt appears only in this response.
   api.post('/api/checkouts/:id/render', async (req) => {
     const r = ck.render(idOf(req), body(renderBody, req), actor(req));
-    return { ...full(idOf(req)), prompt: r.prompt, approval_needed: r.approval_needed };
+    // With one approved destination there is nothing left to choose, so the hub sends Restore itself; with several, the operator picks one.
+    let restore: { id: string } | null = null;
+    try { restore = d.restoreNow?.(idOf(req), actor(req)) ?? null; } catch { /* the operator's Restore button stays */ }
+    return { ...full(idOf(req)), prompt: r.prompt, restore_sent: !!restore };
   });
-  api.post('/api/checkouts/:id/approve-pc', async (req) => { ck.approvePc(idOf(req), actor(req)); return full(idOf(req)); });
   // The restore's config scan (§6 step 4): per folder, approve the findings (the restore may trust it) or leave it untrusted.
   // findings_sha256 ties the decision to the findings the operator saw: a newer report is refused with conflict.
   api.post('/api/checkouts/:id/scan/:folder', async (req) => {
@@ -126,14 +123,10 @@ export function registerCheckoutApi(api: FastifyInstance, d: CheckoutApiDeps, ac
     return { delegations: dl.list({ agentId: q.agent_id }) };
   });
   api.post('/api/delegations/:id/take-back', async (req) => {
-    const b = body(z.object({ retire_pc: z.boolean().optional() }).strict(), req);
+    const b = body(z.object({}).strict(), req);
     return dl.takeBack(idOf(req), b, actor(req));
   });
-  // The delegate (self): their Home rows, the prompt (rendered now, shown only in this response) and the new PC's confirmation.
+  // The delegate (self): their Home rows, and the prompt (rendered now, shown only in this response).
   api.get('/api/me/delegations', async (req) => ({ delegations: dl.mine(userId(req)) }));
   api.post('/api/me/delegations/:id/prompt', async (req) => dl.openPrompt(idOf(req), userId(req)));
-  api.post('/api/me/delegations/:id/pc', async (req) => {
-    const b = body(z.object({ mine: z.boolean() }).strict(), req);
-    return dl.confirmPc(idOf(req), userId(req), b.mine);
-  });
 }

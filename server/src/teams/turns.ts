@@ -3,9 +3,10 @@
  * `queued` waits for task_start and has no deadline; `work` waits for task_submit; `review` waits for task_review.
  *
  * One function opens turns: handOff() closes the task's open turn, opens the next one, writes the holder's work item
- * and, on an on-demand team, the notice, the same way for every phase, and returns the hand-off (with the wake text for
- * an on-demand holder) to the actor who caused it. A new transition is one handOff() call. At most one turn per task is
- * open (unique index task_turns_open). The hub never wakes a session: the turn records whether the holder has seen it.
+ * and the notice, the same way for every phase, and returns the hand-off (with the wake text) to the actor who caused
+ * it. A new transition is one handOff() call. At most one turn per task is open (unique index task_turns_open). Every
+ * team has one delivery model (migration 0153): a holder acts when woken. The turn records whether the holder's session
+ * has the item (delivered_at, reported by the connector) and whether the holder has read it (seen_at).
  *
  * Seen (docs/specification.md, Task turns): only the holder's successful full read of that task (task_list {task_id},
  * a work_next item that delivers it: read()) or a successful action on its open turn (the transition that closes it, or
@@ -20,20 +21,24 @@
  * A replaced submission (task_submit while in_review) re-opens the review turn: the reviewer has not seen the new
  * submission, and its review deadline counts from the replacement.
  *
- * Clocks (§8.2): a task's clock starts at task_start, never at assignment. On a polling team liveness is per member:
- * its lease ends lease_minutes after MAX(last activity, busy_until), renew() shows it on the member's started tasks, and
- * sweep() finds members whose lease passed so the tick releases everything they hold at once. On an on-demand team
- * only started tasks can pass their check-in time.
+ * Delivered (delivered_at) is apart from seen: the connector reports that a session started a turn on the item
+ * (delivered()), or why it could not (undelivered(): the PC is offline, the chat is in use, or the wake is held on that
+ * platform). Nothing in the hub needs it to move on; the console shows it.
+ *
+ * Clocks (§8.2): a task's clock starts at task_start, never at assignment. Only started tasks can pass their check-in
+ * time; they are then flagged overdue and stay with their holder. Nothing returns to open by itself.
  */
+import { l2 } from '../notices/l2.js';
 import type { Db } from '../db/db.js';
 import type { Actor } from '../audit/audit.js';
 import { newId } from '../util/ids.js';
 import type { TeamRow, TurnCloseReason, TurnPhase, TurnRow } from './teams.js';
 
-/** What a hand-off tells the actor (§8.4): who holds the task now, in which phase, and how to wake an on-demand holder. */
+/** What a hand-off tells the actor (§8.4): who holds the task now, in which phase, and how to wake its holder. */
 export interface Handoff {
+  /** on_demand is always true (one delivery model); kept one release for clients that read it. */
   to: string; to_label: string; phase: TurnPhase; on_demand: boolean; seen: boolean;
-  /** The command to pass to an on-demand holder's session ("review task_x", "start task_x"); absent for poll holders. */
+  /** The command to pass to the holder's session ("review task_x", "start task_x"). */
   wake_text?: string;
   turn_id: string;
 }
@@ -43,7 +48,7 @@ export interface HandOffOpts {
   reason?: TurnCloseReason; dueAt?: number | null; now?: number;
   /** Write the holder's work item (default true); false for the holder's own claim, start or withdraw. */
   item?: boolean;
-  /** Send the on-demand notice (default true); false when the caller sends its own (a settled team_ask, a replaced submission). */
+  /** Send the holder's notice (default true); false when the caller sends its own (a settled team_ask, a replaced submission). */
   notify?: boolean;
 }
 export interface TurnDeps {
@@ -61,9 +66,8 @@ export function phaseOf(status: string): TurnPhase | null {
   if (status === 'in_review') return 'review';
   return null;
 }
-/** The statuses an assignee holds a task in while it waits on them: released together when a poll member's lease passes. */
+/** The statuses an assignee holds a task in while it waits on them. */
 export const HELD_STATUSES = ['assigned', 'changes_requested', 'in_progress'] as const;
-const HELD = HELD_STATUSES.map((x) => `'${x}'`).join(',');
 /**
  * SQL: an operator hold covers this member, so no sweep may release or flag its work (docs/specification.md, "Task turns
  * and deadlines"): a lockdown of all agent writes, of the team, of the agent, or of the PC its team key is bound to. The
@@ -73,27 +77,31 @@ export const heldByLockdown = (team: string, agent: string, credential: string):
   AND s.key IN ('emergency.writes_disabled', 'emergency.team_disabled.'||${team}, 'emergency.agent_disabled.'||${agent},
     'emergency.pc_disabled.'||COALESCE((SELECT c.bound_machine_id FROM credentials c WHERE c.id=${credential}),'')))`;
 const WAKE_VERB: Record<TurnPhase, string> = { queued: 'start', work: 'continue', review: 'review' };
-/** The wake text a hand-off gives for an on-demand holder ("review task_x"): the same words for the console's waiting rows. */
+/** The wake text a hand-off gives for its holder ("review task_x"): the same words for the console's waiting rows. */
 export const wakeText = (phase: TurnPhase, taskId: string): string => `${WAKE_VERB[phase]} ${taskId}`;
-/** The fixed L0 line for the actor (§8.4): it names the task id, never task content. Null for a poll holder. */
+/** The fixed L0 line for the actor (§8.4): it names the task id, never task content. Null once the holder has seen it. */
 export function wakeLine(h: Handoff): string | null {
   if (!h.on_demand || !h.wake_text || h.seen) return null;
-  return `${h.to_label} (on demand) only sees this when woken. Tell its session: ${h.wake_text}`;
+  return `${h.to_label} only sees this when woken. Tell its session: ${h.wake_text}`;
 }
+
+/** Why an item has not reached its agent's session (migrations 0153, 0155, 0165): the PC is offline, the chat is in use, the wake is held on that platform, no session to wake, or (the hub's own reason) the PC's connector is too old for delivery orders. */
+export const DELIVERY_REASONS = ['pc_offline', 'chat_in_use', 'wake_held', 'agent_unknown', 'connector_too_old'] as const;
+export type DeliveryReason = typeof DELIVERY_REASONS[number];
 
 /** A task's open turn as agents see it (task_list, session_whoami). queue_position is null unless the turn is queued. */
 export interface TurnView {
-  turn: { phase: TurnPhase; holder: string; since: number; seen_at: number | null; due_at: number | null };
+  turn: { phase: TurnPhase; holder: string; since: number; seen_at: number | null; due_at: number | null; delivered_at: number | null; delivery_reason: DeliveryReason | null };
   queue_position: number | null;
 }
-interface TurnViewRow { id: string; task_id: string; team_id: string; title: string; phase: TurnPhase; holder_agent_id: string; opened_at: number; seen_at: number | null; due_at: number | null; queue_position: number | null }
+interface TurnViewRow { id: string; task_id: string; team_id: string; title: string; phase: TurnPhase; holder_agent_id: string; opened_at: number; seen_at: number | null; due_at: number | null; delivered_at: number | null; delivery_reason: DeliveryReason | null; queue_position: number | null }
 /** Open turns with their queue place: one queue per holder across all its teams (spec §8.4, matching my_turns), oldest hand-off first. */
-const VIEW_SQL = `SELECT u.id, u.task_id, u.team_id, k.title, u.phase, u.holder_agent_id, u.opened_at, u.seen_at, u.due_at,
+const VIEW_SQL = `SELECT u.id, u.task_id, u.team_id, k.title, u.phase, u.holder_agent_id, u.opened_at, u.seen_at, u.due_at, u.delivered_at, u.delivery_reason,
     CASE WHEN u.phase='queued' THEN (SELECT COUNT(*) FROM task_turns q WHERE q.closed_at IS NULL AND q.phase='queued'
       AND q.holder_agent_id=u.holder_agent_id AND (q.opened_at<u.opened_at OR (q.opened_at=u.opened_at AND q.rowid<=u.rowid))) END AS queue_position
   FROM task_turns u JOIN tasks k ON k.id=u.task_id`;
 const toView = (r: TurnViewRow): TurnView => ({
-  turn: { phase: r.phase, holder: r.holder_agent_id, since: r.opened_at, seen_at: r.seen_at, due_at: r.due_at },
+  turn: { phase: r.phase, holder: r.holder_agent_id, since: r.opened_at, seen_at: r.seen_at, due_at: r.due_at, delivered_at: r.delivered_at ?? null, delivery_reason: r.delivery_reason ?? null },
   queue_position: r.queue_position === null || r.queue_position === undefined ? null : Number(r.queue_position),
 });
 
@@ -162,8 +170,7 @@ export class TurnService {
   /**
    * The one hand-off: the task (already moved to its new status in the caller's transaction) now waits on `to`. Closes
    * the previous turn with `reason`, opens the turn of the new status' phase, and, when someone else caused it, gives
-   * the holder its work item (unless `item: false`) and, on an on-demand team (no work_next polling), a notice when the
-   * holder is not the actor (unless `notify: false`). A work turn takes the task's current deadline
+   * the holder its work item (unless `item: false`) and a notice when the holder is not the actor (unless `notify: false`). A work turn takes the task's current deadline
    * (tasks.lease_expires_at) unless `dueAt` says otherwise.
    */
   handOff(task: TurnTask, team: TeamRow, to: string, by: Actor, opts: HandOffOpts = {}): Handoff {
@@ -172,22 +179,21 @@ export class TurnService {
     const dueAt = opts.dueAt !== undefined ? opts.dueAt
       : phase === 'work' ? ((this.db.prepare('SELECT lease_expires_at d FROM tasks WHERE id=?').get(task.id) as { d: number | null } | undefined)?.d ?? null) : null;
     const turn = this.open({ id: task.id, team_id: team.id }, team, phase, to, by, { reason: opts.reason, dueAt, now: opts.now });
-    const self = turn.seen_at !== null, onDemand = team.delivery_mode === 'on_demand';
-    const item = opts.item !== false, tell = onDemand && !self && opts.notify !== false;
+    const self = turn.seen_at !== null;
+    const item = opts.item !== false, tell = !self && opts.notify !== false;
     const ref = { task: task.id, state: task.status };
     if (phase === 'review') {
       if (item) this.deps.enqueue(to, team.id, 'review_requested', task.id, 2, 'L1');
-      if (tell) this.deps.notify(to, 'review_requested', `Review requested for "${task.title}" (${task.id}): read the submission with task_list and give your verdict with task_review.`, ref);
+      if (tell) this.deps.notify(to, 'review_requested', `Review requested for ${l2(task.title)} (${task.id}): read the submission with task_list and give your verdict with task_review.`, ref);
     } else if (phase === 'queued' && task.status === 'changes_requested') {
       if (item) this.deps.enqueue(to, team.id, 'changes_requested', task.id, 2, 'L1');
-      if (tell) this.deps.notify(to, 'changes_requested', `Changes were requested on "${task.title}" (${task.id}): read the comments with task_list, then task_start and resubmit.`, ref);
+      if (tell) this.deps.notify(to, 'changes_requested', `Changes were requested on ${l2(task.title)} (${task.id}): read the comments with task_list, then task_start and resubmit.`, ref);
     } else if (phase === 'queued') {
       if (item) this.deps.enqueue(to, team.id, 'task_assigned', task.id, 3, 'L1');
-      if (tell) this.deps.notify(to, 'task_assigned', `Task "${task.title}" (${task.id}) is assigned to you: read it with task_list, then task_start when you take it up.`, ref);
+      if (tell) this.deps.notify(to, 'task_assigned', `Task ${l2(task.title)} (${task.id}) is assigned to you: read it with task_list, then task_start when you take it up.`, ref);
     }
     // A work turn (start, withdraw, an unblock back to in_progress) writes no item; the caller sends any notice.
-    const h: Handoff = { to, to_label: this.deps.label(to), phase, on_demand: onDemand, seen: self, turn_id: turn.id };
-    if (onDemand) h.wake_text = wakeText(phase, task.id);
+    const h: Handoff = { to, to_label: this.deps.label(to), phase, on_demand: true, seen: self, turn_id: turn.id, wake_text: wakeText(phase, task.id) };
     this.captured?.push(h);
     return h;
   }
@@ -199,37 +205,31 @@ export class TurnService {
     return this.db.prepare('UPDATE task_turns SET seen_at=? WHERE task_id=? AND holder_agent_id=? AND closed_at IS NULL AND seen_at IS NULL').run(now, taskId, agentId).changes > 0;
   }
   /**
-   * Renew a poll member's lease (§8.2, §8.6, liveness per member): every task it has in progress is due lease_minutes
-   * after MAX(now, busy_until, the task's own progress_until). Queued tasks have no deadline, so nothing else moves.
+   * The connector reports that `agentId`'s session started a turn on this task's open turn (step 2 of the delivery
+   * design): delivered_at is set once, and any earlier reason is cleared. seen_at is left alone: delivered is not read.
+   * Returns whether it changed.
    */
-  renew(team: TeamRow, agentId: string, now = Date.now()): number {
-    const n = Number(this.db.prepare(`UPDATE tasks SET lease_expires_at=MAX(?, COALESCE(progress_until,0),
-        COALESCE((SELECT m.busy_until FROM team_members m WHERE m.team_id=tasks.team_id AND m.agent_id=tasks.assignee_agent_id AND m.removed_at IS NULL),0)) + ?
-      WHERE team_id=? AND assignee_agent_id=? AND status='in_progress'`).run(now, team.lease_minutes * 60_000, team.id, agentId).changes);
-    if (n) this.mirrorWork({ teamId: team.id, holder: agentId });
-    return n;
+  delivered(taskId: string, agentId: string, now = Date.now()): boolean {
+    return this.db.prepare('UPDATE task_turns SET delivered_at=?, delivery_reason=NULL WHERE task_id=? AND holder_agent_id=? AND closed_at IS NULL AND delivered_at IS NULL').run(now, taskId, agentId).changes > 0;
+  }
+  /** The connector could not deliver the open turn yet, and why. A turn already delivered keeps its time. */
+  undelivered(taskId: string, agentId: string, reason: DeliveryReason): boolean {
+    if (!DELIVERY_REASONS.includes(reason)) throw new Error(`undelivered: unknown reason ${reason}`);
+    return this.db.prepare('UPDATE task_turns SET delivery_reason=? WHERE task_id=? AND holder_agent_id=? AND closed_at IS NULL AND delivered_at IS NULL').run(reason, taskId, agentId).changes > 0;
   }
   /**
-   * What the upkeep tick acts on (one query each, §8.4): poll members whose lease has passed (MAX(last activity,
-   * busy_until) + lease_minutes < now, §8.6 and 8.A2) and who still hold a queued or started task; and on-demand work turns past their
-   * check-in time and not yet flagged overdue. A queued task never lapses on its own: only its holder's silence releases it.
-   * A paused team, an away member and a member under an operator lockdown are skipped: nothing is swept while they are held.
+   * What the upkeep tick acts on (§8.4): work turns past their check-in time and not yet flagged overdue. They are
+   * flagged and stay with their holder; nothing returns to open by itself (one delivery model, migration 0153). A paused
+   * team, an away member and a member under an operator lockdown are skipped.
    */
-  sweep(now = Date.now()): { lapsed: { team_id: string; agent_id: string }[]; overdue: { id: string }[] } {
-    const lapsed = this.db.prepare(`SELECT m.team_id, m.agent_id FROM team_members m
-        JOIN teams t ON t.id=m.team_id AND t.status='running' AND t.delivery_mode='poll'
-        LEFT JOIN agents a ON a.id=m.agent_id
-      WHERE m.removed_at IS NULL AND COALESCE(m.away_until,0) <= ? AND NOT ${heldByLockdown('m.team_id', 'm.agent_id', 'm.credential_id')}
-        AND MAX(m.joined_at, COALESCE(m.last_work_next_at,0), COALESCE(a.last_seen_at,0), COALESCE(m.busy_until,0)) + t.lease_minutes*60000 < ?
-        AND EXISTS (SELECT 1 FROM tasks k WHERE k.team_id=m.team_id AND k.assignee_agent_id=m.agent_id AND k.status IN (${HELD}))`)
-      .all(now, now) as unknown as { team_id: string; agent_id: string }[];
+  sweep(now = Date.now()): { overdue: { id: string }[] } {
     // An away assignee (a one-agent checkout, docs/checkout.md §9 F1) keeps its tasks: they are never flagged overdue meanwhile.
     const overdue = this.db.prepare(`SELECT k.id FROM tasks k JOIN teams t ON t.id=k.team_id AND t.status='running'
-      WHERE t.delivery_mode='on_demand' AND k.status='in_progress' AND k.overdue_at IS NULL AND k.lease_expires_at IS NOT NULL AND k.lease_expires_at<?
+      WHERE k.status='in_progress' AND k.overdue_at IS NULL AND k.lease_expires_at IS NOT NULL AND k.lease_expires_at<?
         AND NOT EXISTS (SELECT 1 FROM team_members m WHERE m.team_id=k.team_id AND m.agent_id=k.assignee_agent_id AND m.removed_at IS NULL
           AND (COALESCE(m.away_until,0) > ? OR ${heldByLockdown('m.team_id', 'm.agent_id', 'm.credential_id')}))`)
       .all(now, now) as unknown as { id: string }[];
-    return { lapsed, overdue };
+    return { overdue };
   }
   /**
    * Pause and resume: a team's open review turns move by `ms`. Its work turns move with the tasks' cached deadlines

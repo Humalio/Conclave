@@ -255,7 +255,7 @@ export class BlueprintViews {
       for (const i of items) byKind[i.kind] = (byKind[i.kind] ?? 0) + 1;
       const proposals = (this.db.prepare("SELECT COUNT(*) n FROM bp_proposals WHERE project_id=? AND status='open'").get(p.id) as { n: number }).n;
       return {
-        ...ref(p), kind: p.kind, status: p.status, review_policy: p.review_policy, task_intake: p.task_intake, member_board: !!p.member_board, version: p.version, updated_at: p.updated_at,
+        ...ref(p), kind: p.kind, status: p.status, review_policy: p.review_policy, task_intake: p.task_intake, task_tags: (() => { try { const v = JSON.parse(p.task_tags || '[]'); return Array.isArray(v) ? v : []; } catch { return []; } })(), member_board: !!p.member_board, version: p.version, updated_at: p.updated_at,
         single_team: !!p.single_team, parent_id: p.parent_id && (!o.only || o.only.has(p.parent_id)) ? p.parent_id : null, ecosystem: this.bp.isEcosystem(p.id), status_meanings: statusMeanings(p),
         external_systems: parseSystems(p.external_systems),
         teams: this.teamsOf(p.id).map((t) => ({ id: t.id, name: t.name })),
@@ -274,8 +274,11 @@ export class BlueprintViews {
     if (!it) throw err('not_found', `No item ${key} in ${p.key}.`);
     const other = (k: string) => { const o = this.bp.item(p.id, k); return o ? { key: o.key, kind: o.kind, title: o.title, status: o.status, ...(o.kind === 'milestone' && typeof o.fields['short'] === 'string' && o.fields['short'] ? { short: o.fields['short'] } : {}) } : { key: k, kind: null, title: null, status: null }; };
     const links = this.db.prepare('SELECT * FROM bp_links WHERE project_id=? AND (from_key=? OR to_key=?) ORDER BY rel, from_key, to_key').all(p.id, key, key) as { from_key: string; to_key: string; rel: string; created_at: number }[];
-    const tasks = this.db.prepare(`SELECT k.id, k.title, k.status, k.team_id FROM tasks k JOIN teams t ON t.id=k.team_id, json_each(CASE WHEN json_valid(k.plan_refs) THEN k.plan_refs ELSE '[]' END) j
-      WHERE t.project_id=? AND j.value=? ORDER BY k.created_at DESC LIMIT 50`).all(p.id, key) as { id: string; title: string; status: string; team_id: string }[];
+    const tasks = (this.db.prepare(`SELECT k.id, k.title, k.status, k.team_id, k.recorded_at FROM tasks k JOIN teams t ON t.id=k.team_id, json_each(CASE WHEN json_valid(k.plan_refs) THEN k.plan_refs ELSE '[]' END) j
+      WHERE t.project_id=? AND j.value=? ORDER BY k.created_at DESC LIMIT 50`).all(p.id, key) as { id: string; title: string; status: string; team_id: string; recorded_at: number | null }[])
+      .map(({ recorded_at, ...k }) => ({ ...k, recorded: !!recorded_at }));
+    // Past work recorded as done was never reviewed: it is listed, marked, and never counted (docs/mcp.md, "Record past work").
+    const counted = tasks.filter((t) => !t.recorded);
     const revs = this.bp.revisions(it.id);
     const out: Record<string, unknown> = {
       // What its statuses (and its criteria's) mean here, for the pill's tip (§3, §9).
@@ -291,7 +294,7 @@ export class BlueprintViews {
         in: links.filter((l) => l.to_key === key).map((l) => ({ rel: l.rel, ...other(l.from_key) })),
       },
       // Every task naming the item is listed; done/total count accepted, live work only (like team progress): not backlog, cancelled or discarded.
-      tasks: { items: tasks, done: tasks.filter((t) => t.status === 'done').length, total: tasks.filter((t) => !NOT_COUNTED.includes(t.status)).length },
+      tasks: { items: tasks, done: counted.filter((t) => t.status === 'done').length, total: counted.filter((t) => !NOT_COUNTED.includes(t.status)).length },
       history: { revisions: revs.slice(0, 10).map((r) => ({ rev: r.rev, at: r.at, actor: actorLabel(r.actor_kind, r.actor_id), actor_name: userName(this.db, r.actor_kind, r.actor_id), note: r.change_note, snapshot: r.snapshot })), total: revs.length },
     };
     // The operator's answer to the question that marked a requirement unclear, kept after the mark is cleared (the revisions hold the ask's id).

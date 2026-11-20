@@ -22,31 +22,27 @@ import type { ClientFiles } from '../onboarding/http.js';
 import type { Checkouts, CheckoutRow, HandoutRow, MergedReport } from './checkout.js';
 import { checkoutBranchOf } from './checkout.js';
 import { sha256Hex } from '../util/crypto.js';
-// Codex is prepared but not offered until the F4 spike (R5): see OFFERED_PROVIDERS in fields.ts.
-import { PROVIDERS, OFFERED_PROVIDERS, PERMISSIONS, validRef, validHead, validRemote, validFolder, validUrl, validModel, oneLine, type Provider, type Permission } from './fields.js';
+// Render offers every provider: Codex since the second Codex move trial passed (docs/checkout.md §9 F4).
+import { PROVIDERS, PERMISSIONS, validRef, validHead, validRemote, validFolder, validUrl, validModel, oneLine, type Provider, type Permission } from './fields.js';
 
 export { PROVIDERS, PERMISSIONS, validRef, validHead, type Provider, type Permission };
 
-export type Target = 'same_user' | 'same_pc_other_user' | 'other_pc';
-export const TARGET_NAMES: readonly Target[] = ['same_user', 'same_pc_other_user', 'other_pc'];
-/** Render-issued enrolment codes (new PC, another OS user) expire this long after render (§5). */
-export const CODE_TTL_MS = 30 * 60_000;
+export type Target = 'same_user' | 'other_pc';
+export const TARGET_NAMES: readonly Target[] = ['same_user', 'other_pc'];
 /**
- * The target table (§5, §9 F6 and F8): where the request lives, which key picks up, whether a code and an approval are
- * needed, whether agent keys can be reused, and whether commits must be pushed (and so need a remote).
+ * The target table (§5, §9 F6 and F8): where the request lives, which key picks up, whether
+ * a PC must be enrolled first, whether agent keys can be reused, and whether commits must be pushed (and so need a remote).
  */
-export const TARGETS: Record<Target, { machine: string; pickup_key: string; code: string; approval: string; rotate: 'default_on' | 'forced'; push_list: boolean; needs_remote: boolean }> = {
-  same_user: { machine: 'the source PC', pickup_key: "the source PC's onboarding key (already held)", code: 'none', approval: 'at render', rotate: 'default_on', push_list: false, needs_remote: false },
-  same_pc_other_user: { machine: 'the source PC', pickup_key: 'a second app key for the other OS user', code: 'single use, 30 minutes', approval: 'at render', rotate: 'forced', push_list: true, needs_remote: true },
-  other_pc: { machine: 'an enrolled PC, or a new PC by name', pickup_key: "that PC's onboarding key, or the new PC's", code: 'new PC only: single use, 30 minutes', approval: 'existing PC: at render; new PC: by the operator after it enrols', rotate: 'forced', push_list: true, needs_remote: true },
+export const TARGETS: Record<Target, { machine: string; pickup_key: string; enrol: string; rotate: 'default_on' | 'forced'; push_list: boolean; needs_remote: boolean }> = {
+  same_user: { machine: 'the source PC', pickup_key: "the source PC's onboarding key (already held)", enrol: 'none', rotate: 'default_on', push_list: false, needs_remote: false },
+  other_pc: { machine: 'an enrolled PC', pickup_key: "that PC's onboarding key", enrol: 'the PC is added with the connector first (Add PC)', rotate: 'forced', push_list: true, needs_remote: true },
 };
 
 export interface AgentChoice { provider: Provider; model: string | null; permissions: Permission }
 export interface Choices {
-  target: Target; machine_id: string; new_pc: boolean; rotate_agent_keys: boolean; agents: Record<string, AgentChoice>;
-  /** The app key that picks up (null for reuse), the one render created (second key or new PC) and the source's. */
-  app_key_id: string | null; created_app_key_id: string | null; created_machine_id: string | null; source_app_key_id: string | null;
-  code_expires_at: number | null;
+  target: Target; machine_id: string; rotate_agent_keys: boolean; agents: Record<string, AgentChoice>;
+  /** The app key that picks up (null for reuse) and the source's. */
+  app_key_id: string | null; source_app_key_id: string | null;
 }
 export interface RenderInput {
   target: string; machine_id?: string | null; new_pc_name?: string | null; rotate_agent_keys?: boolean;
@@ -55,7 +51,7 @@ export interface RenderInput {
   agents?: Record<string, { provider?: string; model?: string | null; permissions?: string }>;
 }
 /**
- * The restore's config scan (§6 step 4): what setup.mjs restore reports per folder before any folder trust is written.
+ * The restore's config scan (§6 step 4): what the connector reports per folder before any folder trust is written.
  * hooks: a tracked .claude/settings.json with hooks; mcp_servers: a tracked .mcp.json; claude_config: other tracked .claude/
  * files; codex_config: tracked .codex/ files; role_file: a tracked CLAUDE.md or AGENTS.md; checkout_diff: agent config the
  * checkout/<id> branch changes.
@@ -181,20 +177,18 @@ export class CheckoutKeys implements CheckoutLink {
       targets: {
         // Rotation picks up with the source PC's onboarding key; reuse needs none.
         same_user: { allowed: !!src, reason: !src ? 'source_unknown' : null, rotate_agent_keys: { default: true, reuse_allowed: true, rotate_allowed: !!srcKey, rotate_reason: srcKey ? null : 'no_source_key' }, ...TARGETS.same_user },
-        same_pc_other_user: { allowed: !!src && src.status === 'active' && !remoteWhy, reason: !src ? 'source_unknown' : src.status !== 'active' ? 'source_inactive' : remoteWhy, rotate_agent_keys: { default: true, reuse_allowed: false }, ...TARGETS.same_pc_other_user },
         other_pc: { allowed: !remoteWhy, reason: remoteWhy, rotate_agent_keys: { default: true, reuse_allowed: false }, machines, ...TARGETS.other_pc },
       },
       repo_no_remote: noRemote,
       // Their work stays on the source PC: another user or PC needs accept_unmerged_work (§2 step 4).
       unmerged_work_on_source: this.unmerged(fs),
-      providers: OFFERED_PROVIDERS, permissions: PERMISSIONS,
+      providers: PROVIDERS, permissions: PERMISSIONS,
       agents: Object.fromEntries(fs.map((f) => [f.agentId, this.defaults(f)])),
     };
   }
   private defaults(f: Facts): AgentChoice {
-    const was = f.providerWas.provider ?? 'claude_code', offered = OFFERED_PROVIDERS.includes(was);
-    // An agent that ran on a provider not offered yet (Codex) defaults to Claude Code, without the other provider's model.
-    return { provider: offered ? was : 'claude_code', model: offered ? f.providerWas.model : null, permissions: f.providerWas.permissions ?? 'default' };
+    // An agent keeps the provider it ran on (Claude Code when none is recorded), with its model.
+    return { provider: f.providerWas.provider ?? 'claude_code', model: f.providerWas.model, permissions: f.providerWas.permissions ?? 'default' };
   }
   private agentChoices(fs: Facts[], raw: RenderInput['agents']): Record<string, AgentChoice> {
     if (raw !== undefined && !isObj(raw)) throw err('invalid_argument', 'agents: an object {agent_id: {provider, model, permissions}}');
@@ -206,7 +200,6 @@ export class CheckoutKeys implements CheckoutLink {
       if (!isObj(a)) throw err('invalid_argument', `agents.${f.agentId}: an object`);
       const provider = (a.provider ?? d.provider) as Provider;
       if (!(PROVIDERS as readonly string[]).includes(provider)) throw err('invalid_argument', `agents.${f.agentId}.provider: ${PROVIDERS.join(' or ')}`);
-      if (!OFFERED_PROVIDERS.includes(provider)) throw err('codex_unverified', `agents.${f.agentId}.provider: ${provider} is prepared but not verified yet (docs/checkout.md §9 F4); choose ${OFFERED_PROVIDERS.join(' or ')}.`, { agent_id: f.agentId, provider });
       let model = a.model === undefined ? (provider === d.provider ? d.model : null) : a.model;
       if (model !== null && !validModel(model)) throw err('invalid_argument', `agents.${f.agentId}.model: up to 80 letters, digits, dot, dash, colon or brackets`);
       model = model ?? null;
@@ -227,16 +220,18 @@ export class CheckoutKeys implements CheckoutLink {
   render(id: string, input: RenderInput, actor: Actor) {
     this.co.assertRepoHosts(id, actor); // the repo host allowlist as it stands now (§8)
     if (!isObj(input)) throw err('invalid_argument', 'body: an object');
+    if (input.target === 'same_pc_other_user') throw err('invalid_state', 'That user installs the connector and pairs it (Add PC), then approve a destination on it, then render for that enrolled PC.', { reason: 'other_user_pairs_first' });
     const target = input.target as Target;
     if (!TARGET_NAMES.includes(target)) throw err('invalid_argument', `target: ${TARGET_NAMES.join(', ')}`);
     if (input.rotate_agent_keys !== undefined && typeof input.rotate_agent_keys !== 'boolean') throw err('invalid_argument', 'rotate_agent_keys: true or false');
     if (input.accept_unmerged_work !== undefined && typeof input.accept_unmerged_work !== 'boolean') throw err('invalid_argument', 'accept_unmerged_work: true or false');
-    // The restore client (setup.mjs restore) ships with its template. Without the template there is nothing for an agent to run.
+    // The restore prompt ships as a template; without it there is nothing to give the operator.
     const template = this.d.files.file('restore-prompt.md')?.text;
     if (!template) throw err('restore_unavailable', 'The restore client is not shipped with this hub yet (restore-prompt.md is missing), so a checkout cannot be rendered.');
     const rotate = input.rotate_agent_keys ?? true;
     if (!rotate && target !== 'same_user') throw err('invalid_argument', 'rotate_agent_keys: keys can be reused only for same_user; another user or PC cannot read them.');
-    if (target === 'other_pc' && !!input.machine_id === !!input.new_pc_name) throw err('invalid_argument', 'other_pc: give machine_id (an enrolled PC) or new_pc_name, not both');
+    if (target === 'other_pc' && input.new_pc_name) throw err('invalid_state', 'Add this PC with the connector first (install it and pair it with Add PC), then approve a destination on it, then render for that enrolled PC.', { reason: 'add_pc_first' });
+    if (target === 'other_pc' && !input.machine_id) throw err('invalid_argument', 'other_pc: give machine_id (an enrolled PC)');
     if (target !== 'other_pc' && (input.machine_id || input.new_pc_name)) throw err('invalid_argument', `${target}: the target is the source PC; machine_id and new_pc_name are for other_pc`);
 
     const out = tx(this.db, () => {
@@ -244,7 +239,7 @@ export class CheckoutKeys implements CheckoutLink {
       if (c.status !== 'ready' && c.status !== 'rendered') throw err('invalid_state', `The checkout is ${c.status}; render needs it ready (every handout written, or the operator went on without them).`, { status: c.status });
       const t = this.teams.mustTeam(c.team_id);
       // A one-agent checkout (a delegation) goes to another PC: the agent must not run twice on the source.
-      if (c.scope === 'agent' && target !== 'other_pc') throw err('invalid_argument', 'A delegated agent moves to another PC: choose other_pc with an enrolled PC or a new PC name.');
+      if (c.scope === 'agent' && target !== 'other_pc') throw err('invalid_argument', 'A delegated agent moves to another PC: choose other_pc with an enrolled PC.');
       const fs = this.facts(c);
       const agents = this.agentChoices(fs, input.agents);
       const noRemote = TARGETS[target].needs_remote ? this.noRemote(fs) : [];
@@ -260,38 +255,24 @@ export class CheckoutKeys implements CheckoutLink {
 
       const src = c.source_machine_id ? this.keys.machine(c.source_machine_id) : null;
       if (target !== 'other_pc' && !src) throw err('invalid_state', 'The PC this team runs on is not known (the team was not onboarded), so it can move only to another PC.', { reason: 'source_unknown' });
-      const now = this.co.now(), codeExpiresAt = now + CODE_TTL_MS;
-      let machineId: string, app: Credential | null = null, code: string | null = null, createdKey: string | null = null, createdPc: string | null = null, newPc = false;
+      let machineId: string, app: Credential | null = null;
       const sourceKey = this.sourceKey(c);
       if (target === 'same_user') {
         machineId = src!.id;
         if (rotate) { app = sourceKey; if (!app) throw err('invalid_state', 'The source PC has no active onboarding key to pick up with. Re-enrol it first.', { reason: 'no_source_key' }); }
-      } else if (target === 'same_pc_other_user') {
-        if (src!.status !== 'active') throw err('invalid_state', `The source PC is ${src!.status}.`);
-        machineId = src!.id;
-        const k = this.ob.checkoutKey({ machineId, codeExpiresAt, label: `Checkout ${c.id}: other OS user on ${src!.name}`, otherUserOf: c.id }, actor);
-        app = k.key; code = k.code; createdKey = k.key.id;
-      } else if (input.machine_id) {
-        const m = this.keys.machine(input.machine_id);
+      } else {
+        const m = this.keys.machine(input.machine_id!);
         if (!m) throw err('not_found', 'PC not found');
-        if (m.id === c.source_machine_id) throw err('invalid_argument', 'machine_id is the source PC: choose same_user or same_pc_other_user.');
+        if (m.id === c.source_machine_id) throw err('invalid_argument', 'machine_id is the source PC: choose same_user.');
         if (m.status !== 'active') throw err('invalid_state', `The PC is ${m.status}.`);
         app = this.ob.pcKey(m.id);
-        if (!app) throw err('invalid_state', `${m.name} has no active onboarding key (it was added without one). Re-enrol it first, or choose a new PC.`, { reason: 'no_pc_key' });
+        if (!app) throw err('invalid_state', `${m.name} has no active onboarding key (it was added without one). Re-enrol it first.`, { reason: 'no_pc_key' });
         machineId = m.id;
-      } else {
-        // A new PC: a machines row, its key and a 30-minute code. A PC this checkout created for an earlier render is reused.
-        const name = String(input.new_pc_name);
-        const again = prev?.created_machine_id ? this.keys.machine(prev.created_machine_id) : null;
-        const k = again && again.name === name && again.status === 'active'
-          ? this.ob.checkoutKey({ machineId: again.id, codeExpiresAt, label: `Checkout ${c.id}: new PC ${name}` }, actor)
-          : this.ob.checkoutKey({ newPcName: name, codeExpiresAt, label: `Checkout ${c.id}: new PC ${name}` }, actor);
-        machineId = k.pc.id; app = k.key; code = k.code; createdKey = k.key.id; createdPc = k.pc.id; newPc = true;
       }
 
       let requestId: string | null = null;
       if (rotate) {
-        const r = this.ob.createCheckoutRequest({ app: app!, teamId: t.id, approved: !newPc, body: this.requestBody(c, t.name, t.project ?? null), slots: this.slotsFor(c, fs, t.name) }, actor);
+        const r = this.ob.createCheckoutRequest({ app: app!, teamId: t.id, body: this.requestBody(c, t.name, t.project ?? null), slots: this.slotsFor(c, fs, t.name) }, actor);
         requestId = r.id;
       } else {
         // Reuse (same user only): no key, no pickup. The old logins end now; checkout_resume accepts only a later login (§5).
@@ -299,17 +280,15 @@ export class CheckoutKeys implements CheckoutLink {
         for (const m of this.teams.members(t.id)) ended += this.keys.endTokens(m.credential_id, 'checkout_reuse');
         this.audit.event(actor, 'checkout.logins_ended', { kind: 'checkout', id: c.id }, { tokens: ended });
       }
-      const choices: Choices = { target, machine_id: machineId, new_pc: newPc, rotate_agent_keys: rotate, agents, app_key_id: app?.id ?? null, created_app_key_id: createdKey,
-        created_machine_id: createdPc, source_app_key_id: sourceKey?.id ?? null, code_expires_at: code ? codeExpiresAt : null };
+      const choices: Choices = { target, machine_id: machineId, rotate_agent_keys: rotate, agents, app_key_id: app?.id ?? null, source_app_key_id: sourceKey?.id ?? null };
       const row = this.co.recordRender(c.id, { target_machine_id: machineId, request_id: requestId, choices }, actor);
-      // recordRender() wrote checkout.rendered with the handout hashes (§3); this adds the target choices, never a code.
-      this.audit.event(actor, 'checkout.render_choices', { kind: 'checkout', id: c.id }, { target, machine: machineId, new_pc: newPc, rotate, request: requestId, code: !!code, push_repos: push.length, unmerged_work_on_source: unmerged });
-      return { row, choices, code, push, team: t.name, unmerged, none: this.nothingToMerge(fs) };
+      // recordRender() wrote checkout.rendered with the handout hashes (§3); this adds the target choices.
+      this.audit.event(actor, 'checkout.render_choices', { kind: 'checkout', id: c.id }, { target, machine: machineId, rotate, request: requestId, push_repos: push.length, unmerged_work_on_source: unmerged });
+      return { row, choices, push, team: t.name, unmerged, none: this.nothingToMerge(fs) };
     });
     return {
       checkout: this.co.view(id), push_list: out.push, unmerged_work_on_source: out.unmerged, nothing_to_merge: out.none,
-      prompt: { text: this.prompt(template, out.row, out.choices, out.code, out.push, out.team, out.unmerged, out.none.map((x) => x.agent_id)), code_expires_at: out.choices.code_expires_at, expires_at: out.row.expires_at },
-      approval_needed: out.choices.new_pc,
+      prompt: { text: this.prompt(template, out.row, out.choices, out.push, out.team, out.unmerged, out.none.map((x) => x.agent_id)), expires_at: out.row.expires_at },
     };
   }
   private requestBody(c: CheckoutRow, team: string, project: string | null): CheckoutBodyIn {
@@ -337,42 +316,14 @@ export class CheckoutKeys implements CheckoutLink {
       return { agent_id: f.agentId, role: a.role ?? m.role, team_role: teamRole(m.role), label: a.label, session_var: sessionVar, folder, ceiling };
     });
   }
-  /** Undo the previous render: its request ends (unconfirmed successors reverted), the key and code it created are revoked. */
+  /** Undo the previous render: its request ends (unconfirmed successors reverted), its request is ended. */
   private supersede(c: CheckoutRow, prev: Choices | null, actor: Actor): void {
     if (c.request_id) this.ob.endCheckoutRequest(c.request_id, new Set(), 'render superseded', actor);
-    if (prev?.created_app_key_id) this.dropCreatedKey(prev.created_app_key_id, actor, 'render superseded');
     this.rewire(c.team_id);
-  }
-  private dropCreatedKey(id: string, actor: Actor, reason: string): void {
-    this.ob.revokeKeyCodes(id);
-    const k = this.keys.credential(id);
-    if (k && k.status !== 'revoked') this.keys.setStatus(id, 'revoked', reason, actor);
   }
   private rewire(teamId: string): void {
     const t = this.teams.team(teamId);
     if (t && t.status !== 'done' && t.status !== 'stopped') this.teams.rewire(teamId);
-  }
-
-  /** The new PC enrolled: the operator saw its name and address and approves it; only now are secrets released (§5). */
-  approvePc(id: string, actor: Actor) {
-    tx(this.db, () => {
-      const c = this.co.mustCheckout(id);
-      if (c.status !== 'rendered') throw err('invalid_state', `The checkout is ${c.status}.`);
-      const ch = parse<Choices | null>(c.choices, null);
-      if (!ch?.new_pc || !c.request_id || !ch.app_key_id) throw err('invalid_state', 'This render targets no new PC; nothing to approve.');
-      const e = this.ob.keyEnrolment(ch.app_key_id);
-      if (!e || (e.status !== 'issued' && e.status !== 'confirmed')) throw err('invalid_state', 'The new PC has not enrolled yet. Approve it once it shows its name and address.');
-      // A delegation: the delegate says this PC is theirs before the operator may approve it (an intercepted prompt could
-      // enrol a stranger's PC first).
-      if (c.scope === 'agent' && this.delegateIsMember(c)) {
-        if (c.pc_refused_at) throw err('pc_not_confirmed', `${this.co.personLabel(c.delegate_user_id)} said this PC is not theirs. Cancel the delegation, or let them open the prompt again for a fresh code.`);
-        if (!c.pc_confirmed_at) throw err('pc_not_confirmed', `Wait until ${this.co.personLabel(c.delegate_user_id)} confirms in their console that this PC is theirs.`);
-      }
-      this.ob.approveCheckoutRequest(c.request_id, actor);
-      const pc = this.keys.machine(ch.machine_id);
-      this.audit.event(actor, 'checkout.pc_approved', { kind: 'checkout', id: c.id }, { pc: pc?.name ?? ch.machine_id, enrolled_from: e.enrolled_from, request: c.request_id });
-    });
-    return this.co.view(id);
   }
 
   /** Whether a one-agent checkout's delegate is a console member (an admin delegate needs no PC confirmation). */
@@ -385,26 +336,49 @@ export class CheckoutKeys implements CheckoutLink {
     const c = this.co.mustCheckout(id), ch = parse<Choices | null>(c.choices, null);
     const r = c.request_id ? this.ob.request(c.request_id) : null;
     const pc = ch ? this.keys.machine(ch.machine_id) : null;
-    const enrol = ch?.created_app_key_id ? this.ob.keyEnrolment(ch.created_app_key_id) : null;
     const fs = this.facts(c);
     let push: PushRepo[] = [];
     try { push = ch && TARGETS[ch.target].push_list ? this.pushList(c, fs) : []; } catch { push = []; }
     const unmerged = this.unmerged(fs);
     return {
       options: c.status === 'ready' || c.status === 'rendered' ? this.options(id, fs) : null,
-      target: ch ? { target: ch.target, pc: pc ? { id: pc.id, name: pc.name, status: pc.status } : null, new_pc: ch.new_pc, rotate_agent_keys: ch.rotate_agent_keys,
-        request: r ? { id: r.id, state: r.state, pickup_issues: r.pickup_issues, pickup_allowed: r.pickup_allowed } : null,
-        enrolment: enrol, approval: ch.new_pc ? (r?.state === 'submitted' ? 'waiting' : 'approved') : 'not_needed', code_expires_at: ch.code_expires_at } : null,
+      target: ch ? { target: ch.target, pc: pc ? { id: pc.id, name: pc.name, status: pc.status } : null, rotate_agent_keys: ch.rotate_agent_keys,
+        request: r ? { id: r.id, state: r.state, pickup_issues: r.pickup_issues, pickup_allowed: r.pickup_allowed } : null } : null,
       push_list: push,
       unmerged_work_on_source: unmerged,
       nothing_to_merge: this.nothingToMerge(fs),
       scans: this.scans(c),
+      restore: ch ? this.restoreWay(ch) : null,
+      restore_order: this.restoreOrder(id),
     };
+  }
+
+  /** The latest Restore order for this checkout: its state, what it waits for, and the start lines once it is done. */
+  private restoreOrder(id: string): { state: string; note: string | null; reason: string | null; start_lines: string[] } | null {
+    const a = this.db.prepare("SELECT state, result FROM pc_actions WHERE kind='restore' AND json_extract(payload,'$.checkout_id')=? ORDER BY created_at DESC, rowid DESC LIMIT 1").get(id) as { state: string; result: string | null } | undefined;
+    if (!a) return null;
+    const r = parse<{ progress?: string; reason?: string; start_lines?: string[] } | null>(a.result, null);
+    return { state: a.state, note: r?.progress ?? null, reason: r?.reason ?? null, start_lines: Array.isArray(r?.start_lines) ? r!.start_lines! : [] };
+  }
+
+  /**
+   * How this checkout gets restored, in plain words (§6 "Restore by the connector"). The connector on an enrolled PC carries out
+   * the operator's Restore into a destination its user approved. A PC that has not enrolled needs Add PC first, and another OS user on a PC
+   * pairs their own connector; this says so instead of leaving the operator to find out.
+   */
+  private restoreWay(ch: Choices): { via: 'connector' | 'no_destination' | 'add_pc_first'; text: string; destinations: { id: string; label: string }[] } {
+    const pc = this.keys.machine(ch.machine_id);
+    const name = pc?.name ?? 'the PC';
+    const rep = this.db.prepare('SELECT destinations FROM connector_reports WHERE machine_id=?').get(ch.machine_id) as { destinations: string | null } | undefined;
+    if (!rep) return { via: 'add_pc_first', destinations: [], text: `The connector on ${name} has not reported in. Add the PC (Add PC), have its user pair the connector, then render this checkout for it.` };
+    const destinations = parse<{ id: string; label: string }[]>(rep.destinations, []);
+    if (!destinations.length) return { via: 'no_destination', destinations, text: `The user of ${name} has not approved a destination for a restored team. Ask them to approve a folder on the connector's screen, then send Restore.` };
+    return { via: 'connector', destinations, text: `The connector on ${name} restores this team when you send Restore, into a folder its user approved.` };
   }
 
   // ───── the restore client's view and the config scan (§6) ─────
   /**
-   * What setup.mjs restore reads from GET /onboard/requests/:id: the agents with their render choices, folder, session
+   * What the connector reads from GET /onboard/requests/:id: the agents with their render choices, folder, session
    * variable and handout body (L2, raw, so the client checks it against the render hash), and the scan per folder. No secret.
    */
   clientView(r: RequestRow): unknown {
@@ -414,7 +388,7 @@ export class CheckoutKeys implements CheckoutLink {
     const slots = this.ob.slots(r.id), hs = new Map(this.co.handouts(c.id).map((h) => [h.agent_id, h]));
     return {
       id: c.id, status: c.status, target: ch?.target ?? null, rotate_agent_keys: ch?.rotate_agent_keys ?? null, team: this.teams.team(c.team_id)?.name ?? null,
-      // One agent of the team (a delegation) or the whole team: setup.mjs restore words its result by it.
+      // One agent of the team (a delegation) or the whole team: the connector words its result by it.
       scope: c.scope ?? 'team', delegate: c.scope === 'agent' && c.delegate_user_id ? this.co.personLabel(c.delegate_user_id) : null,
       agents: slots.filter((s) => s.status !== 'closed').map((s) => {
         const h = hs.get(s.agent_id), ac = ch?.agents[s.agent_id];
@@ -519,7 +493,7 @@ export class CheckoutKeys implements CheckoutLink {
    * The restore prompt (§6): the hub's template (restore-prompt.md), filled by the hub. Keys
    * are placeholders only; handout facts appear only in a fenced block labelled as data, and notes never.
    */
-  private prompt(tpl: string, c: CheckoutRow, ch: Choices, code: string | null, push: PushRepo[], team: string, unmerged: string[] = [], none: string[] = []): string {
+  private prompt(tpl: string, c: CheckoutRow, ch: Choices, push: PushRepo[], team: string, unmerged: string[] = [], none: string[] = []): string {
     const slots = c.request_id ? this.ob.slots(c.request_id) : [];
     const agents = this.co.handouts(c.id).map((h) => {
       const a = this.keys.agent(h.agent_id), s = slots.find((x) => x.agent_id === h.agent_id), ac = ch.agents[h.agent_id];
@@ -527,11 +501,10 @@ export class CheckoutKeys implements CheckoutLink {
       return { agent_id: h.agent_id, label: a?.label ?? h.agent_id, role: a?.role ?? null, folder: s?.folder ?? old?.folder ?? null, session_key: `\${${s?.session_var ?? old?.session_var ?? 'SESSION_KEY'}}`, ...ac };
     });
     const pc = this.keys.machine(ch.machine_id);
-    const where = ch.target === 'same_user' ? `the same OS user on ${pc?.name}` : ch.target === 'same_pc_other_user' ? `another OS user on ${pc?.name}` : `${ch.new_pc ? 'the new PC' : 'the PC'} ${pc?.name}`;
+    const where = ch.target === 'same_user' ? `the same OS user on ${pc?.name}` : `the PC ${pc?.name}`;
     const collect = !ch.rotate_agent_keys
       ? 'Keys are reused (same user): there is nothing to run, so skip steps 2 to 4, this command and step 6. Each agent keeps its folder and its key. Tell me to start each agent again in its folder as before (one terminal each); its first call there is `checkout_resume`, accepted only from a login made after this prompt was created. If an agent changes provider, remove the previous provider\'s MCP config from its folder first.'
-      : `node ~/.config/conclave/setup.mjs restore --hub ${this.d.hubUrl} --checkout ${c.id} --request ${c.request_id}${this.d.files.ca() ? ` --ca-sha256 ${this.d.files.ca()!.sha256}` : ''} --max-minutes 7`
-        + (code ? '\n(the enrolment code is read from ~/.config/conclave/onboarding/enrol-code and sent in a header, never in a URL)' : "\n(it picks up with this PC's app key from ~/.config/conclave/keys.env)");
+      : 'The connector on the target PC restores this checkout; there is nothing to run here. If the PC has no connector yet, install it and pair it with Add PC in the console (another OS user pairs their own connector, then the administrator renders for that PC), and the PC user approves a restore destination (`conclave destinations add <folder>`). Then the administrator sends Restore from the console, and the connector builds every folder, picks the keys up and confirms. Wait for it, then start each agent with the line the connector shows (`conclave restores`).';
     const pushText = (push.length
       ? push.map((r) => `- ${r.url} (${r.remote_name}): ${r.branches.map((b) => `${b.branch} at ${b.tip ?? b.heads.at(-1)}${b.unreviewed ? ' (not approved yet)' : ''}`).join('; ')}`).join('\n')
       : '(nothing to push: same user, the clone is already there)')
@@ -539,8 +512,7 @@ export class CheckoutKeys implements CheckoutLink {
       // Agent ids only: the reason is the agent's own text (L2) and stays out of the prompt; the console and the vault page show it.
       + (none.length ? `\nNothing to merge (the agent reported no repository): ${none.join(', ')}` : '');
     const vals: Record<string, string> = {
-      HUB_URL: this.d.hubUrl, CHECKOUT_ID: c.id, REQUEST_ID: c.request_id ?? '', TEAM_NAME: team, TARGET: where, ENROL_CODE: code ?? '',
-      CODE_LINE: code ? `\nEnrolment code (single use, until ${new Date(ch.code_expires_at!).toISOString()}): ${code}${ch.new_pc ? '\nAfter enrolment, wait: the administrator approves this PC before any key is released.' : ''}` : '',
+      HUB_URL: this.d.hubUrl, CHECKOUT_ID: c.id, REQUEST_ID: c.request_id ?? '', TEAM_NAME: team, TARGET: where,
       COLLECT: collect, PUSH_LIST: pushText, AGENTS: JSON.stringify(agents, null, 2),
       SETUP_SHA256: this.d.files.file('setup.mjs')?.sha256 ?? '(setup.mjs not installed on the hub)', HELPER_SHA256: this.d.files.file('agent-hub-headers.mjs')?.sha256 ?? '(agent-hub-headers.mjs not installed on the hub)', CA_SHA256: this.d.files.ca()?.sha256 ?? '(no CA certificate configured on the hub)',
       EXPIRES_AT: new Date(c.expires_at).toISOString(),
@@ -605,12 +577,7 @@ export class CheckoutKeys implements CheckoutLink {
     const ch = parse<Choices | null>(c.choices, null);
     if (!c.request_id || !ch) return; // reuse: the same keys go on
     const moved = this.settle(c);
-    let sourceRevoked = false;
-    if (ch.target === 'same_pc_other_user' && ch.source_app_key_id) {
-      const k = this.keys.credential(ch.source_app_key_id);
-      if (k && k.status !== 'revoked' && !this.liveSlot(k.id)) { this.keys.setStatus(k.id, 'revoked', `checkout ${c.id}: moved to another OS user`, sys); sourceRevoked = true; }
-    }
-    this.audit.event(sys, 'checkout.keys_settled', { kind: 'checkout', id: c.id }, { old_keys_revoked: moved, source_app_key_revoked: sourceRevoked });
+    this.audit.event(sys, 'checkout.keys_settled', { kind: 'checkout', id: c.id }, { old_keys_revoked: moved });
   }
   /** Revoke the old key of every confirmed successor and close the moved agents' earlier slots. Returns how many. */
   private settle(c: CheckoutRow, only?: Set<string>): number {
@@ -625,14 +592,9 @@ export class CheckoutKeys implements CheckoutLink {
     }
     return n;
   }
-  private liveSlot(appKeyId: string): boolean {
-    return !!this.db.prepare(`SELECT 1 x FROM onboarding_slots s JOIN onboarding_requests q ON q.id=s.request_id JOIN credentials k ON k.id=s.credential_id
-      WHERE q.app_credential_id=? AND s.status IN ('issued','confirmed') AND k.status='active' LIMIT 1`).get(appKeyId);
-  }
   /**
    * Cancel or expiry (§3, §5): unconfirmed successors are revoked; a confirmed successor whose agent has not resumed is
    * undone (membership and grants back, old sessions reinstated); an agent that already resumed on the target stays moved.
-   * The key and code render created are revoked unless a moved agent uses that key.
    */
   private ended(c: CheckoutRow, how: 'cancelled' | 'expired'): void {
     const ch = parse<Choices | null>(c.choices, null);
@@ -645,8 +607,6 @@ export class CheckoutKeys implements CheckoutLink {
     }
     if (resumed.size) this.settle(c, resumed);
     this.ob.endCheckoutRequest(c.request_id, resumed, `checkout ${how}`, sys);
-    if (ch?.created_app_key_id && !resumed.size) this.dropCreatedKey(ch.created_app_key_id, sys, `checkout ${how}`);
-    else if (ch?.created_app_key_id) this.ob.revokeKeyCodes(ch.created_app_key_id);
     this.rewire(c.team_id);
     this.audit.event(sys, 'checkout.keys_undone', { kind: 'checkout', id: c.id }, { how, kept_moved: [...resumed] });
   }

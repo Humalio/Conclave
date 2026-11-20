@@ -25,6 +25,7 @@ import { registerPhase3 } from './phase3.js';
 import type { Messaging } from '../messaging/messaging.js';
 import type { Teams } from '../teams/teams.js';
 import { registerTeams } from './teams.js';
+import { TeamStart } from '../teams/teamStart.js';
 import { registerMemberBoard } from './memberBoard.js';
 import { registerWorkFeed } from './workFeed.js';
 import { registerVaultApi } from './vaultApi.js';
@@ -53,6 +54,10 @@ import type { Graph } from '../graph/graph.js';
 import type { Phase5Deps } from './phase5.js';
 import { registerOnboardingApi } from './onboardingApi.js';
 import { registerConnectorApi } from './connectorApi.js';
+import { through, type Relays, type ThroughRelay } from '../relay/relays.js';
+import { registerRelayApi } from './relayApi.js';
+import { registerVaultSyncApi } from './vaultSyncApi.js';
+import type { VaultSync } from '../vaultsync/vaultSync.js';
 import type { Connector } from '../connector/connector.js';
 import { registerCheckoutApi } from './checkoutApi.js';
 import type { Delegations } from '../checkout/delegate.js';
@@ -75,7 +80,7 @@ import { ownedAgents } from './accountView.js';
 const COOKIE = 'ah_admin';
 const SESSION_MS = 12 * 60 * 60 * 1000;
 
-export interface AdminDeps { users: Users; routing: Routing; demo?: DemoController; db: Db; keys: Keys; audit: Audit; vault: Vault; store: VaultStore; config: Config; loginLimit: RateLimit; setup: Setup; links: Links; messaging: Messaging; teams: Teams; phase5: Omit<Phase5Deps, 'db' | 'keys' | 'audit'>; graph: Graph; feedback: Feedback; hardware: Hardware; decisions: Decisions; directives: Directives; onboarding: Onboarding; clientFiles: ClientFiles; blueprint: Blueprint; checkouts?: Checkouts; checkoutKeys?: CheckoutKeys; delegations?: Delegations; mirror?: Mirror; ownerScope?: OwnerScope; keyCollections?: KeyCollections; taskAttachments?: TaskAttachments; connector?: Connector }
+export interface AdminDeps { users: Users; routing: Routing; demo?: DemoController; db: Db; keys: Keys; audit: Audit; vault: Vault; store: VaultStore; config: Config; loginLimit: RateLimit; setup: Setup; links: Links; messaging: Messaging; teams: Teams; phase5: Omit<Phase5Deps, 'db' | 'keys' | 'audit'>; graph: Graph; feedback: Feedback; hardware: Hardware; decisions: Decisions; directives: Directives; onboarding: Onboarding; clientFiles: ClientFiles; blueprint: Blueprint; checkouts?: Checkouts; checkoutKeys?: CheckoutKeys; delegations?: Delegations; mirror?: Mirror; ownerScope?: OwnerScope; keyCollections?: KeyCollections; taskAttachments?: TaskAttachments; connector?: Connector; vaultSync?: VaultSync; relays?: Relays }
 interface AdminCtx { id: string; username: string; csrf: string; totp: boolean; role: 'admin' | 'member'; user: UserRow }
 declare module 'fastify' { interface FastifyRequest { admin?: AdminCtx; member?: MemberScope } }
 
@@ -172,6 +177,13 @@ export function registerAdminApi(f: FastifyInstance, d: AdminDeps): string[] {
     });
     const actor = (req: FastifyRequest): Actor => ({ kind: 'admin', id: req.admin!.id, role: req.admin!.role });
     const body = <T extends z.ZodType>(s: T, req: FastifyRequest): z.infer<T> => s.parse(req.body ?? {});
+    /** A key prompt "through relay X" (docs/relay.md): the registered relay, or a not_found. */
+    const relayOf = (id: string | null | undefined): ThroughRelay | null => {
+      if (!id) return null;
+      const r = d.relays?.get(id);
+      if (!r) throw new KeyError('not_found', 'No such relay.');
+      return through(r);
+    };
     const idOf = (req: FastifyRequest) => (req.params as { id: string }).id;
     const cred = (id: string): Credential => { const c = keys.credential(id); if (!c) throw new KeyError('not_found', 'key not found'); return c; };
 
@@ -482,8 +494,9 @@ export function registerAdminApi(f: FastifyInstance, d: AdminDeps): string[] {
       // Rotate secret, and Make a new prompt for a key that never logged in: the same act, audited as key.rotate.
       // reason: could the key have leaked; delivery: a key prompt, or Collect on the key's PC by its Codex wake, offered only for
       // a routine rotation of a key that has logged in (docs/onboarding.md#collect-on-a-pc-the-codex-wake-picks-up-a-routine-rotation).
-      const b = body(z.object({ reason: z.enum(['routine', 'suspected_leak']).optional(), delivery: z.enum(['prompt', 'collect']).optional() }), req);
+      const b = body(z.object({ reason: z.enum(['routine', 'suspected_leak']).optional(), delivery: z.enum(['prompt', 'collect']).optional(), relay_id: z.string().nullable().optional() }), req);
       const old = cred(idOf(req));
+      const relay = relayOf(b.relay_id);
       const delivery = b.delivery ?? 'prompt';
       let offer: ReturnType<KeyCollections['offer']> | null = null;
       if (delivery === 'collect') {
@@ -495,7 +508,7 @@ export function registerAdminApi(f: FastifyInstance, d: AdminDeps): string[] {
       return tx(db, () => {
         const r = keys.rotate(old.id, actor(req), { reason: b.reason ?? null, delivery });
         if (offer) return { key: view(keys.credential(r.credential.id)!), collection: d.keyCollections!.arm(r.credential.id, offer, actor(req)) };
-        return r.credential.kind === 'session_key' ? keyPrompt(r, old.first_used_at ? 'rotated' : 'reissued', actor(req)) : { key: view(r.credential), secret: r.secret };
+        return r.credential.kind === 'session_key' ? keyPrompt(r, old.first_used_at ? 'rotated' : 'reissued', actor(req), relay) : { key: view(r.credential), secret: r.secret };
       });
     });
     // The key page's collection line and whether Collect would be offered for the next rotation.
@@ -514,11 +527,12 @@ export function registerAdminApi(f: FastifyInstance, d: AdminDeps): string[] {
     api.post('/api/keys/:id/collect/prompt', async (req) => {
       const c = cred(idOf(req));
       if (!d.keyCollections) throw new KeyError('invalid_state', 'This key has no open collection.');
+      const relay = relayOf(body(z.object({ relay_id: z.string().nullable().optional() }), req).relay_id);
       return tx(db, () => {
         // A collection that has not ended (open, picked up, confirmed, signed in) is ended first, so it cannot later blank
         // the prompt's key; after it ended (expired, failed, a conflict) the prompt is made directly.
         if (LIVE_STATUSES.includes(d.keyCollections!.latest(c.id)?.status ?? '')) d.keyCollections!.cancel(c.id, actor(req), 'prompt_instead');
-        return keyPrompt(keys.reissueSecret(c.id, 'pickup'), 'rotated', actor(req));
+        return keyPrompt(keys.reissueSecret(c.id, 'pickup'), 'rotated', actor(req), relay);
       });
     });
     api.post('/api/keys/:id/end-logins', async (req) => ({ ended: keys.endLogins(idOf(req), actor(req)) }));
@@ -582,7 +596,7 @@ export function registerAdminApi(f: FastifyInstance, d: AdminDeps): string[] {
      * single-use pickup code and the key's secret is made at pickup, so it never leaves the hub here; a free key with no PC
      * gets its raw key, the one accepted exception. `handoff` is the prompt text, for the screens that only show text.
      */
-    function keyPrompt(r: { credential: Credential; secret: string }, reason: 'new' | 'rotated' | 'reissued', a: Actor) {
+    function keyPrompt(r: { credential: Credential; secret: string }, reason: 'new' | 'rotated' | 'reissued', a: Actor, relay: ThroughRelay | null = null) {
       const t = keys.keyTarget(r.credential.id), c = keys.credential(r.credential.id)!;
       const agent = keys.agent(c.agent_id!)?.label ?? c.label;
       // The login and work-loop tools every session has are left out: the line says what the rules decide, for this key on
@@ -596,7 +610,7 @@ export function registerAdminApi(f: FastifyInstance, d: AdminDeps): string[] {
         allowed: (DEFAULT_TOOLS as readonly string[]).includes(tool) ? !explicitlyDenied(rules, cap, 'tool.invoke', `tool:${tool}`) : authorize(rules, cap, 'tool.invoke', `tool:${tool}`).allowed })));
       if (t.pc && t.session_var) {
         const p = keys.armPickup(c.id, t.pc.id, t.session_var, a);
-        const text = pickupPrompt({ hubUrl: config.publicUrl, setupSha256: d.clientFiles.file('setup.mjs')?.sha256 ?? null, code: p.code, expiresAt: p.expires_at, pc: t.pc.name,
+        const text = pickupPrompt({ ...(relay ? { relay } : {}), hubUrl: relay ? relay.origin : config.publicUrl, setupSha256: d.clientFiles.file('setup.mjs')?.sha256 ?? null, code: p.code, expiresAt: p.expires_at, pc: t.pc.name,
           sessionVar: t.session_var, agent, client: clientOf(t.client_app), folder: t.folder, tools, reason });
         return { key: view(keys.credential(c.id)!), prompt: { text, mode: 'pickup' as const, pc: t.pc.name, session_var: t.session_var, client: clientOf(t.client_app), expires_at: p.expires_at, note: t.note }, handoff: text };
       }
@@ -630,8 +644,9 @@ export function registerAdminApi(f: FastifyInstance, d: AdminDeps): string[] {
 
     registerPhase2(api, { db, keys, setup: d.setup, links: d.links, config, audit, connector: d.connector }, actor);
     if (d.connector) registerConnectorApi(api, { keys, connector: d.connector, messaging: d.messaging }, actor);
+    if (d.vaultSync) registerVaultSyncApi(api, { sync: d.vaultSync }, actor);
     registerPhase3(api, { db, keys, messaging: d.messaging }, actor);
-    registerTeams(api, { db, keys, teams: d.teams, routing: d.routing, openPart: (id, a, o) => { d.blueprint.openTeamPart(id, { kind: 'operator', id: a.id }, o); }, setupOf: (id) => d.onboarding.setupOfTeam(id), attachments: d.taskAttachments }, actor);
+    registerTeams(api, { db, keys, teams: d.teams, routing: d.routing, openPart: (id, a, o) => { d.blueprint.openTeamPart(id, { kind: 'operator', id: a.id }, o); }, setupOf: (id) => d.onboarding.setupOfTeam(id), attachments: d.taskAttachments, teamStart: d.connector ? new TeamStart(d.teams, keys, d.connector, audit) : undefined }, actor);
     if (d.taskAttachments) registerAttachmentApi(api, { attachments: d.taskAttachments, store: d.store });
     registerMemberBoard(api, { db, keys, teams: d.teams, attachments: d.taskAttachments });
     registerWorkFeed(api, { db });
@@ -646,12 +661,14 @@ export function registerAdminApi(f: FastifyInstance, d: AdminDeps): string[] {
     registerFeedbackApi(api, { feedback: d.feedback }, actor);
     registerHardwareApi(api, { hardware: d.hardware }, actor);
     registerDirectivesApi(api, { directives: d.directives }, actor);
-    registerOnboardingApi(api, { keys, onboarding: d.onboarding, files: d.clientFiles, config, connector: d.connector }, actor);
-    if (d.checkouts && d.checkoutKeys) registerCheckoutApi(api, { checkouts: d.checkouts, checkoutKeys: d.checkoutKeys, delegations: d.delegations, teams: d.teams, label: (a) => keys.agent(a)?.label ?? a }, actor);
+    registerOnboardingApi(api, { keys, onboarding: d.onboarding, files: d.clientFiles, config, connector: d.connector, relays: d.relays }, actor);
+    if (d.relays) registerRelayApi(api, { relays: d.relays }, actor);
+    if (d.checkouts && d.checkoutKeys) registerCheckoutApi(api, { checkouts: d.checkouts, checkoutKeys: d.checkoutKeys, delegations: d.delegations, teams: d.teams, label: (a) => keys.agent(a)?.label ?? a,
+      restoreNow: d.connector ? (id, who) => d.connector!.restoreIfOneDestination(id, who) : undefined }, actor);
     if (d.mirror) registerMirrorApi(api, d.mirror, actor);
     registerDecisionsApi(api, { db, decisions: d.decisions, teams: d.teams, vault, routing: d.routing }, actor);
     const bpSources = new Sources(db, vault);
-    registerBlueprintApi(api, { db, blueprint: d.blueprint, routing: d.routing, bpRouting, sources: bpSources, meetings: new Meetings(db, vault, bpSources) }, actor);
+    registerBlueprintApi(api, { db, blueprint: d.blueprint, teams: d.teams, routing: d.routing, bpRouting, sources: bpSources, meetings: new Meetings(db, vault, bpSources) }, actor);
 
     // ───── templates ─────
     api.get('/api/templates', async () => ({ templates: keys.templates() }));

@@ -23,7 +23,7 @@ describe('findCodes (§2.1)', () => {
     expect(findCodes('Project A v0.3 RC (P25 + P26)', NO)).toEqual(['P25', 'P26']);
     expect(findCodes('S2m A6 gate read', NO)).toEqual(['S2m', 'A6']);
     expect(findCodes("T′ and T' rise; H_oa holds at B1i", NO)).toEqual(['T′', "T'", 'H_oa', 'B1i']);
-    expect(findCodes('Notes in 02 Projects/TWINARK/03 Evidence and src/v2/app.ts', NO)).toEqual([]);
+    expect(findCodes('Notes in Projects/EXAMPLE/03 Evidence and src/v2/app.ts', NO)).toEqual([]);
     expect(findCodes('On 2026-11-16, 95% of 3rd runs were 10x faster in 48h: https://x.test/A17 `A17` FR-TEAM-04 ECHO', { keys: new Set(['FR-TEAM-04', 'ECHO']) })).toEqual([]);
     expect(findCodes('Agent agent-ab12cd34 measured CF-28 at f6f163d', NO)).toEqual(['CF-28', 'f6f163d']);
   });

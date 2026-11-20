@@ -15,9 +15,12 @@ import { homedir } from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { readJson, atomicWrite, canonicalFolder, WIN, oneLine } from './paths.mjs';
 import { readKeyFile, putAgentKey, LABEL_RE } from './keyfile.mjs';
+import { pickupApproved, requestPickup, spendPickup } from './approvals.mjs';
 import { connect, request } from './hubclient.mjs';
 import { registerFolder } from './register.mjs';
 import { record } from './manifest.mjs';
+import { rerecord } from './registry.mjs';
+import { OVERRIDE, overrideState, writeOverride } from './role.mjs';
 import { codexToml, nodePath, connectorPath, gitPath } from './entries.mjs';
 import { gitState } from './git.mjs';
 import { validateRequest, shellQuote, summary } from './request.mjs';
@@ -104,22 +107,31 @@ function localLabel(a, taken) {
 }
 
 /**
- * Builds one agent's folder and registers it: the folder, its instructions file (if there is none), git with
- * everything excluded (when git is there), the connector's MCP entry, approval and folder trust, all in the manifest.
+ * Builds one agent's folder and registers it: the folder, git with everything excluded (when git is there), the
+ * connector's MCP entry, approval and folder trust, all in the manifest. A Claude Code agent gets its instructions as
+ * CLAUDE.md (if there is none). A Codex agent gets the layout a restored one gets (docs/connector.md "Codex folders"):
+ * its binding marked Codex, so its local server offers the commit tool; the role file AGENTS.override.md with its marker,
+ * listed in .git/info/exclude with the connector's other files; and .codex/config.toml. An AGENTS.md there is left as it is.
  */
 export function buildAgent(home, s, a, { claudeJson, node, connector, win = WIN, gitBin } = {}) {
   const dir = folderOf(s, a);
   mkdirSync(dir, { recursive: true });
   const { section } = hubOf(home, s.hub_key);
-  const reg = registerFolder(home, dir, { hubId: section.hub_id, caSha256: section.ca_sha256, agent: a.label, claudeJson, node, connector, win });
-  const folder = reg.folder, cx = { home, claudeJson, folders: [folder] };
   const codex = isCodex(a.client ?? s.request.client);
-  const md = join(folder, codex ? 'AGENTS.md' : 'CLAUDE.md');
-  if (!existsSync(md) && a.instructions) {
+  // An override the connector did not write (someone else's, or the old Codex setup's) is never replaced: stop before writing anything.
+  if (codex) {
+    const st = overrideState(dir);
+    if (st === 'old') throw new Error(`This folder holds an ${OVERRIDE} from the old Codex setup. Run conclave migrate (it replaces it), then Retry.`);
+    if (st === 'unmarked') throw new Error(`This folder holds an ${OVERRIDE} that Conclave did not write, and setup never overwrites it. Move it away, then Retry.`);
+  }
+  const reg = registerFolder(home, dir, { hubId: section.hub_id, caSha256: section.ca_sha256, agent: a.label, claudeJson, node, connector, win, provider: codex ? 'codex' : null, team: s.request.team_id ? { id: s.request.team_id, name: s.request.team_name } : null });
+  const folder = reg.folder, cx = { home, claudeJson, folders: [folder] };
+  const md = join(folder, 'CLAUDE.md');
+  if (!codex && !existsSync(md) && a.instructions) {
     const text = a.instructions.endsWith('\n') ? a.instructions : a.instructions + '\n';
     writeFileSync(md, text);
     // The hash of what setup wrote: a removal deletes the file only while it still holds exactly that.
-    record(home, { kind: codex ? 'codex_instructions' : 'instructions', target: md, folder, pointer: null, before: null, installed: { sha256: createHash('sha256').update(text).digest('hex') } }, cx);
+    record(home, { kind: 'instructions', target: md, folder, pointer: null, before: null, installed: { sha256: createHash('sha256').update(text).digest('hex') } }, cx);
   }
   if (codex) {
     const toml = join(folder, '.codex', 'config.toml');
@@ -142,6 +154,11 @@ export function buildAgent(home, s, a, { claudeJson, node, connector, win = WIN,
       record(home, { kind: 'git_exclude', target: ex, folder, pointer: null, before: null, installed: '*' }, cx);
     }
   }
+  // After git init, so the role file and the connector's files are listed in .git/info/exclude as in a restored clone.
+  // The connector wrote these files itself: record the folder's settings as they now are, so check sees no change.
+  if (codex) writeOverride(home, folder, a.instructions ?? '', cx);
+  // Last, after every write above (CLAUDE.md included): the folder's settings as they now are, so `conclave check` sees no change.
+  rerecord(home, folder);
   return folder;
 }
 
@@ -164,11 +181,15 @@ export async function advance(home, hubKey, { waitS = 0, claudeJson, node, conne
     if (['denied', 'withdrawn', 'cancelled'].includes(st.state)) return { phase: 'closed', state: st.state, note: st.operator_note ?? null };
     if (st.state === 'collected' && !s.pickup_id) throw new SetupError('collected_elsewhere', 'The hub says these keys were already collected, but not by this PC\'s setup. Ask the administrator to re-enrol this PC.');
     if (st.state === 'approved' && (!s.pickup_id || s.keys_written_for !== s.pickup_id)) {
+      // At the standard level a pickup hands over session keys, and the platform store opens for any process of this user: the PC's user clicks first.
+      if (!pickupApproved(home, hubKey, s.request.id)) { requestPickup(home, hubKey, s.request.id, `session keys for the approved team request ${s.request.team_name ?? s.request.id}`); return { phase: 'waiting', pickup_click: true }; }
       const { section } = hubOf(home, hubKey);
       const taken = new Set(Object.keys(section.agents ?? {}));
       const p = await call(home, hubKey, 'POST', '/onboard/pickup', { request_id: s.request.id });
+      spendPickup(home, hubKey, s.request.id);
       s.pickup_id = p.pickup_id;
       s.request.team_name = p.team?.name ?? s.request.team_name;
+      if (p.team?.id) s.request.team_id = p.team.id;
       s.agents = p.agents.map((a) => {
         const label = localLabel(a, taken);
         taken.add(label);

@@ -24,19 +24,24 @@
 import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { X509Certificate } from 'node:crypto';
+import { X509Certificate, randomBytes } from 'node:crypto';
 import { atomicWrite, canonicalFolder, readJson, sha256, pathKey, WIN } from './paths.mjs';
-import { LABEL_RE, HUB_ID_RE, putHub, putAgentKey, removeAgentKey, removeHub, caFingerprint, normalizeOrigin, hubKeyOf, readKeyFile, findHub } from './keyfile.mjs';
+import { LABEL_RE, HUB_ID_RE, putHub, putAgentKey, removeAgentKey, removeHub, caFingerprint, pemBlocks, singleCaPem, normalizeOrigin, hubKeyOf, readKeyFile, findHub } from './keyfile.mjs';
 import { bindFolder, unbindFolder, foldersOfHub } from './registry.mjs';
 import { mcpEntry, nodePath, connectorPath, writeMcpEntry, approveInSettings, codexToml, SERVER_NAME } from './entries.mjs';
 import { applyTrust } from './trust.mjs';
 import { record, manifestPath } from './manifest.mjs';
 import { connect, callTool, request } from './hubclient.mjs';
 import { invalidateHub } from './tokens.mjs';
+import { OVERRIDE, overrideState, oldOverrideBody, writeOverride } from './role.mjs';
 
 const OLD = 'agent-hub';
 const stateFile = (home) => join(home, 'migration', 'state.json');
-const backupDir = (home) => join(home, 'migration', 'backup');
+/**
+ * Where one move keeps its rollback copies: a folder of its own (`migration/backups/<run>`, named in its journal), so a
+ * second run never overwrites the first run's copies. A journal from before had them in `migration/backup`.
+ */
+const backupDir = (home, data) => (typeof data?.backup_dir === 'string' && /^[a-z0-9-]{1,40}$/.test(data.backup_dir) ? join(home, 'migration', 'backups', data.backup_dir) : join(home, 'migration', 'backup'));
 
 // ───────────── what an old PC looks like ─────────────
 function parseEnv(text) {
@@ -143,6 +148,9 @@ function discoverAll(home) {
 // ───────────── the plan ─────────────
 /** `{ok, problems, steps, https}`: nothing is changed. `https` is the origin and CA the connector will pin. */
 export function plan(home, { https = null } = {}) {
+  // An interrupted move (a crash or a power loss) has removed some old pieces already: the plan can only be made again
+  // once it is rolled back, which --apply does first.
+  if (readJson(stateFile(home), null)?.status === 'applying') return { ok: true, problems: [], steps: ['an earlier move was interrupted (a crash or a power loss): --apply rolls it back first, from its own copies, then plans and makes the move again; --rollback only rolls it back'] };
   const d = discoverAll(home);
   if (!d.ok) return { ok: false, problems: [d.reason], steps: [] };
   const problems = [];
@@ -151,11 +159,14 @@ export function plan(home, { https = null } = {}) {
   if (d.moved) { caPem = d.caPem; caSha = d.caSha256; } // a PC that already moved: the pinned hub is the key file's
   else if (d.https) {
     try { caPem = readFileSync(d.caFile, 'utf8'); caSha = caFingerprint(caPem); } catch { problems.push('ca_missing'); }
+    // Exactly one certificate, stored as the parsed certificate's own PEM.
+    if (caPem !== null && !caSha) problems.push(pemBlocks(caPem) > 1 ? 'ca_bundle' : 'ca_invalid'); else if (caPem !== null) caPem = singleCaPem(caPem);
     if (caSha && d.caSha256 && caSha !== d.caSha256) problems.push('ca_mismatch');
   } else if (!https) problems.push('http_needs_https');
   else {
     const o = normalizeOrigin(https.origin);
     try { caPem = https.caPem; caSha = caFingerprint(caPem); } catch { problems.push('ca_invalid'); }
+    if (caPem && !caSha) problems.push(pemBlocks(caPem) > 1 ? 'ca_bundle' : 'ca_invalid'); else if (caPem) caPem = singleCaPem(caPem);
     if (!o) problems.push('https_origin_invalid'); else origin = o;
     if (caSha && caSha !== String(https.caSha256 ?? '').toLowerCase()) problems.push('ca_sha_differs_from_given');
   }
@@ -176,7 +187,7 @@ export function plan(home, { https = null } = {}) {
   else steps.push('stop the old Codex wake and the old stand-alone file-transfer bridge if they are running (transfers then use the app key in the connector service)');
   steps.push("use the hub's own id for the key-file section (asked over the pinned connection)");
   steps.push(`copy the hub key and ${todo.length} agent key(s) into the key file`);
-  for (const a of todo) steps.push(`${a.label}${a.wake ? ` (a Codex agent with its own keys file ${a.ownKeys}, found through the wake config)` : ''}: ${[a.pieces.claude && 'replace the agent-hub entry in .mcp.json', a.pieces.codex && 'replace the bridge in .codex/config.toml'].filter(Boolean).join(' and ')}`);
+  for (const a of todo) steps.push(`${a.label}${a.wake ? ` (a Codex agent with its own keys file ${a.ownKeys}, found through the wake config)` : ''}: ${[a.pieces.claude && 'replace the agent-hub entry in .mcp.json', a.pieces.codex && 'replace the bridge in .codex/config.toml', a.pieces.codex && overrideState(a.canon) === 'old' && `replace the old ${OVERRIDE} with the connector's`].filter(Boolean).join(' and ')}`);
   steps.push('sign every agent in through the connector; if one fails, roll everything back');
   return { ok: !problems.some((p) => !/^(no_old_entry|key_missing|agent_label_invalid|folder_missing)/.test(p)) && todo.length > 0, problems, steps, origin, caPem, caSha, agents: todo, moved: !!d.moved, allAgents: d.agents };
 }
@@ -225,11 +236,11 @@ export async function askHubId(sec) {
 }
 
 class Journal {
-  constructor(home) { this.home = home; this.files = []; this.n = 0; this.data = { version: 1, status: 'applying', started_at: new Date().toISOString(), files: [], hub_key: null, folders: [], wake: null, notes: [] }; }
+  constructor(home) { this.home = home; this.files = []; this.n = 0; this.data = { version: 1, status: 'applying', started_at: new Date().toISOString(), backup_dir: `${Date.now().toString(36)}-${randomBytes(3).toString('hex')}`, files: [], hub_key: null, folders: [], wake: null, notes: [] }; }
   /** Saves the file as it is now (or its absence) before it is changed. */
   before(path) {
     const rec = { path, backup: null, after_sha: null };
-    if (existsSync(path)) { mkdirSync(backupDir(this.home), { recursive: true }); rec.backup = `b${++this.n}.bak`; atomicWrite(join(backupDir(this.home), rec.backup), readFileSync(path), true); }
+    if (existsSync(path)) { mkdirSync(backupDir(this.home, this.data), { recursive: true }); rec.backup = `b${++this.n}.bak`; atomicWrite(join(backupDir(this.home, this.data), rec.backup), readFileSync(path), true); }
     this.data.files.push(rec); this.save(); return rec;
   }
   /** Records what the file holds after the move, so a rollback can tell whether anyone edited it since. */
@@ -313,6 +324,20 @@ export async function dryRunRetired(home, pl, opts = {}) {
  * Returns `{ok, rolledBack, reason, lines}`. The only network step is the sign-in probe, before any change and after.
  */
 export async function migrate(home, opts = {}) {
+  // A move that a crash or a power loss interrupted (its journal still says `applying`) is rolled back from its own copies
+  // first, so this run starts from the PC as it was and never writes over the copies the first run saved.
+  const resumed = [];
+  const before = readJson(stateFile(home), null);
+  if (before?.status === 'applying') {
+    try { resumed.push('an earlier move was interrupted; it was rolled back first', ...rollbackFrom(home, before, { keepCopies: true }).lines); } catch (e) {
+      return { ok: false, rolledBack: false, reason: 'interrupted_move', lines: [`An earlier move was interrupted and could not be rolled back (${String(e.message).slice(0, 120)}). Nothing else was changed; its copies are kept in ${backupDir(home, before)}.`] };
+    }
+  }
+  const r = await migrateNow(home, opts);
+  return resumed.length ? { ...r, lines: [...resumed, ...r.lines] } : r;
+}
+
+async function migrateNow(home, opts) {
   const pl = plan(home, opts);
   if (pl.problems.includes('finish_first')) return { ok: false, rolledBack: false, reason: 'finish_first', lines: [FINISH_FIRST] };
   if (!pl.ok) return { ok: false, rolledBack: false, reason: pl.problems.find((p) => !/^(no_old_entry|key_missing|agent_label_invalid|folder_missing)/.test(p)) ?? pl.problems[0], lines: pl.problems };
@@ -376,7 +401,14 @@ export async function migrate(home, opts = {}) {
         if (next === null) { lines.push(`${a.label}: .codex/config.toml was not written by setup, so it was left alone`); } else { atomicWrite(toml, next); record(home, { kind: 'codex_entry', target: toml, folder: f, pointer: `mcp_servers.${SERVER_NAME}`, before: null, installed: codexToml({ node, connector, folder: f }) }, cx); }
         j.after(r3);
       }
-      const binding = bindFolder(home, f, { hubId: pl.hubId, caSha256: pl.caSha, agent: a.label });
+      // The role overlay the old codex.mjs wrote is an old piece: the connector's marked one replaces it, with the same hub text.
+      if (a.pieces.codex && overrideState(f) === 'old') {
+        const o = join(f, OVERRIDE), r4 = j.before(o), rx = j.before(join(f, '.git', 'info', 'exclude'));
+        writeOverride(home, f, oldOverrideBody(readFileSync(o, 'utf8')), cx, { replaceOld: true });
+        j.after(r4); j.after(rx);
+        lines.push(`${a.label}: replaced the old ${OVERRIDE} with the connector's (the same hub text, with its marker line)`);
+      }
+      const binding = bindFolder(home, f, { hubId: pl.hubId, caSha256: pl.caSha, origin: pl.origin, agent: a.label, provider: a.pieces.codex && !a.pieces.claude ? 'codex' : null });
       if (claudeJson && a.pieces.claude) {
         const had = new Set(Object.keys(readJson(claudeJson, {})?.projects ?? {}));
         const t = applyTrust(claudeJson, f, binding, { win: opts.win });
@@ -422,14 +454,14 @@ export async function migrate(home, opts = {}) {
 }
 
 // ───────────── rollback and finish ─────────────
-function rollbackFrom(home, data) {
+function rollbackFrom(home, data, { keepCopies = false } = {}) {
   const lines = [];
   for (const rec of [...data.files].reverse()) {
     const now = existsSync(rec.path) ? sha256(readFileSync(rec.path)) : null;
     if (rec.after_sha !== null && now !== rec.after_sha) { lines.push(`kept ${rec.path}: it was edited after the move`); continue; }
     if (rec.removed && rec.after_sha === null && now !== null) { lines.push(`kept ${rec.path}: a new file was put there after the move`); continue; }
     if (rec.after_sha === null && rec.backup === null && now === null) continue;
-    if (rec.backup) atomicWrite(rec.path, readFileSync(join(backupDir(home), rec.backup)));
+    if (rec.backup) atomicWrite(rec.path, readFileSync(join(backupDir(home, data), rec.backup)));
     else rmSync(rec.path, { force: true });
   }
   for (const f of data.folders ?? []) { try { unbindFolder(home, f); } catch { /* not bound */ } }
@@ -449,14 +481,16 @@ function rollbackFrom(home, data) {
   if (data.wake?.stopped) lines.push('the old Codex wake was stopped by the move and is not restarted for you');
   data.status = 'rolled_back'; data.rolled_back_at = new Date().toISOString();
   atomicWrite(stateFile(home), JSON.stringify(data, null, 2) + '\n');
-  rmSync(backupDir(home), { recursive: true, force: true });
+  // An interrupted move's copies stay until --finish: the run that follows it never writes over them.
+  if (!keepCopies) rmSync(backupDir(home, data), { recursive: true, force: true });
   return { lines };
 }
 
 /** `conclave migrate --rollback`. */
 export function rollback(home) {
   const data = readJson(stateFile(home), null);
-  if (!data || data.status !== 'applied') return { ok: false, reason: 'nothing_to_roll_back', lines: [] };
+  // `applying` is a move a crash or a power loss interrupted: it is rolled back from its own copies like a finished one.
+  if (!data || (data.status !== 'applied' && data.status !== 'applying')) return { ok: false, reason: 'nothing_to_roll_back', lines: [] };
   const r = rollbackFrom(home, data);
   return { ok: true, reason: null, lines: r.lines };
 }
@@ -487,7 +521,9 @@ export function finish(home, { removeLegacyCa = false, userEnv = defaultUserEnv 
   if (left.length) return { ok: false, reason: 'retired_agents_remain', lines: [`these retired agents were skipped and their folders are still on this PC: ${left.map((s) => `${s.label} (${s.folder})`).join('; ')}`, 'remove those folders (they have no live key), then run `conclave migrate --finish` again'] };
   const lines = [];
   data.status = 'finished'; data.finished_at = new Date().toISOString();
-  rmSync(backupDir(home), { recursive: true, force: true });
+  // every run's copies go, an interrupted run's kept ones too
+  rmSync(backupDir(home, data), { recursive: true, force: true });
+  rmSync(join(home, 'migration', 'backups'), { recursive: true, force: true });
   atomicWrite(stateFile(home), JSON.stringify(data, null, 2) + '\n');
   lines.push('the rollback copies were removed; the move can no longer be undone');
   const val = userEnv.get('NODE_EXTRA_CA_CERTS');

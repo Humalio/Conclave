@@ -17,8 +17,13 @@ import { discover, plan, migrate, rollback, finish, legacyPieces, replaceCodexTa
 import { caFingerprint, readKeyFile } from './connector/keyfile.mjs';
 import { resolveFolder } from './connector/registry.mjs';
 import { runCheck } from './connector/check.mjs';
+import { startBroker } from './connector/broker.mjs';
+import { approveFolderByConnector } from './connector/approvals.mjs';
+process.env.CONCLAVE_KEY_STORE = 'file';
 import { canonicalFolder, WIN } from './connector/paths.mjs';
 import { line } from './connector/reasons.mjs';
+import { OVERRIDE_MARKER, overrideState } from './connector/role.mjs';
+import { agentsOverride } from './codex.mjs';
 
 const CLI = join(dirname(fileURLToPath(import.meta.url)), 'conclave.mjs');
 const APP = 'ah_app_FAKEappKEYforMIGRATIONtest01';
@@ -27,6 +32,8 @@ const KEY_B = 'ah_ses_FAKEsessionKEYforMIGRATIONb2';
 const KEY_C = 'ah_ses_FAKEsessionKEYforMIGRATIONc3';
 const tmp = [];
 const mk = (p = 'conclave-mig-') => { const d = mkdtempSync(join(tmpdir(), p)); tmp.push(d); return d; };
+// A move's rollback copies: in a folder of its own under migration/backups (one per run).
+const hasBackups = (home) => { const d = join(home, 'migration', 'backups'); return existsSync(d) && readdirSync(d).some((r) => readdirSync(join(d, r)).length > 0); };
 after(() => { for (const d of tmp) rmSync(d, { recursive: true, force: true }); });
 
 function findOpenssl() {
@@ -60,6 +67,10 @@ function stubHub(pki, valid = new Set([KEY_A, KEY_B]), id = 'hub-real-1') {
       const m = JSON.parse(raw);
       const send = (s, b) => { res.writeHead(s, { 'content-type': 'application/json' }); res.end(JSON.stringify(b)); };
       if (req.headers.authorization !== `Bearer ${APP}`) return send(401, { error: 'unauthorized' });
+      if (req.url.startsWith('/connector/v1/turn-tokens')) {
+        if (req.url.endsWith('/turn-tokens') && !hub.valid.has(m.session_key)) return send(401, { error: 'unauthorized' });
+        return send(200, { token: 'tok-turn', agent_id: 'agent-1', label: 'A', expires_at: Date.now() + 900_000, ended: true });
+      }
       if (m.params?.name === 'session_login') {
         hub.logins++;
         if (hub.retired.has(m.params.arguments.session_key)) return send(200, { jsonrpc: '2.0', id: m.id, result: { isError: true, content: [], structuredContent: { error: 'key_inactive', message: 'This session key is revoked.' } } });
@@ -182,6 +193,18 @@ describe('the plan', () => {
     writeFileSync(s.caFile, other.ca);
     assert.ok(plan(s.home).problems.includes('ca_mismatch'));
   });
+  test('a CA file or a given CA with a second certificate blocks the move; one certificate is kept as itself', tlsOpts, () => {
+    const pki = makePki('Plan CA 4'), other = makePki('Plan CA 5');
+    const s = oldPc({ origin: 'https://127.0.0.1:9', pki });
+    writeFileSync(s.caFile, pki.ca + other.ca);
+    assert.ok(plan(s.home).problems.includes('ca_bundle'));
+    const h = oldPc({ origin: 'http://127.0.0.1:9' });
+    const given = plan(h.home, { https: { origin: 'https://127.0.0.1:9', caPem: pki.ca + other.ca, caSha256: caFingerprint(pki.ca) } });
+    assert.ok(given.problems.includes('ca_bundle'));
+    writeFileSync(s.caFile, `note\n${pki.ca}`);
+    const ok = plan(s.home);
+    assert.ok(!ok.problems.includes('ca_bundle') && !ok.problems.includes('ca_invalid'), ok.problems.join(', '));
+  });
   test('the command line prints the plan and exits 0 or 1', tlsOpts, async () => {
     const pki = makePki('Cli CA');
     const s = oldPc({ origin: 'https://127.0.0.1:9', pki });
@@ -199,6 +222,8 @@ describe('apply, rollback and finish', { concurrency: false }, () => {
     try {
       const s = oldPc({ origin: hub.origin, pki });
       const keysEnv = readFileSync(join(s.home, 'keys.env'), 'utf8');
+      writeFileSync(join(s.fx, 'AGENTS.override.md'), agentsOverride({ label: 'codex-agent', role: 'developer', team: 'T', instructions: 'The old playbook.' }));
+      assert.equal(overrideState(s.fx), 'old');
       const r = await migrate(s.home, { claudeJson: s.claudeJson, win: WIN });
       assert.equal(r.ok, true, r.lines.join('\n'));
       const kf = readKeyFile(s.home).data;
@@ -211,13 +236,19 @@ describe('apply, rollback and finish', { concurrency: false }, () => {
       assert.deepEqual(mcp.conclave.args.slice(1), ['mcp', s.fc]);
       const toml = readFileSync(join(s.fx, '.codex', 'config.toml'), 'utf8');
       assert.match(toml, /\[mcp_servers\.conclave\]/); assert.doesNotMatch(toml, /agent_hub|codex-bridge/); assert.match(toml, /model = "gpt-test"/);
+      const role = readFileSync(join(s.fx, 'AGENTS.override.md'), 'utf8');
+      assert.equal(role.split('\n')[0], OVERRIDE_MARKER, 'the old override from codex.mjs is replaced by the marked one');
+      assert.match(role, /\nThe old playbook\.\n$/, 'with its playbook kept');
+      assert.equal(resolveFolder(s.home, s.fx).binding.provider, 'codex');
       for (const p of [join(s.home, 'keys.env'), join(s.home, 'agent-hub-headers.mjs'), join(s.home, 'codex-bridge.mjs'), join(s.home, 'setup.mjs'), join(s.home, 'onboarding', 'state.json'), join(s.fc, '.agent-hub.json'), join(s.fx, '.agent-hub.json')]) assert.equal(existsSync(p), false, `${p} is removed`);
-      assert.ok(existsSync(join(s.home, 'migration', 'backup')), 'each removed file is saved for the rollback');
+      assert.ok(hasBackups(s.home), 'each removed file is saved for the rollback');
       assert.match(r.lines.join('\n'), /removed the old pieces: .*keys\.env/);
       assert.ok(!r.lines.join('\n').includes(keysEnv.split('\n')[1]), 'no key in the output');
       assert.equal(resolveFolder(s.home, s.fc).ok, true); assert.equal(resolveFolder(s.home, s.fx).ok, true);
       assert.equal(migrationState(s.home).status, 'applied');
-      assert.equal((await runCheck(s.home, s.fc, { claudeJson: s.claudeJson, win: WIN, probe: true })).ok, true);
+      approveFolderByConnector(s.home, s.fc, resolveFolder(s.home, s.fc).binding); // the probe goes through the connector's broker
+      const brk = await startBroker({ home: s.home, deps: { renewMs: 3_600_000 } });
+      try { assert.equal((await runCheck(s.home, s.fc, { claudeJson: s.claudeJson, win: WIN, probe: true })).ok, true); } finally { await brk.close(); }
       assert.equal(plan(s.home).problems[0], 'nothing_to_migrate');
       assert.ok(!r.lines.join('\n').includes(KEY_A) && !r.lines.join('\n').includes(APP));
     } finally { await hub.close(); }
@@ -346,7 +377,7 @@ describe('apply, rollback and finish', { concurrency: false }, () => {
       const r = await migrate(s.home, { claudeJson: s.claudeJson, win: WIN, run: (cmd, args) => { calls.push([cmd, ...args].join(' ')); return { status: 1, stdout: '', stderr: '' }; } });
       assert.equal(r.ok, true, r.lines.join('\n'));
       const kf = readKeyFile(s.home).data; const sec = kf.hubs[Object.keys(kf.hubs)[0]];
-      assert.deepEqual(Object.keys(sec.agents).sort(), ['rowan', 'claude-agent', 'codex-agent']);
+      assert.deepEqual(Object.keys(sec.agents).sort(), ['claude-agent', 'codex-agent', 'rowan']);
       assert.match(readFileSync(join(fa, '.codex', 'config.toml'), 'utf8'), /\[mcp_servers\.conclave\]/);
       for (const n of ['rowan-keys.env']) assert.equal(existsSync(join(s.base, n)), true, `${n} stays`);
       for (const n of ['codex-wake.json', 'codex-wake.mjs', 'codex-bridge.mjs']) assert.equal(existsSync(join(s.home, n)), true, `${n} stays for the wake`);
@@ -371,7 +402,7 @@ describe('apply, rollback and finish', { concurrency: false }, () => {
       const r = await migrate(s.home, { claudeJson: s.claudeJson, win: WIN });
       assert.equal(r.ok, true, r.lines.join('\n'));
       const kf = readKeyFile(s.home).data; const sec = kf.hubs[Object.keys(kf.hubs)[0]];
-      assert.deepEqual(Object.keys(sec.agents).sort(), ['rowan', 'claude-agent', 'codex-agent']);
+      assert.deepEqual(Object.keys(sec.agents).sort(), ['claude-agent', 'codex-agent', 'rowan']);
       assert.equal(readFileSync(join(s.fc, '.mcp.json'), 'utf8'), mcpBefore, 'the folders that had moved are left alone');
       assert.equal(existsSync(join(s.home, 'codex-wake.json')), true);
       assert.equal(migrationState(s.home).status, 'applied');
@@ -403,6 +434,30 @@ describe('apply, rollback and finish', { concurrency: false }, () => {
       assert.equal(oldState(s), before, 'the first move is still restored byte for byte');
     } finally { await hub.close(); }
   }, 90000);
+  test('a move a crash interrupted is rolled back first on the rerun; the first run copies stay intact', tlsOpts, async () => {
+    const pki = makePki('Crash CA'), hub = await stubHub(pki);
+    try {
+      const s = oldPc({ origin: hub.origin, pki });
+      const before = oldState(s);
+      assert.equal((await migrate(s.home, { claudeJson: s.claudeJson, win: WIN })).ok, true);
+      // a crash after the changes but before the journal said `applied`
+      const jf = join(s.home, 'migration', 'state.json');
+      const j = JSON.parse(readFileSync(jf, 'utf8')); j.status = 'applying'; writeFileSync(jf, JSON.stringify(j));
+      const dir = join(s.home, 'migration', 'backups');
+      const copies = () => Object.fromEntries(readdirSync(dir).flatMap((r) => readdirSync(join(dir, r)).map((b) => [`${r}/${b}`, readFileSync(join(dir, r, b), 'utf8')])));
+      const first = copies();
+      assert.ok(Object.keys(first).length > 0);
+      assert.match(plan(s.home).steps.join('\n'), /an earlier move was interrupted/);
+      const r = await migrate(s.home, { claudeJson: s.claudeJson, win: WIN });
+      assert.equal(r.ok, true, r.lines.join('\n'));
+      assert.match(r.lines[0], /an earlier move was interrupted; it was rolled back first/);
+      const now = copies();
+      for (const [k, v] of Object.entries(first)) assert.equal(now[k], v, `${k} is kept as the first run saved it`);
+      assert.equal(readdirSync(dir).length, 2, 'the rerun keeps its copies in a folder of its own');
+      assert.equal(rollback(s.home).ok, true);
+      assert.equal(oldState(s), before, 'rolling back the rerun gives the PC as it was before both runs');
+    } finally { await hub.close(); }
+  }, 90000);
   test('a wake config that lists a workspace keeps the wake and its files even when no listed folder is moved now', tlsOpts, async () => {
     const pki = makePki('WakeKeep CA'), hub = await stubHub(pki);
     try {
@@ -426,7 +481,7 @@ describe('apply, rollback and finish', { concurrency: false }, () => {
       assert.deepEqual([r.ok, r.reason], [false, 'retired_agents_remain']);
       assert.match(r.lines.join('\n'), /codex-agent/);
       assert.equal(migrationState(s.home).status, 'applied', 'the move can still be undone');
-      assert.ok(existsSync(join(s.home, 'migration', 'backup')));
+      assert.ok(hasBackups(s.home));
       rmSync(s.fx, { recursive: true, force: true });
       assert.equal(finish(s.home, { userEnv: { get: () => null, unset() {} } }).ok, true);
     } finally { await hub.close(); }
@@ -468,11 +523,11 @@ describe('apply, rollback and finish', { concurrency: false }, () => {
       const mkEnv = (val) => { const e = { val, unset: 0 }; return { e, env: { get: () => e.val, unset: () => { e.unset++; e.val = null; } } }; };
       const s = oldPc({ origin: hub.origin, pki });
       assert.equal((await migrate(s.home, { claudeJson: s.claudeJson })).ok, true);
-      assert.ok(existsSync(join(s.home, 'migration', 'backup')));
+      assert.ok(hasBackups(s.home));
       const a = mkEnv('C:\\somewhere\\else.pem');
       const f1 = finish(s.home, { removeLegacyCa: true, userEnv: a.env });
       assert.equal(f1.ok, true); assert.equal(a.e.unset, 0, 'another file is not ours to remove');
-      assert.equal(existsSync(join(s.home, 'migration', 'backup')), false);
+      assert.equal(hasBackups(s.home), false);
       assert.equal(rollback(s.home).ok, false, 'after finish there is no rollback');
       // the same variable pointing at the old hub-ca.pem, no consent: left; with consent: removed
       const s2 = oldPc({ origin: hub.origin, pki });

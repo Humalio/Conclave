@@ -5,6 +5,7 @@
  *   token        ah_tok_<secret>          returned by session_login, passed on every call
  * Only an HMAC of each secret is stored. Key ids are public and used for lookup.
  */
+import { plainNotice } from '../notices/l2.js';
 import type { Db } from '../db/db.js';
 import { tx } from '../db/db.js';
 import { hmacHex, randomToken, safeEqualHex, sha256Hex } from '../util/crypto.js';
@@ -46,7 +47,7 @@ export interface Agent {
 export interface OwnerClaim { by: string; at: number; agents: number }
 const CLAIM_KEY = 'agent_owner.claim', ENFORCE_KEY = 'agent_owner.enforcement';
 export interface Machine { id: string; name: string; description: string | null; status: string; created_at: number; os?: string | null; setup_status?: string; bridge_version?: string | null; bridge_last_seen_at?: number | null }
-export interface Notice { id: string; agent_id: string; seq: number; kind: string; body: string; created_at: number; ref_kind?: string | null; ref_id?: string | null }
+export interface Notice { id: string; agent_id: string; seq: number; kind: string; body: string; created_at: number; ref_kind?: string | null; ref_id?: string | null; l2?: string[] }
 
 /** The default and the largest limit of live logins on one app key. A new app key starts at the default. */
 export const DEFAULT_LIVE_LOGINS = 100, MAX_LIVE_LOGINS = 500;
@@ -58,6 +59,8 @@ const CRED_COLS = 'id,kind,agent_id,machine_id,app_name,label,key_id,status,stat
 export const SESSION_VAR_RE = /^[A-Z][A-Z0-9_]{0,63}$/;
 export const KEY_PICKUP_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 export const TOKEN_IDLE_MS = 60 * 60 * 1000;
+/** A turn token lives this long unless the connector renews it (docs/connector.md, "Isolation levels"). */
+export const TURN_TOKEN_MS = 15 * 60 * 1000;
 /** What a notice is about (agent_notices.ref_kind, 0106): its settler says when it stops describing the current state. */
 export type NoticeRefKind = 'task' | 'feedback' | 'directive' | 'directive_stop';
 /** notify()'s ref: the one shape, or the two older ones (`{task, state}`, `{feedback, rev}`) that callers still pass. */
@@ -288,6 +291,7 @@ export class Keys {
       this.db.prepare("UPDATE machines SET status='retired' WHERE id=?").run(id);
       this.audit.event(actor, 'pc.retire', { kind: 'pc', id }, { reason, app_keys_revoked: revoked });
     });
+    this.onAccessEnded?.({ machine: id });
   }
   setMachineStatus(id: string, status: 'active' | 'suspended', actor: Actor): void {
     if (!this.machine(id)) throw new KeyError('not_found', 'PC not found');
@@ -298,6 +302,7 @@ export class Keys {
       }
     });
     this.audit.event(actor, status === 'suspended' ? 'pc.suspend' : 'pc.reactivate', { kind: 'pc', id });
+    if (status === 'suspended') this.onAccessEnded?.({ machine: id });
   }
 
   // ───────────── Credentials ─────────────
@@ -419,6 +424,7 @@ export class Keys {
         }
       }
     });
+    if (status !== 'active') this.onAccessEnded?.({ credential: id });
     this.audit.event(actor, `key.${status === 'active' ? 'reactivate' : status === 'suspended' ? 'suspend' : 'revoke'}`, { kind: 'credential', id }, { reason });
     return this.credential(id)!;
   }
@@ -578,7 +584,7 @@ export class Keys {
     return tx(this.db, () => {
       const c = this.credential(id); if (!c) throw new KeyError('not_found', 'key not found');
       if (c.kind !== 'session_key' || c.status !== 'active') throw new KeyError('invalid_state', 'only an active session key gets a pickup code');
-      if (!SESSION_VAR_RE.test(sessionVar)) throw new KeyError('invalid_argument', 'the keys.env variable must be 1 to 64 capitals, digits or underscores, starting with a letter');
+      if (!SESSION_VAR_RE.test(sessionVar)) throw new KeyError('invalid_argument', 'the session variable must be 1 to 64 capitals, digits or underscores, starting with a letter');
       const now = Date.now(), code = `cnv_key_${randomToken(17).slice(0, 26)}`, expires = now + KEY_PICKUP_TTL_MS;
       this.db.prepare("UPDATE key_pickups SET status='void' WHERE credential_id=? AND status='open'").run(id);
       this.voidCollections(id, 'prompt_instead');
@@ -634,6 +640,9 @@ export class Keys {
    * check, and refuses a collected key used through any app key but the one it was collected for, on this PC or another.
    */
   collectGuard: ((ses: Credential, app: Credential) => void) | null = null;
+  /** Vault sync (docs/vault-sync.md): a reader's rules stay read-only whoever edits them, and its key never logs in as a working agent. */
+  ruleGuard: ((policyId: string, rules: Omit<Rule, 'id'>[]) => void) | null = null;
+  loginGuard: ((credentialId: string) => void) | null = null;
   /** The open pickup of a key, if any (the console shows its expiry). */
   openPickup(id: string): { machine_id: string; session_var: string; expires_at: number } | null {
     return (this.db.prepare("SELECT machine_id, session_var, expires_at FROM key_pickups WHERE credential_id=? AND status='open' AND expires_at>? ORDER BY created_at DESC LIMIT 1").get(id, Date.now()) as { machine_id: string; session_var: string; expires_at: number } | undefined) ?? null;
@@ -795,6 +804,7 @@ export class Keys {
   setRules(policyId: string, rules: Omit<Rule, 'id'>[], note: string | null, actor: Actor): number {
     rules = rules.filter((r) => !r.team_id); // team-generated rules are managed by the team only
     validateRules(rules);
+    this.ruleGuard?.(policyId, rules);
     return tx(this.db, () => {
       const before = this.rules(policyId, false);
       this.db.prepare('DELETE FROM permission_rules WHERE policy_id=? AND team_id IS NULL').run(policyId);
@@ -847,9 +857,10 @@ export class Keys {
   }
 
   // ───────────── Login tokens ─────────────
-  login(app: Credential, sessionKey: string, opts: { compact?: boolean } = {}): { token: string; credential: Credential; concurrent: boolean } {
+  login(app: Credential, sessionKey: string, opts: { compact?: boolean; turn?: { runRef: string } } = {}): { token: string; credential: Credential; concurrent: boolean } {
     const ses = this.verifyKey(sessionKey, 'session_key');
     if (ses.succession === 'suspended') throw new KeyError('suspended', 'this session key was moved by a checkout; its successor is in use');
+    this.loginGuard?.(ses.id);
     this.collectGuard?.(ses, app);
     if (ses.bound_machine_id && ses.bound_machine_id !== app.machine_id) throw new BoundElsewhereError(ses, app);
     const now = Date.now();
@@ -859,26 +870,27 @@ export class Keys {
     const token = `ah_tok_${randomToken(25).slice(0, 40)}`, hash = sha256Hex(token);
     // A new login continues where the agent left off: notices after the last one it confirmed (so a directive sent
     // while it was logged out still arrives), and room read positions from its earlier logins (so history is not replayed).
+    // Messages read but never confirmed (acked) are delivered again: the new login's delivered position starts at the last confirmed one.
     // An agent's first login skips the hub's own setup notices but still gets the operator's directives and messages.
     const prev = (this.db.prepare('SELECT MAX(t.notice_acked_seq) s FROM session_tokens t JOIN credentials c ON c.id=t.session_credential_id WHERE c.agent_id=?').get(ses.agent_id!) as { s: number | null }).s;
     const firstDirective = (this.db.prepare("SELECT MIN(seq) s FROM agent_notices WHERE agent_id=? AND kind IN ('directive','message')").get(ses.agent_id!) as { s: number | null }).s;
     const newest = (this.db.prepare('SELECT COALESCE(MAX(seq),0) s FROM agent_notices WHERE agent_id=?').get(ses.agent_id!) as { s: number }).s;
     const acked = prev !== null ? Math.min(prev, newest) : firstDirective !== null ? firstDirective - 1 : newest;
     tx(this.db, () => {
-      this.db.prepare('INSERT INTO session_tokens(token_hash,app_credential_id,session_credential_id,notice_acked_seq,created_at,last_used_at,expires_at,compact) VALUES (?,?,?,?,?,?,?,?)')
-        .run(hash, app.id, ses.id, acked, now, now, now + TOKEN_IDLE_MS, opts.compact ? 1 : 0);
+      this.db.prepare('INSERT INTO session_tokens(token_hash,app_credential_id,session_credential_id,notice_acked_seq,created_at,last_used_at,expires_at,compact,scope,run_ref) VALUES (?,?,?,?,?,?,?,?,?,?)')
+        .run(hash, app.id, ses.id, acked, now, now, now + (opts.turn ? TURN_TOKEN_MS : TOKEN_IDLE_MS), opts.compact ? 1 : 0, opts.turn ? 'turn' : 'login', opts.turn?.runRef ?? null);
       this.db.prepare(`INSERT INTO message_delivery_cursors(agent_id,token_hash,room_id,delivered_seq,acked_seq,updated_at)
-        SELECT agent_id, ?, room_id, MAX(delivered_seq), MAX(acked_seq), ? FROM message_delivery_cursors WHERE agent_id=? GROUP BY room_id`).run(hash, now, ses.agent_id!);
+        SELECT agent_id, ?, room_id, MAX(acked_seq), MAX(acked_seq), ? FROM message_delivery_cursors WHERE agent_id=? GROUP BY room_id`).run(hash, now, ses.agent_id!);
     });
     this.db.prepare('UPDATE agents SET last_seen_at=? WHERE id=?').run(now, ses.agent_id!);
     return { token, credential: ses, concurrent: others > 0 };
   }
 
   /** Resolve a token presented with an app key. Slides the idle expiry. */
-  resolveToken(app: Credential, token: string): { tokenHash: string; credential: Credential; agent: Agent } {
+  resolveToken(app: Credential, token: string): { tokenHash: string; credential: Credential; agent: Agent; scope: 'login' | 'turn' } {
     if (!TOKEN_RE.test(token)) throw new KeyError('login_required', 'missing or malformed session_token; call session_login');
     const h = sha256Hex(token), now = Date.now();
-    const t = this.db.prepare('SELECT * FROM session_tokens WHERE token_hash=?').get(h) as { app_credential_id: string; session_credential_id: string; expires_at: number; revoked_at: number | null; revoked_reason: string | null; suspended_at: number | null } | undefined;
+    const t = this.db.prepare('SELECT * FROM session_tokens WHERE token_hash=?').get(h) as { app_credential_id: string; session_credential_id: string; expires_at: number; revoked_at: number | null; revoked_reason: string | null; suspended_at: number | null; scope: string } | undefined;
     if (!t || t.app_credential_id !== app.id) throw new KeyError('login_required', 'unknown session_token; call session_login');
     if (t.revoked_at === null && t.suspended_at !== null) throw new KeyError('key_inactive', 'this session moved to another place (checkout); it is suspended until the move ends');
     if (t.revoked_at !== null) {
@@ -889,10 +901,77 @@ export class Keys {
     if (t.expires_at <= now) throw new KeyError('login_required', 'session_token expired; call session_login again');
     const c = this.credential(t.session_credential_id)!;
     if (this.effectiveStatus(c) !== 'active') throw new KeyError('key_inactive', `your session key is ${this.effectiveStatus(c)}`);
-    this.db.prepare('UPDATE session_tokens SET last_used_at=?, expires_at=? WHERE token_hash=?').run(now, now + TOKEN_IDLE_MS, h);
+    // A turn token is never slid by use: only the connector's renewal extends it, so a run the connector no longer vouches for runs out.
+    if (t.scope === 'turn') this.db.prepare('UPDATE session_tokens SET last_used_at=? WHERE token_hash=?').run(now, h);
+    else this.db.prepare('UPDATE session_tokens SET last_used_at=?, expires_at=? WHERE token_hash=?').run(now, now + TOKEN_IDLE_MS, h);
     this.db.prepare('UPDATE credentials SET last_used_at=? WHERE id=?').run(now, c.id);
     this.db.prepare('UPDATE agents SET last_seen_at=? WHERE id=?').run(now, c.agent_id!);
-    return { tokenHash: h, credential: c, agent: this.agent(c.agent_id!)! };
+    return { tokenHash: h, credential: c, agent: this.agent(c.agent_id!)!, scope: t.scope === 'turn' ? 'turn' : 'login' };
+  }
+
+  /**
+   * The app key's credential behind a live TURN token, for a call that carries the token alone (a session holds no app key).
+   * Only turn tokens qualify; anything else, an expired or revoked token, or an app key that is no longer active, is refused.
+   */
+  appOfTurnToken(token: string): Credential {
+    if (!TOKEN_RE.test(token)) throw new KeyError('login_required', 'missing or malformed turn token');
+    const t = this.db.prepare('SELECT app_credential_id, expires_at, revoked_at, scope FROM session_tokens WHERE token_hash=?').get(sha256Hex(token)) as { app_credential_id: string; expires_at: number; revoked_at: number | null; scope: string } | undefined;
+    if (!t || t.scope !== 'turn' || t.revoked_at !== null || t.expires_at <= Date.now()) throw new KeyError('login_required', 'this turn token is not valid (ended, expired or unknown)');
+    const app = this.credential(t.app_credential_id);
+    if (!app || app.kind !== 'app_key' || this.effectiveStatus(app) !== 'active') throw new KeyError('key_inactive', 'the PC behind this turn token is not active');
+    return app;
+  }
+
+  /** The active app key credential of a PC, or null. */
+  machineAppCredential(machineId: string): Credential | null {
+    const c = this.db.prepare("SELECT id FROM credentials WHERE kind='app_key' AND machine_id=? AND status='active' ORDER BY created_at DESC").all(machineId) as { id: string }[];
+    for (const r of c) { const cr = this.credential(r.id); if (cr && this.effectiveStatus(cr) === 'active') return cr; }
+    return null;
+  }
+
+  /** Extends a live turn token of this PC by another TURN_TOKEN_MS. Refused once it ended, expired or is not this PC's. */
+  renewTurn(app: Credential, token: string): { expires_at: number } {
+    const now = Date.now(), h = sha256Hex(token);
+    const t = this.db.prepare('SELECT app_credential_id, session_credential_id, expires_at, revoked_at, suspended_at, scope FROM session_tokens WHERE token_hash=?').get(h) as { app_credential_id: string; session_credential_id: string; expires_at: number; revoked_at: number | null; suspended_at: number | null; scope: string } | undefined;
+    if (!t || t.scope !== 'turn' || t.app_credential_id !== app.id || t.revoked_at !== null || t.suspended_at !== null || t.expires_at <= now) throw new KeyError('login_required', 'this turn token cannot be renewed');
+    const c = this.credential(t.session_credential_id);
+    if (!c || this.effectiveStatus(c) !== 'active') throw new KeyError('key_inactive', 'the agent key behind this turn token is not active');
+    const expires_at = now + TURN_TOKEN_MS;
+    this.db.prepare('UPDATE session_tokens SET expires_at=? WHERE token_hash=?').run(expires_at, h);
+    return { expires_at };
+  }
+
+  /** The agent of a live turn token of this PC, or null. */
+  turnAgent(app: Credential, token: string): string | null {
+    const r = this.db.prepare("SELECT c.agent_id a FROM session_tokens t JOIN credentials c ON c.id=t.session_credential_id WHERE t.token_hash=? AND t.app_credential_id=? AND t.scope='turn' AND t.revoked_at IS NULL AND t.expires_at>?").get(sha256Hex(token), app.id, Date.now()) as { a: string | null } | undefined;
+    return r?.a ?? null;
+  }
+
+  /** Ends a turn token of this PC at once. Returns whether one was live. */
+  revokeTurn(app: Credential, token: string, reason = 'turn_ended'): boolean {
+    const r = this.db.prepare("UPDATE session_tokens SET revoked_at=?, revoked_reason=? WHERE token_hash=? AND app_credential_id=? AND scope='turn' AND revoked_at IS NULL").run(Date.now(), reason, sha256Hex(token), app.id);
+    return Number(r.changes) > 0;
+  }
+
+  /** One turn token of this PC, live or not: its agent and run, and whether it is still live. Null when the PC never had it. */
+  turnInfo(app: Credential, token: string): { agent: string | null; run: string | null; live: boolean } | null {
+    const r = this.db.prepare("SELECT c.agent_id a, t.run_ref r, t.revoked_at x, t.suspended_at s, t.expires_at e FROM session_tokens t JOIN credentials c ON c.id=t.session_credential_id WHERE t.token_hash=? AND t.app_credential_id=? AND t.scope='turn'").get(sha256Hex(token), app.id) as { a: string | null; r: string | null; x: number | null; s: number | null; e: number } | undefined;
+    return r ? { agent: r.a, run: r.r, live: r.x === null && r.s === null && r.e > Date.now() } : null;
+  }
+
+  /**
+   * The runs of the other live turn tokens of one agent, issued at or before `issuedBy` (docs/connector.md, "Both levels"): a second
+   * live run is two live bindings. A token issued after `issuedBy` is left out, so a `conclave check --probe` (issued and revoked
+   * at once) never counts.
+   */
+  otherLiveRuns(agentId: string, run: string | null, issuedBy: number): string[] {
+    return (this.db.prepare("SELECT DISTINCT t.run_ref r FROM session_tokens t JOIN credentials c ON c.id=t.session_credential_id WHERE c.agent_id=? AND t.scope='turn' AND t.revoked_at IS NULL AND t.suspended_at IS NULL AND t.expires_at>? AND t.created_at<=? AND t.run_ref IS NOT ?")
+      .all(agentId, Date.now(), issuedBy, run) as { r: string | null }[]).map((x) => x.r ?? '');
+  }
+
+  /** How many live turn tokens an agent has. */
+  liveTurnCount(agentId: string): number {
+    return (this.db.prepare("SELECT COUNT(*) n FROM session_tokens t JOIN credentials c ON c.id=t.session_credential_id WHERE c.agent_id=? AND t.scope='turn' AND t.revoked_at IS NULL AND t.suspended_at IS NULL AND t.expires_at>?").get(agentId, Date.now()) as { n: number }).n;
   }
 
   logout(tokenHash: string): void {
@@ -913,6 +992,10 @@ export class Keys {
    * `{feedback, rev}` shapes are mapped to `{kind, id, state}` here.
    */
   /** Owner enforcement's check on a notice's subject (OwnerScope.maySeeNotice); null delivers every notice. */
+  /** Set in app.ts: a notice was made (agent, kind, ref), for the connector's delivery orders. Never throws into the caller. */
+  onNotice: ((agentId: string, kind: string, ref: { kind: NoticeRefKind; id: string } | null) => void) | null = null;
+  /** Set in app.ts: a PC's access ended (suspended, retired) or one app key did, so its push stream closes. */
+  onAccessEnded: ((e: { machine?: string; credential?: string }) => void) | null = null;
   noticeFilter: ((agentId: string, ref: { kind: NoticeRefKind; id: string } | null) => boolean) | null = null;
   notify(agentId: string, kind: string, body: string, ref?: NoticeRef): void {
     const r = !ref ? null : 'task' in ref ? { kind: 'task' as const, id: ref.task, state: ref.state } : 'feedback' in ref ? { kind: 'feedback' as const, id: ref.feedback, state: ref.rev } : ref;
@@ -925,6 +1008,7 @@ export class Keys {
       this.db.prepare('INSERT INTO agent_notices(id,agent_id,seq,kind,body,created_at,ref_task_id,ref_state,ref_feedback_id,ref_kind,ref_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)')
         .run(newId.notice(), agentId, seq, kind, body, Date.now(), r?.kind === 'task' ? r.id : null, state, r?.kind === 'feedback' ? r.id : null, r?.kind ?? null, r?.id ?? null);
     });
+    try { this.onNotice?.(agentId, kind, r ? { kind: r.kind, id: r.id } : null); } catch { /* a delivery order never blocks the notice */ }
   }
   /** Notices after this login's cursor, without settled ones (NOTICE_SETTLERS).
       Settled ones are skipped, not acknowledged: the cursor is cumulative and must not clear unrelated notices. */
@@ -936,7 +1020,7 @@ export class Keys {
       before delivery, so it never reaches the agent). Read only: it confirms nothing (dashboard-ux.md, Agent page). */
   recentNotices(agentId: string, limit = 50): { seq: number; kind: string; body: string; created_at: number; delivered_at: number | null; current: number }[] {
     return this.db.prepare(`SELECT n.seq,n.kind,n.body,n.created_at,n.delivered_at,CASE WHEN ${CURRENT_NOTICE} THEN 1 ELSE 0 END current
-      FROM agent_notices n WHERE n.agent_id=? ORDER BY n.seq DESC LIMIT ?`).all(agentId, limit) as unknown as { seq: number; kind: string; body: string; created_at: number; delivered_at: number | null; current: number }[];
+      FROM agent_notices n WHERE n.agent_id=? ORDER BY n.seq DESC LIMIT ?`).all(agentId, limit).map((n) => ({ ...n, body: plainNotice(String(n.body)) })) as unknown as { seq: number; kind: string; body: string; created_at: number; delivered_at: number | null; current: number }[];
   }
   /** This login's delivery cursor (docs/mcp.md, "Replies and notices"): every pending notice up to it rode inline once. */
   deliveredSeq(tokenHash: string): number {

@@ -1,0 +1,14 @@
+-- Refine requirements (docs/blueprint.md, "Refine with the coordinator"): a plan request can carry the keys it covers
+-- (frozen when it is sent) and the checks asked for. A refine request is one with scope_keys set. proposal_id is the
+-- open proposal that answers it (NULL again once the operator sends it back). A proposal filed against a request names it
+-- (request_id); declined holds the ops the operator left out of a partial apply, applied_ops how many were written.
+ALTER TABLE bp_report_requests ADD COLUMN scope_keys TEXT CHECK (scope_keys IS NULL OR json_valid(scope_keys));
+ALTER TABLE bp_report_requests ADD COLUMN checks TEXT CHECK (checks IS NULL OR json_valid(checks));
+ALTER TABLE bp_report_requests ADD COLUMN proposal_id TEXT;
+ALTER TABLE bp_proposals ADD COLUMN request_id INTEGER;
+ALTER TABLE bp_proposals ADD COLUMN declined TEXT CHECK (declined IS NULL OR json_valid(declined));
+ALTER TABLE bp_proposals ADD COLUMN applied_ops INTEGER;
+
+-- The coordinator playbook says what to do on a refine request (teams.ts REFINE_LINE): put before the hand-off line in unedited copies and in the default.
+UPDATE team_roles SET playbook = replace(playbook, 'After task_submit or task_assign, if the result names a hand-off to an on-demand member, end your turn by passing its wake line to whoever runs you.', 'On a refine request (a notice naming a request id), read its scope and note, run the checks it asks for, and file ONE proposal with bp_write {request_id}, giving a reason of at most 200 characters on each op; it is always a proposal, only the requirements in scope may change, and nothing is deleted (drop a requirement with status dropped, naming the merge target in the reason). After task_submit or task_assign, if the result names a hand-off to an on-demand member, end your turn by passing its wake line to whoever runs you.') WHERE role='coordinator' AND playbook NOT LIKE '%refine request%' AND playbook = (SELECT playbook FROM team_role_defaults WHERE role='coordinator');
+UPDATE team_role_defaults SET playbook = replace(playbook, 'After task_submit or task_assign, if the result names a hand-off to an on-demand member, end your turn by passing its wake line to whoever runs you.', 'On a refine request (a notice naming a request id), read its scope and note, run the checks it asks for, and file ONE proposal with bp_write {request_id}, giving a reason of at most 200 characters on each op; it is always a proposal, only the requirements in scope may change, and nothing is deleted (drop a requirement with status dropped, naming the merge target in the reason). After task_submit or task_assign, if the result names a hand-off to an on-demand member, end your turn by passing its wake line to whoever runs you.') WHERE role='coordinator' AND playbook NOT LIKE '%refine request%';

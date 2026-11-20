@@ -418,10 +418,14 @@ describe('review fixes (C3)', () => {
     expect(JSON.stringify(body)).not.toContain('/tmp/p');
     expect(p.body.options.unmerged_work_on_source).toEqual([t.dev.id]);
     expect(p.body.unmerged_work_on_source).toEqual([t.dev.id]);
-    const no = await api('POST', `/checkouts/${id}/render`, { target: 'same_pc_other_user' });
+    const tgt = await api('POST', '/pcs/add', { name: `tools-target-${++seq}` });
+    const nn2 = nonce();
+    expect((await ob('POST', '/enrol', { body: { code: tgt.body.code, nonce: nn2 } })).status).toBe(200);
+    await ob('POST', '/enrol/confirm', { body: { nonce: nn2 } });
+    const no = await api('POST', `/checkouts/${id}/render`, { target: 'other_pc', machine_id: tgt.body.pc.id });
     expect(no.status).toBe(409);
     expect(no.body.error).toBe('unmerged_work');
-    const r = await api('POST', `/checkouts/${id}/render`, { target: 'same_pc_other_user', accept_unmerged_work: true });
+    const r = await api('POST', `/checkouts/${id}/render`, { target: 'other_pc', machine_id: tgt.body.pc.id, accept_unmerged_work: true });
     expect(r.status, JSON.stringify(r.body)).toBe(200);
     expect(r.body.unmerged_work_on_source).toEqual([t.dev.id]);
     expect(JSON.stringify(r.body.push_list)).not.toContain('integration/dev-only');
@@ -509,7 +513,7 @@ describe('members never see a checkout', () => {
     // The team's project, granted to a member with every component.
     const project = (await api('POST', '/projects', { key: 'CKM', name: 'Checkout member' })).body.project.id as string;
     app.db.prepare('UPDATE teams SET project_id=? WHERE id=?').run(project, t.teamId);
-    const made = await api('POST', '/users', { username: 'mira-checkout', display_name: 'Mira' });
+    const made = await api('POST', '/users', { username: 'nadia-checkout', display_name: 'Nadia' });
     expect(made.status, JSON.stringify(made.body)).toBe(200);
     const password = made.body.password as string;
     expect((await api('PUT', `/users/${made.body.user.id}/grants`, { grants: [{ project_id: project, components: ['tasks', 'feed'] }] })).status).toBe(200);
@@ -529,16 +533,16 @@ describe('members never see a checkout', () => {
     expect(newKeys.length).toBe(2);
     const forbidden = ['zzHANDOUT', id, r.body.checkout.request_id, promptLine, ...newKeys].filter(Boolean);
 
-    const lr = await fetch(`${base}/api/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ username: 'mira-checkout', password }) });
+    const lr = await fetch(`${base}/api/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ username: 'nadia-checkout', password }) });
     expect(lr.status).toBe(200);
-    const mira = { cookie: lr.headers.get('set-cookie')!.split(';')[0]!, csrf: ((await lr.json()) as { csrf: string }).csrf };
+    const nadia = { cookie: lr.headers.get('set-cookie')!.split(';')[0]!, csrf: ((await lr.json()) as { csrf: string }).csrf };
     const as = async (method: string, path: string, body?: unknown) => {
-      const x = await fetch(`${base}/api${path}`, { method, headers: { 'content-type': 'application/json', cookie: mira.cookie, 'x-csrf-token': mira.csrf }, body: body === undefined ? undefined : JSON.stringify(body) });
+      const x = await fetch(`${base}/api${path}`, { method, headers: { 'content-type': 'application/json', cookie: nadia.cookie, 'x-csrf-token': nadia.csrf }, body: body === undefined ? undefined : JSON.stringify(body) });
       return { status: x.status, text: await x.text() };
     };
     // Every checkout route the hub registers is admin-only, and refusing changes nothing.
     const routes = [...new Set(app.adminRoutes)].filter((x) => /checkout/.test(x));
-    expect(routes.length).toBe(14);
+    expect(routes.length).toBe(13);
     for (const route of routes) expect(ROUTE_SCOPES[route], route).toBe('admin');
     const before = JSON.stringify([app.checkouts.checkout(id), app.checkouts.handouts(id).map((h) => h.status)]);
     for (const route of routes) {

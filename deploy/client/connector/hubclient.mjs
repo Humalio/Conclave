@@ -9,19 +9,36 @@
  * - A failure is mapped to a fixed reason (tls_refused, hub_unreachable), never to the hub's or the library's text.
  */
 import https from 'node:https';
+import http from 'node:http';
 import { Readable } from 'node:stream';
-import { caFingerprint, normalizeOrigin } from './keyfile.mjs';
+import { caFingerprint, normalizeOrigin, pemBlocks, singleCaPem } from './keyfile.mjs';
 
 const TLS_CODES = new Set(['DEPTH_ZERO_SELF_SIGNED_CERT', 'SELF_SIGNED_CERT_IN_CHAIN', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE', 'UNABLE_TO_GET_ISSUER_CERT', 'UNABLE_TO_GET_ISSUER_CERT_LOCALLY', 'CERT_HAS_EXPIRED', 'CERT_NOT_YET_VALID', 'CERT_UNTRUSTED', 'CERT_REVOKED', 'ERR_TLS_CERT_ALTNAME_INVALID', 'HOSTNAME_MISMATCH', 'ERR_SSL_WRONG_VERSION_NUMBER', 'ERR_SSL_PACKET_LENGTH_TOO_LONG', 'EPROTO']);
 /** The reason code for a transport error. */
 export const reasonOfError = (e) => (TLS_CODES.has(e?.code) || /certificate|tls|ssl/i.test(String(e?.message ?? '')) ? 'tls_refused' : 'hub_unreachable');
 
+/**
+ * Every request to a hub starts here. At standard it is a pinned HTTPS request. At the hardened level the section carries
+ * `relay` (the key service's pipe), and the same request goes there instead: the service puts the real key in where the
+ * placeholder is and talks to the hub itself (docs/connector.md, "Hardened isolation"). The callers do not tell the two apart.
+ */
+function send(hub, url, { method = 'GET', headers = {}, timeout } = {}, cb) {
+  if (!hub.relay) return https.request(url, { method, agent: hub.agent, timeout, rejectUnauthorized: true, headers }, cb);
+  const u = new URL(url);
+  return http.request({ socketPath: hub.relay.address, method, path: `/relay/${encodeURIComponent(hub.relay.hub_key)}${u.pathname}${u.search}`, timeout, headers }, cb);
+}
+/** The fixed reason when the key service could not reach the hub, else null. */
+const relayReason = (hub, r) => (hub.relay && r.statusCode === 502 && /^(tls_refused|hub_unreachable)$/.test(String(r.headers['x-conclave-relay'] ?? '')) ? r.headers['x-conclave-relay'] : null);
+export { send };
+
 /** A hub connection from a key-file section: `{ok: true, hub}` or `{ok: false, reason}` before any byte is sent. */
 export function connect(section) {
   const origin = normalizeOrigin(section?.origin);
   if (!origin) return { ok: false, reason: 'not_https' };
+  // Exactly one pinned certificate: a key-file entry with a second one is refused, never trusted as a bundle.
+  if (pemBlocks(section.ca_pem) !== 1) return { ok: false, reason: 'ca_bundle' };
   if (caFingerprint(section.ca_pem) !== section.ca_sha256) return { ok: false, reason: 'ca_changed' };
-  return { ok: true, hub: { origin, url: `${origin}/mcp`, agent: new https.Agent({ ca: section.ca_pem, keepAlive: false, minVersion: 'TLSv1.2', rejectUnauthorized: true }) } };
+  return { ok: true, hub: { origin, url: `${origin}/mcp`, agent: new https.Agent({ ca: singleCaPem(section.ca_pem), keepAlive: false, minVersion: 'TLSv1.2', rejectUnauthorized: true }), relay: section.relay && typeof section.relay.address === 'string' && typeof section.relay.hub_key === 'string' ? section.relay : null } };
 }
 
 /**
@@ -32,8 +49,9 @@ export function connect(section) {
 export function post(hub, body, headers, timeoutMs) {
   return new Promise((res, rej) => {
     const fail = (e) => rej(Object.assign(new Error(e?.message ?? String(e)), { reason: e?.reason ?? reasonOfError(e) }));
-    const req = https.request(hub.url, { method: 'POST', agent: hub.agent, timeout: timeoutMs, rejectUnauthorized: true,
+    const req = send(hub, hub.url, { method: 'POST', timeout: timeoutMs,
       headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', 'content-length': Buffer.byteLength(body), ...headers } }, (r) => {
+      const rr = relayReason(hub, r); if (rr) { r.resume(); return fail({ message: 'the key service could not reach the hub', reason: rr }); }
       if (r.statusCode >= 300 && r.statusCode < 400) { r.resume(); return fail({ message: `redirect ${r.statusCode} not followed`, reason: 'hub_unreachable' }); }
       let raw = '';
       r.setEncoding('utf8');
@@ -78,8 +96,9 @@ export function request(hub, method, path, { body, headers = {}, timeoutMs = 15_
   return new Promise((res, rej) => {
     const fail = (e) => rej(Object.assign(new Error(e?.message ?? String(e)), { reason: e?.reason ?? reasonOfError(e) }));
     const data = body === undefined ? null : Buffer.from(JSON.stringify(body));
-    const req = https.request(`${hub.origin}${path}`, { method, agent: hub.agent, timeout: timeoutMs, rejectUnauthorized: true,
+    const req = send(hub, `${hub.origin}${path}`, { method, timeout: timeoutMs,
       headers: { accept: 'application/json', ...(data ? { 'content-type': 'application/json', 'content-length': data.length } : {}), ...headers } }, (r) => {
+      const rr = relayReason(hub, r); if (rr) { r.resume(); return fail({ message: 'the key service could not reach the hub', reason: rr }); }
       if (r.statusCode >= 300 && r.statusCode < 400) { r.resume(); return fail({ message: `redirect ${r.statusCode} not followed`, reason: 'hub_unreachable' }); }
       let raw = '';
       r.setEncoding('utf8');
@@ -103,7 +122,8 @@ export function pinnedFetch(hub) {
     if (u.origin !== hub.origin) return rej(new TypeError('the pinned fetch only reaches its own hub'));
     if (signal?.aborted) return rej(signal.reason ?? new Error('aborted'));
     const data = body === undefined || body === null ? null : typeof body === 'string' ? Buffer.from(body) : Buffer.from(body.buffer ?? body, body.byteOffset ?? 0, body.byteLength ?? body.length);
-    const req = https.request(u, { method, agent: hub.agent, rejectUnauthorized: true, headers: { ...headers, ...(data ? { 'content-length': data.length } : {}) } }, (r) => {
+    const req = send(hub, u.href, { method, headers: { ...headers, ...(data ? { 'content-length': data.length } : {}) } }, (r) => {
+      const rr = relayReason(hub, r); if (rr) { r.resume(); return rej(new TypeError(rr)); }
       if (r.statusCode >= 300 && r.statusCode < 400) { r.resume(); return rej(new TypeError(`redirect ${r.statusCode} not followed`)); }
       const h = new Headers();
       for (const [k, v] of Object.entries(r.headers)) if (v !== undefined) h.set(k, Array.isArray(v) ? v.join(', ') : String(v));
@@ -115,5 +135,53 @@ export function pinnedFetch(hub) {
     req.on('close', () => signal?.removeEventListener('abort', abort));
     req.on('error', rej);
     req.end(data ?? undefined);
+  });
+}
+
+/**
+ * The push stream (`GET /connector/v1/stream`, Server-Sent Events) over the same pinned connection as every other call: the
+ * hub's CA only, no redirect, never `fetch`. The hub only says "orders waiting"; `onOrders` is called after the open and at
+ * each event, and the caller fetches the orders itself. Resolves `{status, reason}` when the stream ends or cannot open
+ * (`status` 0 with a fixed reason for a transport error, the hub's code otherwise); never rejects. A stream silent for `idleMs`
+ * (three heartbeats) is dropped.
+ */
+export function openStream(hub, { headers = {}, signal, onOrders, onEvent, onOpen, idleMs = 65_000, openMs = 15_000, query = '' } = {}) {
+  return new Promise((res) => {
+    if (signal?.aborted) return res({ status: 0, reason: 'stopped' });
+    let done = false, idle, req;
+    const OPEN_MS = openMs;
+    const end = (v) => { if (done) return; done = true; clearTimeout(idle); signal?.removeEventListener('abort', stop); try { req?.destroy(); } catch { /* gone */ } res(v); };
+    const stop = () => end({ status: 0, reason: 'stopped' });
+    const arm = (ms = idleMs, reason = 'hub_unreachable') => { clearTimeout(idle); idle = setTimeout(() => end({ status: 0, reason }), ms); };
+    arm(OPEN_MS, 'no_open'); // a proxy that holds the stream back never lets it open
+    signal?.addEventListener('abort', stop, { once: true });
+    req = send(hub, `${hub.origin}/connector/v1/stream${query}`, { method: 'GET', headers: { accept: 'text/event-stream', ...headers } }, (r) => {
+      const rr = relayReason(hub, r); if (rr) { r.resume(); return end({ status: 0, reason: rr }); }
+      if (r.statusCode !== 200) { r.resume(); return end({ status: r.statusCode, reason: 'refused', retryAfter: Number(r.headers['retry-after']) || null }); }
+      arm(); onOpen?.();
+      let buf = '';
+      r.setEncoding('utf8');
+      r.on('data', (c) => {
+        arm(); buf += c;
+        if (buf.length > 64 * 1024) return end({ status: 0, reason: 'hub_unreachable' });
+        let i;
+        while ((i = buf.search(/\r?\n\r?\n/)) >= 0) {
+          const ev = buf.slice(0, i); buf = buf.slice(i).replace(/^\r?\n\r?\n/, '');
+          const lines = ev.split(/\r?\n/);
+          if (lines.some((l) => l.trim() === 'event: orders')) { try { onOrders?.(); } catch { /* the caller's own error */ } }
+          // Other events (vault sync's `vault_changed`) carry a small JSON body: they are passed on only when the caller asks.
+          const name = /^event:\s*(\S+)/m.exec(ev)?.[1];
+          if (name && name !== 'orders' && onEvent) {
+            let data = null;
+            try { data = JSON.parse(lines.filter((l) => l.startsWith('data:')).map((l) => l.slice(5).trim()).join('\n') || 'null'); } catch { /* no body */ }
+            try { onEvent(name, data); } catch { /* the caller's own error */ }
+          }
+        }
+      });
+      r.on('end', () => end({ status: 200, reason: 'closed' }));
+      r.on('error', (e) => end({ status: 0, reason: reasonOfError(e) }));
+    });
+    req.on('error', (e) => end({ status: 0, reason: reasonOfError(e) }));
+    req.end();
   });
 }

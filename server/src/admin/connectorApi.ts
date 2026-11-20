@@ -22,6 +22,13 @@ export function registerConnectorApi(api: FastifyInstance, d: { keys: Keys; conn
     z.object({}).strict().parse(req.body ?? {});
     return cn.disconnect(pc(req), actor(req));
   });
+  // The agent's woken run and the operator's Stop (docs/connector.md, "The wake"). Admin only, as every route here.
+  const agent = (req: FastifyRequest) => { const id = idOf(req); if (!keys.agent(id)) throw new KeyError('not_found', 'agent not found'); return id; };
+  api.get('/api/agents/:id/wake', async (req) => ({ run: cn.wakeRunOf(agent(req)) }));
+  api.post('/api/agents/:id/wake/stop', async (req) => {
+    z.object({}).strict().parse(req.body ?? {});
+    return cn.stopRun(agent(req), actor(req));
+  });
   api.get('/api/pcs/:id/usage', async (req) => {
     const q = z.object({ days: z.coerce.number().int().min(1).max(90).optional() }).parse(req.query ?? {});
     return cn.usage(pc(req), q.days ?? 30);
@@ -32,6 +39,23 @@ export function registerConnectorApi(api: FastifyInstance, d: { keys: Keys; conn
     const id = idOf(req);
     if (!keys.agent(id)) throw new KeyError('not_found', 'Agent not found');
     return cn.usageOf([id], days(req), 'pc');
+  });
+  // How full an agent's context is (design 3c), and Reset: the operator may reset any agent (audited in the connector).
+  api.get('/api/agents/:id/context', async (req) => {
+    const id = idOf(req);
+    if (!keys.agent(id)) throw new KeyError('not_found', 'Agent not found');
+    return cn.contextOf(id);
+  });
+  api.get('/api/teams/:id/context', async (req) => {
+    const members = cn.teamAgents(idOf(req));
+    if (!members) throw new KeyError('not_found', 'Team not found');
+    return { agents: cn.contextOfMany(members) };
+  });
+  api.post('/api/agents/:id/reset', async (req) => {
+    z.object({}).strict().parse(req.body ?? {});
+    const id = idOf(req);
+    if (!keys.agent(id)) throw new KeyError('not_found', 'Agent not found');
+    return { ...cn.resetAgent(id, actor(req)), context: cn.contextOf(id) };
   });
   api.get('/api/teams/:id/usage', async (req) => {
     const members = cn.teamAgents(idOf(req));

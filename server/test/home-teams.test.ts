@@ -358,8 +358,8 @@ describe('HOME-2: declared Home layout and card registry', () => {
     const cls = { on: null as boolean | null, toggle(c: string, v: boolean) { if (c === 'bl-empty') this.on = v; } };
     const el = () => ({ textContent: '', innerHTML: '', dataset: {} as Record<string, string>, classList: cls });
     const D: Record<string, ReturnType<typeof el>> = { '#blCard': el(), '#blN': el(), '#blL': el() };
-    const mk = (bl: unknown) => new Function('S', '$', 'ic', 'tagChips', 'backlogRow', 'blNoDesc', 'gistFit', 'row', 'overline', 'emptyAct', `${take(/^const none = /m)}\n${take(/^const htmlIf = /m)}\n${take(/^const BL_N = /m)}\n${b}\nreturn renderBacklog;`)(
-      { bl, teams: [] }, (s: string) => D[s] ?? null, () => '', () => '', () => '', () => '', () => {}, () => '', () => '', () => '') as () => void;
+    const mk = (bl: unknown) => new Function('S', '$', 'ic', 'tagChips', 'backlogRow', 'blNoDesc', 'gistFit', 'row', 'overline', 'emptyAct', 'esc', `${take(/^const none = /m)}\n${take(/^const htmlIf = /m)}\n${take(/^const BL_N = /m)}\n${b}\nreturn renderBacklog;`)(
+      { bl, teams: [] }, (s: string) => D[s] ?? null, () => '', () => '', () => '', () => '', () => {}, () => '', () => '', () => '', (x: unknown) => String(x)) as () => void;
     mk({ tasks: [], total: 0, all_total: 0, relayed: [], tag: '' })();
     expect(cls.on).toBe(true);
     mk({ tasks: [{ id: 'k1', team_id: 't1', title: 'A task' }], total: 1, all_total: 1, relayed: [], tag: '' })();

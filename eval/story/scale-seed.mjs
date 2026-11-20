@@ -144,7 +144,6 @@ export async function seedScale(ctx) {
         members: def.members.map(([l, role]) => ({ agent_id: A(l), role, credential_id: keyIds[l] })) })).team;
       teamIds[def.name] = t.id;
       await patch(`/api/projects/${t.project_id}`, { task_intake: 'open' }); // the seeded coordinators plan their own work
-      await patch(`/api/teams/${t.id}`, { delivery_mode: 'on_demand' });
       if (def.status === 'draft') return;
       await post(`/api/teams/${t.id}/start`);
       await teamWork(def, t.id);

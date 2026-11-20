@@ -167,13 +167,14 @@ describe('other databases', () => {
     for (const f of readdirSync(V0_MIGRATIONS)) if (Number(f.slice(0, 4)) <= 42) copyFileSync(join(V0_MIGRATIONS, f), join(dir, f));
     const db = oldChain(dir);
     const before = state(db);
-    expect(() => migrate(db)).toThrow('the database is at migration 42 of 0.x: upgrade to 0.x (0c507c8) first, then to 1.0.');
+    expect(() => migrate(db)).toThrow('the database is at migration 42 of 0.x, which is too old to move to 1.0 directly: upgrade it to the last 0.x release (migration 69) first, then to 1.0. That older release is not part of the public repository, so this upgrade path is not supported from it.');
+    expect(() => migrate(db)).not.toThrow(/[0-9a-f]{7}/);
     expect(state(db)).toEqual(before);
   });
 });
 
 describe('rollback', () => {
-  it('the 0.x runner with the 0c507c8 files starts on a recognised 1.0 database and changes nothing', () => {
+  it('the 0.x runner with the last 0.x files starts on a recognised 1.0 database and changes nothing', () => {
     const db = oldChain();
     migrate(db, BASE_ONLY); // a retag rollback works only while max(version) is 100 (later migrations: restore the backup)
     const before = state(db);

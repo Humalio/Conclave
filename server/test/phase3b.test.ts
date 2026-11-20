@@ -66,6 +66,15 @@ async function drain(call: Call) {
     await call('work_ack', { item_id: r.item.item_id });
   }
 }
+/** The next work item that is not a notice; notices (task_assigned, review_requested…) are acked on the way. */
+async function nextWork(call: Call): Promise<any> {
+  for (let i = 0; i < 30; i++) {
+    const r = (await call('work_next', { wait_seconds: 0 })).structuredContent;
+    if (r.status === 'item' && r.item.kind === 'notice') { await call('work_ack', { item_id: r.item.item_id }); continue; }
+    return r.item ?? r;
+  }
+  throw new Error('too many notices');
+}
 const mkTask = async (X: T, over: Record<string, unknown> = {}) =>
   (await X.C('task_create', { team_id: X.tid, title: 'do it', reviewer: X.r.id, ...over })).structuredContent.task;
 
@@ -101,13 +110,13 @@ describe('task workflow', () => {
     const t = await mkTask(X);
     expect(t.status).toBe('open');
     expect((await X.C('task_assign', { task_id: t.id, agent_id: X.w1.id })).structuredContent.task.status).toBe('assigned');
-    const item = (await X.W1('work_next', { wait_seconds: 0 })).structuredContent.item;
+    const item = await nextWork(X.W1);
     expect(item).toMatchObject({ kind: 'task_assigned', trust: 'L1' });
     expect(item.task.id).toBe(t.id);
     expect((await X.W1('work_ack', { item_id: item.item_id })).isError).toBeFalsy();
     expect((await X.W1('task_start', { task_id: t.id })).structuredContent.task.status).toBe('in_progress');
     expect((await X.W1('task_submit', { task_id: t.id, summary: 'finished' })).structuredContent.task.status).toBe('in_review');
-    const rev = (await X.R('work_next', { wait_seconds: 0 })).structuredContent.item;
+    const rev = await nextWork(X.R);
     expect(rev).toMatchObject({ kind: 'review_requested', trust: 'L1' });
     await X.R('work_ack', { item_id: rev.item_id });
     expect((await X.R('task_review', { task_id: t.id, decision: 'approve', comments: 'lgtm', version: 1000 })).structuredContent.task.status).toBe('approved');
@@ -198,24 +207,22 @@ describe('task workflow', () => {
     expect((await X.W1('task_claim', { task_id: nc.id, version: nc.version })).structuredContent.error).toBe('invalid_state');
   });
 
-  it('expires a silent member\'s lease back to open and tells the coordinator; activity renews a started task\'s lease', async () => {
+  it('given any team, an assigned member who stays asleep keeps its work: nothing returns to open, no lease_expired notice', async () => {
     const X = await team();
     await drain(X.C);
     const t = await mkTask(X);
     await X.C('task_assign', { task_id: t.id, agent_id: X.w1.id });
-    // A queued task has no deadline of its own: only its holder's silence releases it.
+    // A queued task has no deadline: silence alone never moves it.
     expect(app.teams.task(t.id)!.lease_expires_at).toBeNull();
-    silence(X.tid, X.w1.id, 31 * 60_000);
-    expect((await X.C('task_list', { team_id: X.tid })).structuredContent.tasks[0].status).toBe('open');
-    const w = (await X.C('work_next', { wait_seconds: 0 })).structuredContent;
-    expect(w.item).toMatchObject({ kind: 'notice', notice_kind: 'lease_expired' });
-    expect((await X.W1('task_start', { task_id: t.id })).structuredContent.error).toBe('denied');
-    const t2 = await mkTask(X);
-    await X.C('task_assign', { task_id: t2.id, agent_id: X.w2.id });
-    await X.W2('task_start', { task_id: t2.id });
-    app.db.prepare('UPDATE tasks SET lease_expires_at=? WHERE id=?').run(Date.now() + 1000, t2.id);
-    await X.W2('session_whoami');
-    expect(app.teams.task(t2.id)!.lease_expires_at!).toBeGreaterThan(Date.now() + 10 * 60_000);
+    for (const ms of [31 * 60_000, 26 * 3600_000, 9 * 86_400_000]) {
+      silence(X.tid, X.w1.id, ms);
+      app.teams.tick(true);
+      expect((await X.C('task_list', { team_id: X.tid })).structuredContent.tasks[0]).toMatchObject({ status: 'assigned', assignee: X.w1.id });
+    }
+    expect(app.teams.task(t.id)).toMatchObject({ lapsed_from: null, overdue_at: null });
+    expect(app.db.prepare("SELECT COUNT(*) n FROM agent_notices WHERE kind='lease_expired' AND agent_id IN (?, ?)").get(X.c.id, X.w1.id)).toMatchObject({ n: 0 });
+    // The worker wakes days later and starts it.
+    expect((await X.W1('task_start', { task_id: t.id })).structuredContent.task.status).toBe('in_progress');
   });
 
   it('8.A1-8.A3: the clock starts at task_start, and task_progress until keeps everything the member holds', async () => {
@@ -243,26 +250,25 @@ describe('task workflow', () => {
     app.teams.tick();
     for (const k of [a, b, c]) expect(app.teams.task(k.id)!.assignee_agent_id).toBe(X.w1.id);
     expect(app.teams.task(a.id)!.status).toBe('in_progress');
-    // 8.A2: 30 min past MAX(last activity, busy_until): all three return to open in one sweep, with one coordinator notice.
-    const notices = () => app.db.prepare("SELECT body FROM agent_notices WHERE agent_id=? AND kind='lease_expired'").all(X.c.id) as { body: string }[];
-    expect(notices()).toHaveLength(0);
+    // One delivery model: silent long past the check-in time, nothing is released. The started task is flagged overdue
+    // once its own check-in time passes and stays with W; the queued ones have no deadline and are never flagged.
     silence(X.tid, X.w1.id, 3600_000 + 31 * 60_000);
     app.teams.tick();
+    expect(app.teams.task(a.id)!.overdue_at ?? null).toBeNull();
+    app.db.prepare('UPDATE tasks SET lease_expires_at=? WHERE id=?').run(Date.now() - 1000, a.id);
+    app.db.prepare("UPDATE task_turns SET due_at=? WHERE task_id=? AND closed_at IS NULL AND phase='work'").run(Date.now() - 1000, a.id);
+    app.teams.tick(true);
+    expect(app.teams.task(a.id)).toMatchObject({ status: 'in_progress', assignee_agent_id: X.w1.id });
+    expect(app.teams.task(a.id)!.overdue_at).toBeGreaterThan(0);
+    for (const k of [b, c]) expect(app.teams.task(k.id)).toMatchObject({ status: 'assigned', assignee_agent_id: X.w1.id, overdue_at: null });
     for (const k of [a, b, c]) {
-      expect(app.teams.task(k.id)).toMatchObject({ status: 'open', assignee_agent_id: null, lease_expires_at: null });
-      expect(app.db.prepare("SELECT COUNT(*) n FROM task_events WHERE task_id=? AND tool='lease_expired' AND to_status='open'").get(k.id)).toMatchObject({ n: 1 });
-      expect(app.db.prepare('SELECT COUNT(*) n FROM task_turns WHERE task_id=? AND closed_at IS NULL').get(k.id)).toMatchObject({ n: 0 });
+      expect(app.db.prepare("SELECT COUNT(*) n FROM task_events WHERE task_id=? AND to_status='open' AND from_status IS NOT NULL AND from_status<>'open'").get(k.id)).toMatchObject({ n: 0 });
+      expect(app.db.prepare('SELECT COUNT(*) n FROM task_turns WHERE task_id=? AND closed_at IS NULL').get(k.id)).toMatchObject({ n: 1 });
     }
-    expect(app.db.prepare("SELECT close_reason FROM task_turns WHERE task_id=? ORDER BY opened_at DESC, rowid DESC LIMIT 1").get(a.id)).toMatchObject({ close_reason: 'released' });
-    const n = notices();
-    expect(n).toHaveLength(1);
-    for (const k of [a, b, c]) expect(n[0]!.body).toContain(k.id);
-    expect(app.db.prepare("SELECT COUNT(*) n FROM agent_notices WHERE agent_id=? AND kind='lease_expired'").get(X.w1.id)).toMatchObject({ n: 1 });
-    app.teams.tick();
-    expect(notices()).toHaveLength(1);
+    expect(app.db.prepare("SELECT COUNT(*) n FROM agent_notices WHERE kind='lease_expired' AND agent_id IN (?, ?)").get(X.c.id, X.w1.id)).toMatchObject({ n: 0 });
   });
 
-  it('8.A2 boundary: a member overrunning its busy_until keeps its tasks for lease_minutes past it, then loses them', async () => {
+  it('8.A2 boundary: a member overrunning its busy_until keeps its tasks, however long past it', async () => {
     const X = await team({ lease_minutes: 30 });
     const [a, b] = [await mkTask(X), await mkTask(X)];
     for (const k of [a, b]) await X.C('task_assign', { task_id: k.id, agent_id: X.w1.id });
@@ -277,29 +283,28 @@ describe('task workflow', () => {
     setClock(60_000);
     app.teams.tick();
     for (const k of [a, b]) expect(app.teams.task(k.id)!.assignee_agent_id).toBe(X.w1.id);
-    // 18:29: still held. 18:31: both released in one sweep.
-    setClock(29 * 60_000);
-    app.teams.tick();
-    expect(app.teams.task(a.id)!.status).toBe('in_progress');
-    setClock(31 * 60_000);
-    app.teams.tick();
-    for (const k of [a, b]) expect(app.teams.task(k.id)).toMatchObject({ status: 'open', assignee_agent_id: null });
+    // 18:31, and a day later: still held (the previous release returned both to open at 18:31).
+    for (const ago of [31 * 60_000, 24 * 3600_000]) {
+      setClock(ago);
+      app.teams.tick();
+      expect(app.teams.task(a.id)).toMatchObject({ status: 'in_progress', assignee_agent_id: X.w1.id });
+      expect(app.teams.task(b.id)).toMatchObject({ status: 'assigned', assignee_agent_id: X.w1.id });
+    }
   });
 
-  it('a task assigned to a poll member silent past lease_minutes is released at the next sweep', async () => {
+  it('a task assigned to a member already silent for hours stays assigned at every sweep', async () => {
     const X = await team({ lease_minutes: 30 });
     const t = await mkTask(X);
     silence(X.tid, X.w1.id, 2 * 3600_000);
     await X.C('task_assign', { task_id: t.id, agent_id: X.w1.id });
-    expect(app.teams.task(t.id)!.status).toBe('assigned');
-    app.teams.tick();
-    expect(app.teams.task(t.id)).toMatchObject({ status: 'open', assignee_agent_id: null });
-    expect(app.db.prepare("SELECT COUNT(*) n FROM agent_notices WHERE agent_id=? AND kind='lease_expired'").get(X.c.id)).toMatchObject({ n: 1 });
+    app.teams.tick(true);
+    app.teams.tick(true);
+    expect(app.teams.task(t.id)).toMatchObject({ status: 'assigned', assignee_agent_id: X.w1.id });
+    expect(app.db.prepare("SELECT COUNT(*) n FROM agent_notices WHERE agent_id=? AND kind='lease_expired'").get(X.c.id)).toMatchObject({ n: 0 });
   });
 
   it('8.A4: an on-demand task assigned for 3 days and never started is not overdue and does not stall its assignee', async () => {
     const X = await team();
-    await api('PATCH', `/teams/${X.tid}`, { delivery_mode: 'on_demand' });
     const t = await mkTask(X);
     await X.C('task_assign', { task_id: t.id, agent_id: X.w1.id });
     const back = 3 * 86_400_000;
@@ -458,13 +463,13 @@ describe('pause and guardrails', () => {
 });
 
 describe('work_next', () => {
-  it('orders by priority and redelivers the same item until it is acked', async () => {
+  it('orders by priority, redelivers the same item until it is acked, and still waits for new work', async () => {
     const [c, w, r] = ['pc', 'pw', 'pr'].map(mk) as ReturnType<typeof mk>[];
     const W = await w!.login();
     const res = await api('POST', '/teams', { name: 'prio', goal: 'g', grant_messaging: true, members: [{ agent_id: c!.id, role: 'coordinator' }, { agent_id: w!.id, role: 'worker' }, { agent_id: r!.id, role: 'reviewer' }] });
     const tid = res.body.team.id as string;
     await api('POST', `/teams/${tid}/start`);
-    const [C, R] = await Promise.all([c!.login(), r!.login()]);
+    const [C] = await Promise.all([c!.login(), r!.login()]);
     await C('message_send', { to: w!.id, body: 'ping', client_msg_id: cid() });
     const t = (await C('task_create', { team_id: tid, title: 'x', reviewer: r!.id })).structuredContent.task;
     await C('task_assign', { task_id: t.id, agent_id: w!.id });
@@ -481,32 +486,23 @@ describe('work_next', () => {
       await W('work_ack', { item_id: it.item.item_id });
     }
     expect(kinds).toContain('task_assigned');
-    expect(kinds.indexOf('message')).toBeGreaterThan(kinds.indexOf('task_assigned'));
+    expect(kinds).not.toContain('message'); // one delivery model: messages are read with message_read
     expect(kinds.lastIndexOf('notice')).toBeLessThan(kinds.indexOf('task_assigned'));
     expect((await W('work_next', { wait_seconds: 0 })).structuredContent.status).toBe('idle');
+    const read = (await W('message_read')).structuredContent;
+    expect(read.read_only).toBeUndefined();
+    expect(read.messages.map((m: any) => m.content)).toContain('ping');
 
-    const t2 = (await C('task_create', { team_id: tid, title: 'y', reviewer: r!.id })).structuredContent.task;
-    await C('message_send', { to: w!.id, body: 'second', client_msg_id: cid() });
-    await C('task_assign', { task_id: t2.id, agent_id: w!.id });
-    const a1 = (await W('work_next', { wait_seconds: 0 })).structuredContent.item;
-    expect(a1).toMatchObject({ kind: 'task_assigned', trust: 'L1', source: { from: 'hub' } });
-    await W('work_ack', { item_id: a1.item_id });
-    const a2 = (await W('work_next', { wait_seconds: 0 })).structuredContent.item;
-    expect(a2).toMatchObject({ kind: 'message', trust: 'L2', message: { content: 'second', trust: 'L2' } });
-    const peek = await W('message_read');
-    expect(peek.structuredContent.read_only).toBe(true);
-    expect((await W('message_read')).structuredContent.messages.length).toBe(peek.structuredContent.messages.length);
-    expect((await W('message_ack', { cursor: peek.structuredContent.next_cursor })).structuredContent.noop).toBe(true);
-
-    await W('task_start', { task_id: t2.id }); await W('task_submit', { task_id: t2.id, summary: 's' });
-    await C('message_send', { to: r!.id, body: 'hey', client_msg_id: cid() });
-    expect((await R('work_next', { wait_seconds: 0 })).structuredContent.item.kind).toBe('review_requested');
-
+    // work_next keeps its wait: an assignment made while it waits comes back from the same call.
     await drain(W);
+    const t2 = (await C('task_create', { team_id: tid, title: 'late', reviewer: r!.id })).structuredContent.task;
     const waiting = W('work_next', { wait_seconds: 5 });
-    setTimeout(() => void C('message_send', { to: w!.id, body: 'late', client_msg_id: cid() }), 150);
+    const began = Date.now();
+    setTimeout(() => void C('task_assign', { task_id: t2.id, agent_id: w!.id }), 150);
     const got = (await waiting).structuredContent;
-    expect(got.item.message.content).toBe('late');
+    expect(Date.now() - began).toBeGreaterThanOrEqual(100);
+    expect(got.status).toBe('item');
+    expect(JSON.stringify(got.item)).toContain(t2.id);
   });
 });
 
@@ -545,12 +541,12 @@ describe('wiring', () => {
     expect((await X.C('task_create', { team_id: X.tid, title: 'late' })).isError).toBe(true);
   });
 
-  it('team_info gives the role playbook (mentions the loop) and the admin can edit it', async () => {
+  it('team_info gives the role playbook (act when woken, no loop) and the admin can edit it', async () => {
     const X = await team();
     const info = (await X.W1('team_info')).structuredContent.teams[0];
     expect(info).toMatchObject({ trust: 'L0', my_role: 'worker', status: 'running' });
-    expect(info.playbook).toContain('work_next', { wait_seconds: 0 });
-    expect(info.playbook).toContain('work_ack');
+    expect(info.playbook).toContain('When woken, check task_list');
+    expect(info.playbook).toContain('you do not poll');
     await api('PUT', `/teams/${X.tid}/roles/worker`, { playbook: 'custom worker text with work_next' });
     expect((await X.W1('team_info')).structuredContent.teams[0].playbook).toContain('custom worker text');
   });
@@ -687,14 +683,12 @@ describe('workflow options from the ECHO trial', () => {
     expect((await api('POST', `/teams/${X.tid}/tasks/${t.id}/approve`)).body.task.status).toBe('done');
   });
 
-  it('on-demand: an overdue task keeps its assignee and alerts once; unrelated calls do not hide it; progress clears it', async () => {
+  it('started work past its check-in time is flagged, keeps its assignee and alerts once; unrelated calls do not hide it; progress clears it', async () => {
     const X = await team({ lease_minutes: 30 });
-    await X.C('message_send', { room_id: X.room, body: 'before the switch', client_msg_id: cid() });
-    const sw = await api('PATCH', `/teams/${X.tid}`, { delivery_mode: 'on_demand' });
-    expect(sw.body.team.delivery_mode).toBe('on_demand');
+    await X.C('message_send', { room_id: X.room, body: 'a room message', client_msg_id: cid() });
     expect(app.db.prepare("SELECT COUNT(*) n FROM work_items WHERE team_id=? AND kind='message' AND acked_at IS NULL").get(X.tid)).toMatchObject({ n: 0 });
     const info = await X.W1('team_info');
-    expect(info.content[0]!.text).toContain('on demand');
+    expect(info.content[0]!.text).toContain('act when woken');
     expect(info.structuredContent.teams[0].playbook).toContain('do not poll');
     const t = await mkTask(X);
     await X.C('task_assign', { task_id: t.id, agent_id: X.w1.id });
@@ -727,14 +721,14 @@ describe('workflow options from the ECHO trial', () => {
     expect([overdue('open'), overdue('closed')]).toEqual([0, 2]);
   });
 
-  it('on-demand: the check-in time is the assignee\'s own until, also when a team switches over', async () => {
+  it('the check-in time is the assignee\'s own until, also when the team\'s default changes', async () => {
     const X = await team({ lease_minutes: 1440 });
     const t = await mkTask(X);
     await X.C('task_assign', { task_id: t.id, agent_id: X.w1.id });
     await X.W1('task_start', { task_id: t.id });
     const soon = Date.now() + 3600_000;
     await X.W1('task_progress', { task_id: t.id, note: 'run', until: soon });
-    await api('PATCH', `/teams/${X.tid}`, { delivery_mode: 'on_demand', lease_minutes: 180 });
+    await api('PATCH', `/teams/${X.tid}`, { lease_minutes: 180 });
     expect(app.teams.task(t.id)!.lease_expires_at).toBe(soon);
     const sooner = Date.now() + 1800_000;
     await X.W1('task_progress', { task_id: t.id, note: 'still running', until: sooner });
@@ -743,9 +737,8 @@ describe('workflow options from the ECHO trial', () => {
     expect(Math.abs(app.teams.task(t.id)!.lease_expires_at! - (Date.now() + 180 * 60_000))).toBeLessThan(5000);
   });
 
-  it('on-demand: pause and resume move the check-in deadline by the paused time', async () => {
+  it('pause and resume move the check-in deadline by the paused time', async () => {
     const X = await team();
-    await api('PATCH', `/teams/${X.tid}`, { delivery_mode: 'on_demand' });
     const t = await mkTask(X);
     await X.C('task_assign', { task_id: t.id, agent_id: X.w1.id });
     await X.W1('task_start', { task_id: t.id });
@@ -756,9 +749,8 @@ describe('workflow options from the ECHO trial', () => {
     expect(app.teams.task(t.id)!.lease_expires_at!).toBeGreaterThanOrEqual(before + 600_000);
   });
 
-  it('8.A15: resuming a paused on-demand team shifts work and review deadlines by the pause; queued turns keep none', async () => {
+  it('8.A15: resuming a paused team shifts work and review deadlines by the pause; queued turns keep none', async () => {
     const X = await team();
-    await api('PATCH', `/teams/${X.tid}`, { delivery_mode: 'on_demand' });
     const [q, wk, rv] = [await mkTask(X, { reviewer: X.r.id }), await mkTask(X, { reviewer: X.r.id }), await mkTask(X, { reviewer: X.r.id })];
     for (const k of [q, wk, rv]) await X.C('task_assign', { task_id: k.id, agent_id: X.w1.id });
     await X.W1('task_start', { task_id: wk.id });
@@ -780,25 +772,25 @@ describe('workflow options from the ECHO trial', () => {
     expect(app.teams.task(q.id)!.lease_expires_at).toBeNull();
   });
 
-  it('on-demand: room messages are read once with message_read, not queued; a polling team of the same agent still queues', async () => {
+  it('room messages are read once with message_read and never queued, in every team of the same agent', async () => {
     const X = await team();
-    await api('PATCH', `/teams/${X.tid}`, { delivery_mode: 'on_demand' });
     await drain(X.W2);
-    await X.C('message_send', { room_id: X.room, body: 'on-demand hello', client_msg_id: cid() });
+    await X.C('message_send', { room_id: X.room, body: 'hello', client_msg_id: cid() });
     expect(app.db.prepare("SELECT COUNT(*) n FROM work_items WHERE agent_id=? AND kind='message' AND acked_at IS NULL").get(X.w2.id)).toMatchObject({ n: 0 });
     const first = (await X.W2('message_read', { room_id: X.room })).structuredContent;
-    expect(first.messages.map((m: any) => m.content)).toContain('on-demand hello');
+    expect(first.messages.map((m: any) => m.content)).toContain('hello');
     expect(first.read_only).toBeUndefined();
     expect((await X.W2('message_read', { room_id: X.room })).structuredContent.messages).toHaveLength(0);
-    // the same worker also joins a polling team: that room still arrives through work_next
+    // The same worker in a second team: that room is read the same way.
     const pc = mk('pcoord');
-    const p = await api('POST', '/teams', { name: `poll${++n}`, goal: 'g', grant_messaging: true, members: [{ agent_id: pc.id, role: 'coordinator' }, { agent_id: X.w2.id, role: 'worker' }] });
+    const p = await api('POST', '/teams', { name: `second${++n}`, goal: 'g', grant_messaging: true, members: [{ agent_id: pc.id, role: 'coordinator' }, { agent_id: X.w2.id, role: 'worker' }] });
     await api('POST', `/teams/${p.body.team.id}/start`);
     const PC = await pc.login();
-    await PC('message_send', { room_id: p.body.team.room_id, body: 'polling hello', client_msg_id: cid() });
-    expect(app.db.prepare("SELECT COUNT(*) n FROM work_items WHERE agent_id=? AND team_id=? AND kind='message' AND acked_at IS NULL").get(X.w2.id, p.body.team.id)).toMatchObject({ n: 1 });
-    const mixed = (await X.W2('message_read', { room_id: p.body.team.room_id })).structuredContent;
-    expect(mixed.read_only_rooms).toEqual([p.body.team.room_id]);
+    await PC('message_send', { room_id: p.body.team.room_id, body: 'second hello', client_msg_id: cid() });
+    expect(app.db.prepare("SELECT COUNT(*) n FROM work_items WHERE agent_id=? AND kind='message' AND acked_at IS NULL").get(X.w2.id)).toMatchObject({ n: 0 });
+    const other = (await X.W2('message_read', { room_id: p.body.team.room_id })).structuredContent;
+    expect(other.read_only_rooms ?? []).toEqual([]);
+    expect(other.messages.map((m: any) => m.content)).toContain('second hello');
   });
 });
 
@@ -938,7 +930,7 @@ describe('team plan: requirements and milestones', () => {
 });
 
 describe('a new login continues where the agent left off', () => {
-  it('delivers a directive sent before the first login, keeps unconfirmed notices across logins, and does not replay read messages', async () => {
+  it('delivers a directive sent before the first login, keeps unconfirmed notices across logins, and replays read messages only until they are confirmed', async () => {
     const X = await team({}, true);
     // directive to an agent that has never logged in
     const fresh = mk('fresh');
@@ -952,12 +944,15 @@ describe('a new login continues where the agent left off', () => {
     await F2('session_ack', { notice_seq: seq });
     const F3 = await fresh.login();
     expect((((await F3('session_whoami')).structuredContent.notices ?? []) as { body: string }[]).map((n) => n.body)).not.toContain('cite every claim');
-    // on-demand room messages read in one login are not replayed in the next
-    await api('PATCH', `/teams/${X.tid}`, { delivery_mode: 'on_demand' });
+    // room messages read in one login but never confirmed (acked) are delivered again by the next login; once confirmed they are not
     await X.C('message_send', { room_id: X.room, body: 'read me once', client_msg_id: cid() });
     expect((await X.W1('message_read', { room_id: X.room })).structuredContent.messages.map((m: any) => m.content)).toContain('read me once');
     const W1b = await X.w1.login();
-    expect((await W1b('message_read', { room_id: X.room })).structuredContent.messages).toHaveLength(0);
+    const rd = (await W1b('message_read', { room_id: X.room })).structuredContent;
+    expect(rd.messages.map((m: any) => m.content)).toContain('read me once');
+    await W1b('message_ack', { cursor: rd.next_cursor });
+    const W1c = await X.w1.login();
+    expect((await W1c('message_read', { room_id: X.room })).structuredContent.messages).toHaveLength(0);
   });
 });
 
@@ -1047,16 +1042,15 @@ describe('code review fixes (10 Nov)', () => {
     expect((await X.C('team_recruit', recruitArgs(X, 'Too wide'))).structuredContent.error).toBe('denied');
   });
 
-  it('a room member without read rights gets no message items', async () => {
+  it('a room member without read rights does not get the message', async () => {
     const X = await team();
     await Promise.all([X.W1, X.W2].map(drain));
     const own = app.keys.rules(X.w2.cred.policy_id, false).map(({ id: _i, ...r }) => r);
     app.keys.setRules(X.w2.cred.policy_id, [...own, { effect: 'deny', actions: ['room.read_history'], resource: `room:${X.room}` }], 'test', sys);
     expect((await X.C('message_send', { room_id: X.room, body: 'for readers only', client_msg_id: cid() })).isError).toBeFalsy();
-    const w1 = (await X.W1('work_next', { wait_seconds: 0 })).structuredContent;
-    expect(w1.item?.kind).toBe('message');
-    const w2 = (await X.W2('work_next', { wait_seconds: 0 })).structuredContent;
-    expect(w2.item?.message?.content).not.toBe('for readers only');
+    expect(JSON.stringify((await X.W1('message_read', { room_id: X.room })).structuredContent)).toContain('for readers only');
+    expect(JSON.stringify((await X.W2('message_read', { room_id: X.room })).structuredContent)).not.toContain('for readers only');
+    expect(JSON.stringify((await X.W2('work_next', { wait_seconds: 0 })).structuredContent)).not.toContain('for readers only');
   });
 
   it('rotating a member\'s key keeps its team grants after the next membership change', async () => {

@@ -1,5 +1,5 @@
 /**
- * Task tags: the creator files a task under up to 8 lowercase tags (the directives tag model) in task_create; the creator
+ * Task tags: the creator files a task under up to 2 lowercase tags (the directives tag model) in task_create; the creator
  * or a coordinator changes them with task_update while the task is in the backlog; the operator edits them on any task
  * (admin API, audited). task_list, GET /api/tasks/backlog and GET /api/teams/:id/tasks filter by one tag; members see a
  * team's tasks only where their grant has the team's tasks.
@@ -74,11 +74,12 @@ beforeAll(async () => {
 afterAll(async () => { await app?.close(); });
 
 describe('validation (the directives tag model)', () => {
-  it('normalises like directive tags: lowercase, dashes, a-z 0-9 . _ -, cut to 24, deduplicated; more than 8 is refused', () => {
-    expect(normTaskTags([' Docs ', 'UX review', 'docs', 'a/b!', '', '   '])).toEqual(['docs', 'ux-review', 'ab']);
+  it('normalises like directive tags: lowercase, dashes, a-z 0-9 . _ -, cut to 24, deduplicated; more than 2 is refused', () => {
+    expect(normTaskTags([' Docs ', 'UX review', 'docs', '', '   '])).toEqual(['docs', 'ux-review']);
+    expect(normTaskTags(['a/b!'])).toEqual(['ab']);
     expect(normTaskTags(['x'.repeat(40)])).toEqual(['x'.repeat(24)]);
-    expect(normTaskTags(['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'H', 'a'])).toHaveLength(8);
-    expect(() => normTaskTags(['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i'])).toThrow('A task takes at most 8 tags.');
+    expect(normTaskTags(['a', 'b', 'B', 'a'])).toHaveLength(2);
+    expect(() => normTaskTags(['a', 'b', 'c'])).toThrow('A task takes at most 2 tags.');
   });
 
   it('task_create stores the creator\'s tags and shows them in task_list; too many is refused', async () => {
@@ -193,19 +194,19 @@ describe('member scoping', () => {
   it('a member reads tagged task lists only for teams granted their tasks, and cannot edit tags or read the backlog', async () => {
     const X = await team('Granted'), Y = await team('NotGranted');
     const a = await create(X, { tags: ['docs'] }), b = await create(Y, { tags: ['docs'] });
-    const u = await api('POST', '/users', { username: 'mira' });
+    const u = await api('POST', '/users', { username: 'nadia' });
     const pw = u.body.password as string;
     expect((await api('PUT', `/users/${u.body.user.id}/grants`, { grants: [{ project_id: X.project, components: ['tasks'] }] })).status).toBe(200);
-    const mira = await login('mira', pw);
-    const mine = await call(mira, 'GET', `/teams/${X.id}/tasks?tag=docs`);
+    const nadia = await login('nadia', pw);
+    const mine = await call(nadia, 'GET', `/teams/${X.id}/tasks?tag=docs`);
     expect(mine.status).toBe(200);
     expect(ids(mine.body.tasks)).toEqual([a.id]);
     expect(mine.body.tasks[0].tags).toEqual(['docs']);
-    const other = await call(mira, 'GET', `/teams/${Y.id}/tasks?tag=docs`);
+    const other = await call(nadia, 'GET', `/teams/${Y.id}/tasks?tag=docs`);
     expect(other.status).toBe(404);
     expect(JSON.stringify(other.body)).not.toContain(b.id);
-    expect((await call(mira, 'PUT', `/teams/${X.id}/tasks/${a.id}/tags`, { tags: ['x'] })).status).toBe(403);
-    expect((await call(mira, 'GET', '/tasks/backlog?tag=docs')).status).toBe(403);
+    expect((await call(nadia, 'PUT', `/teams/${X.id}/tasks/${a.id}/tags`, { tags: ['x'] })).status).toBe(403);
+    expect((await call(nadia, 'GET', '/tasks/backlog?tag=docs')).status).toBe(403);
     expect(app.teams.task(a.id)!.tags).toBe('["docs"]');
   });
 });

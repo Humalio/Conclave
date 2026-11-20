@@ -27,7 +27,7 @@ describe('Rotate sheet and status line (source)', () => {
   });
   it('shows every status of the mockup with its texts and actions', () => {
     for (const t of ['Waiting for the Codex wake on', 'Not collected in 24 hours', 'could not write', 'Two copies of the Codex wake asked for this key', 'The new key was used from somewhere else',
-      'Show a key prompt instead', 'Try again', 'Open the alert', 'Rotate as a leak…', 'the agent signed in with the new key', '(/mcp)',
+      'Show a key prompt instead', 'Try again', 'Open the alert', 'Rotate as a leak…', 'the agent signed in with the new key', 'conclave check',
       'Waiting: a lockdown is on.', 'cannot sign in: its app key is', "This key's PC changed, so the collection was cancelled."]) expect(js, t).toContain(t);
     expect(js).toContain("['Rotated', 'Collect', 'Confirmed', 'Signed in']");
     expect(js).toContain('collect/prompt');

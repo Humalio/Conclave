@@ -49,7 +49,7 @@ export default [
 
   s('1.6', 'Saoirse reads her team', async (c) => {
     const d = await c.as('Saoirse').ok('team_info', { team_id: c.T('int') });
-    c.expect(d.teams?.[0]?.mode === 'poll', `Case Command is a polling team (got ${d.teams?.[0]?.mode})`);
+    c.expect(d.teams?.[0] && !('mode' in d.teams[0]), 'Case Command has no delivery mode: every team acts when woken');
   }),
 
   s('1.7', 'Saoirse sets the case plan', async (c) => {
@@ -111,13 +111,14 @@ export default [
     }
   }),
 
-  s('1.13', 'A DM inside a draft polling team is held; an outsider’s arrives', async (c) => {
+  s('1.13', 'DMs reach a member of a draft team through message_read, from inside the team and outside', async (c) => {
     await c.as('Dunmore').ok('message_send', { to: c.A('Fen'), body: 'First watch: survey the frame 44 mount stubs.', client_msg_id: 'dunmore-fen-first' });
     await c.as('Marguerite').ok('message_send', { to: c.A('Fen'), body: 'Disclosure Board: send the bunk layout when you have it.', client_msg_id: 'marguerite-fen-bunk' });
-    const before = JSON.stringify(await c.as('Fen').ok('message_read', { wait_seconds: 0 }));
+    const read = await c.as('Fen').ok('message_read', { wait_seconds: 0 });
+    const before = JSON.stringify(read);
     c.expect(before.includes('bunk layout'), 'the outsider’s message arrives through message_read');
-    const idle = await c.as('Fen').ok('work_next', { wait_seconds: 0 });
-    c.expect(idle.status === 'idle', `work_next is idle while the team is draft (got ${idle.status})`);
+    c.expect(before.includes('mount stubs'), 'the team member’s message arrives through message_read too (one delivery model)');
+    if (read.next_cursor) await c.as('Fen').ok('message_ack', { cursor: read.next_cursor });
     await c.op.post(`/api/teams/${c.T('sy')}/start`);
     const seen = [];
     for (let k = 0; k < 15; k++) {
@@ -125,8 +126,7 @@ export default [
       const item = w.item ?? w; if (!item?.item_id && !item?.id) break;
       seen.push(JSON.stringify(item)); await c.as('Fen').ok('work_ack', { item_id: item.item_id ?? item.id });
     }
-    c.expect(seen.some((x) => x.includes('mount stubs')), 'the held message arrives through work_next once the team runs');
-    c.expect(!seen.some((x) => x.includes('bunk layout')), 'the outsider’s message never comes again through work_next');
+    c.expect(!seen.some((x) => x.includes('mount stubs') || x.includes('bunk layout')), 'no message comes again through work_next');
   }, { beat: 2000, rows: ['teams'] }),
 
   s('1.13b', 'Dunmore sets the refit plan', async (c) => {

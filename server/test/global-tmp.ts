@@ -1,18 +1,10 @@
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { startRun } from '../scripts/test-tmp.mjs';
 
-/* Test files create throwaway hubs (data + vault) under the OS temp folder and never remove them: about 250 MB per
-   run. Point the temp folder of every worker at one parent for this run, then delete that parent when the run ends.
-   Workers are forked after this runs, so they inherit the variables and os.tmpdir() returns the parent. */
-const KEYS = ['TMPDIR', 'TMP', 'TEMP'] as const;
-
+/* Test files create throwaway hubs (data + vault) under the OS temp folder and seldom remove them. Every run gets one folder
+   (`conclave-test-<pid>-<time>`, scripts/test-tmp.mjs) that the temp variables of every worker point at; it is deleted when
+   the run ends, and a killed run's folder is deleted by a later run. Workers are forked after this runs, so they inherit the
+   variables and os.tmpdir() returns the run folder. */
 export default function setup() {
-  const saved = Object.fromEntries(KEYS.map((k) => [k, process.env[k]]));
-  const root = mkdtempSync(join(tmpdir(), 'agent-hub-tests-'));
-  for (const k of KEYS) process.env[k] = root;
-  return () => {
-    for (const k of KEYS) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }
-    rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
-  };
+  const run = startRun();
+  return () => run.end();
 }

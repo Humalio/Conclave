@@ -1,0 +1,33 @@
+# Conclave relay (docs/relay.md). Run from this folder on the relay machine:
+#   cp .env.example .env    # then fill in .env; it holds the relay secret and is never committed
+#   docker compose up -d
+# One container, no hub and no database: Caddy passes every request on to the hub named in .env.
+services:
+  relay:
+    image: caddy:2.10.2-alpine
+    restart: unless-stopped
+    environment:
+      RELAY_HOST: ${RELAY_HOST:?set RELAY_HOST in .env}
+      HUB_NAME: ${HUB_NAME:?set HUB_NAME in .env}
+      HUB_UPSTREAM: ${HUB_UPSTREAM:-${HUB_NAME}:443}
+      # Empty on the very first start, which only makes the CA to register; the hub then treats requests as direct.
+      RELAY_SECRET: ${RELAY_SECRET:-}
+      HTTP_PORT: ${HTTP_PORT:-80}
+      HTTPS_PORT: ${HTTPS_PORT:-443}
+    ports:
+      - "${HTTP_PORT:-80}:${HTTP_PORT:-80}"
+      - "${HTTPS_PORT:-443}:${HTTPS_PORT:-443}"
+    volumes:
+      - ./relay.Caddyfile:/etc/caddy/Caddyfile:ro
+      # The relay's certificate authority lives here. Keep this volume: a new CA means every PC behind
+      # the relay must be set up again, since each pinned the old one.
+      - relay_data:/data
+      - relay_config:/config
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+volumes:
+  relay_data:
+  relay_config:

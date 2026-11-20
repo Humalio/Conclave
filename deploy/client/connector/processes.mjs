@@ -6,14 +6,16 @@
  * pid (even one that now runs the user's own Node script), the user's own Claude Code or Codex, or another hub's work is
  * never touched. A record whose process is gone is simply dropped.
  */
-import { join, basename } from 'node:path';
+import { join, basename, dirname } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { readFileSync, readlinkSync, realpathSync, existsSync } from 'node:fs';
-import { readJson, atomicWrite, WIN } from './paths.mjs';
+import { readFileSync, readlinkSync, realpathSync, existsSync, openSync, writeSync, fsyncSync, closeSync, linkSync, rmSync, mkdirSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
+import { readJson, readState, writeState, withLock, alive, WIN } from './paths.mjs';
 
 export const processesPath = (home) => join(home, 'processes.json');
-const load = (home) => { const j = readJson(processesPath(home), { version: 1, processes: [] }); return j && j.version === 1 && Array.isArray(j.processes) ? j : { version: 1, processes: [] }; };
-const save = (home, j) => atomicWrite(processesPath(home), JSON.stringify(j, null, 2) + '\n');
+const load = (home) => { const j = readState(processesPath(home), { version: 1, processes: [] }); return j && j.version === 1 && Array.isArray(j.processes) ? j : { version: 1, processes: [] }; };
+const save = (home, j) => writeState(processesPath(home), JSON.stringify(j, null, 2) + '\n');
+const locked = (home, fn) => withLock(processesPath(home), fn);
 
 /**
  * Records a process the connector just started. `hubKey` is null for work that belongs to no single hub. `script` is
@@ -23,16 +25,20 @@ const save = (home, j) => atomicWrite(processesPath(home), JSON.stringify(j, nul
 export function recordStarted(home, { pid, image, script = null, hubKey = null, what }) {
   if (!Number.isInteger(pid) || pid <= 0 || typeof image !== 'string' || !image) throw new Error('a pid and the program path are required');
   if (script !== null && (typeof script !== 'string' || !script)) throw new Error('the script, when given, is a path');
-  const j = load(home);
-  j.processes = [...j.processes.filter((p) => p.pid !== pid), { pid, image, ...(script ? { script } : {}), hub_key: hubKey, what: String(what ?? ''), started_at: new Date().toISOString() }];
-  save(home, j);
+  locked(home, () => {
+    const j = load(home);
+    j.processes = [...j.processes.filter((p) => p.pid !== pid), { pid, image, ...(script ? { script } : {}), hub_key: hubKey, what: String(what ?? ''), started_at: new Date().toISOString() }];
+    save(home, j);
+  });
 }
 
 /** Drops a record (the process ended normally). */
 export function forgetStarted(home, pid) {
-  const j = load(home);
-  const n = j.processes.filter((p) => p.pid !== pid);
-  if (n.length !== j.processes.length) { j.processes = n; save(home, j); }
+  locked(home, () => {
+    const j = load(home);
+    const n = j.processes.filter((p) => p.pid !== pid);
+    if (n.length !== j.processes.length) { j.processes = n; save(home, j); }
+  });
 }
 
 const realOr = (p) => { try { return realpathSync(p); } catch { return p; } };
@@ -107,15 +113,89 @@ export function killTree(pid) {
  * process had already gone (or the pid now runs another program, which is left alone).
  */
 export function stopStarted(home, scope, deps = {}) {
-  const alive = deps.runningAs ?? runningAs, kill = deps.killTree ?? killTree;
+  const isOurs = deps.runningAs ?? runningAs, kill = deps.killTree ?? killTree;
+  return locked(home, () => {
   const j = load(home);
   const inScope = (p) => scope.kind === 'all' || p.hub_key === scope.hubKey;
   const ended = [], gone = [];
   for (const p of j.processes.filter(inScope)) {
     if (p.pid === process.pid) continue; // the run doing the removal (the service, say) is never ended by it
-    if (alive(p.pid, p.image, p.script ?? null)) { kill(p.pid); ended.push(p.pid); } else gone.push(p.pid);
+    if (isOurs(p.pid, p.image, p.script ?? null)) { kill(p.pid); ended.push(p.pid); } else gone.push(p.pid);
   }
   j.processes = j.processes.filter((p) => !inScope(p));
   save(home, j);
   return { ended, gone };
+  });
+}
+
+/** This process's own start time, in epoch milliseconds. */
+const ownStart = () => Math.round(Date.now() - process.uptime() * 1000);
+
+/**
+ * The process a lock file names, while it is still that process: the same id, and where the system reports it, the same
+ * start time (within 5 seconds), so a reused id is not taken for the holder. `null` when the holder is gone.
+ */
+export function lockHolder(path, deps = {}) {
+  const h = readJson(path, null);
+  if (!h || !Number.isSafeInteger(h.pid) || !(deps.alive ?? alive)(h.pid)) return null;
+  if (h.pid === process.pid) return h;
+  const t = Number.isFinite(h.started_ms) ? (deps.startTime ?? startTimeOf)(h.pid) : null;
+  if (t !== null && Math.abs(t - h.started_ms) > 5000) return null;
+  return h;
+}
+
+/**
+ * Takes the exclusive lock of one long-running process (the service's supervisor, its worker): `{ok: true, release}`, or
+ * `{ok: false, holder: {pid, started_at, what}}` when another live process holds it. The file is written whole first and
+ * then hard-linked into place, which fails if the lock exists, so two processes started at once never both get it (a
+ * filesystem without hard links falls back to an exclusive create). A lock whose holder is gone (a crash) is taken over.
+ */
+export function takeProcessLock(path, what, deps = {}) {
+  mkdirSync(dirname(path), { recursive: true });
+  const body = JSON.stringify({ pid: process.pid, started_ms: ownStart(), started_at: new Date(ownStart()).toISOString(), what: String(what) }) + '\n';
+  const release = () => { const h = readJson(path, null); if (h?.pid === process.pid) rmSync(path, { force: true }); };
+  for (let i = 0; i < 3; i++) {
+    const tmp = `${path}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
+    try {
+      const fd = openSync(tmp, 'w', 0o600);
+      try { writeSync(fd, body); fsyncSync(fd); } finally { closeSync(fd); }
+      try { linkSync(tmp, path); return { ok: true, release }; } catch (e) {
+        if (e.code === 'EEXIST') { /* held: look at the holder below */ } else if (['EPERM', 'ENOTSUP', 'ENOSYS', 'EXDEV'].includes(e.code)) {
+          try { const fd2 = openSync(path, 'wx', 0o600); try { writeSync(fd2, body); fsyncSync(fd2); } finally { closeSync(fd2); } return { ok: true, release }; } catch (e2) { if (e2.code !== 'EEXIST') throw e2; }
+        } else throw e;
+      }
+    } finally { rmSync(tmp, { force: true }); }
+    const h = lockHolder(path, deps);
+    if (h && h.pid !== process.pid) return { ok: false, holder: { pid: h.pid, started_at: h.started_at ?? null, what: h.what ?? null } };
+    rmSync(path, { force: true }); // the process that held it is gone (a crash, or a power loss): it is taken over
+  }
+  return { ok: false, holder: { pid: readJson(path, null)?.pid ?? null, started_at: null, what: null } };
+}
+
+/** Linux: the start time in epoch ms from the text of /proc/<pid>/stat (field 22, in clock ticks of 10 ms after boot) and /proc/stat (`btime`), or null. */
+export function procStartMs(statText, procStatText) {
+  const ticks = Number(String(statText).slice(String(statText).lastIndexOf(')') + 2).split(' ')[19]);
+  const btime = Number(/^btime (\d+)/m.exec(String(procStatText))?.[1]);
+  return Number.isFinite(ticks) && Number.isFinite(btime) ? btime * 1000 + Math.round(ticks * 10) : null; // 100 ticks a second
+}
+
+/**
+ * When a process started, in epoch milliseconds, or null if it cannot be read. With the process id it identifies a process: a
+ * reused id has another start time, so a run is only ever taken up again when both match.
+ */
+export function startTimeOf(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  try {
+    if (WIN) {
+      const ps = `[Console]::OutputEncoding=[Text.Encoding]::UTF8; $p = Get-CimInstance Win32_Process -Filter 'ProcessId=${pid}'; if ($p) { $p.CreationDate.ToUniversalTime().ToString('o') }`;
+      const exe = join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+      const r = spawnSync(exe, ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(ps, 'utf16le').toString('base64')], { encoding: 'utf8', windowsHide: true, shell: false, timeout: 30_000 });
+      const t = r.status === 0 ? Date.parse(String(r.stdout || '').trim()) : NaN;
+      return Number.isFinite(t) ? t : null;
+    }
+    if (existsSync('/proc/self')) return procStartMs(readFileSync(`/proc/${pid}/stat`, 'utf8'), readFileSync('/proc/stat', 'utf8'));
+    const r = spawnSync('/bin/ps', ['-p', String(pid), '-o', 'lstart='], { encoding: 'utf8', shell: false });
+    const t = r.status === 0 ? Date.parse(String(r.stdout || '').trim()) : NaN;
+    return Number.isFinite(t) ? t : null;
+  } catch { return null; }
 }

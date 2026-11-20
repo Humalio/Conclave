@@ -1,0 +1,142 @@
+# Conclave relay: a machine in a network that cannot reach the hub directly passes every request on to it.
+# PCs there point at the relay's IP exactly as they point at a LAN hub: HTTPS by IP, with the relay's own
+# internal certificate authority, which they pin at setup. The relay forwards to the one hub fixed below,
+# over HTTPS with the hub's public certificate checked. It stores nothing and logs no headers, bodies or
+# query strings. Run it only on a trusted machine: it sees keys and tokens in memory while passing them on.
+# See docs/relay.md for who may run one, what it strips and passes, and the setup steps.
+{
+	auto_https disable_redirects
+	local_certs
+	# Clients connecting by IP send no SNI; present the relay's certificate anyway.
+	default_sni {$RELAY_HOST}
+	servers {
+		timeouts {
+			# Headers come at once; this stops a client that trickles them.
+			read_header 30s
+			# A slow link may take a while to send a 2 MiB body; this stops one that trickles it forever. It does not
+			# end the push stream (a GET with no body): tested on .5 with read_body 30s and a 70 s stream, and with
+			# this 5m and a 6-minute stream (deploy/relay/e2e).
+			read_body 5m
+			# No write timeout: the push stream stays open as long as the hub keeps it.
+			idle 5m
+		}
+	}
+	# Caddy's own logs (errors from the proxy among them) carry the request too: the same filter applies.
+	log {
+		output stdout
+		format filter {
+			wrap json
+			fields {
+				request>headers delete
+				request>uri regexp \?.*$ ?
+				resp_headers delete
+			}
+		}
+	}
+}
+
+https://{$RELAY_HOST}:{$HTTPS_PORT} {
+	tls internal
+
+	# Access log: time, method, path, status, size and duration. Never a header, a body or a query string.
+	log {
+		output stdout
+		format filter {
+			wrap json
+			fields {
+				request>headers delete
+				request>uri regexp \?.*$ ?
+				resp_headers delete
+			}
+		}
+	}
+
+	# The relay's own CA, which PCs behind it pin. Not the hub's: the hub's is never used on this side.
+	handle /onboard/ca.crt {
+		root * /data/caddy/pki/authorities/local
+		rewrite * /root.crt
+		header Content-Type application/x-x509-ca-cert
+		file_server
+	}
+
+	handle {
+		# The largest body any hub route takes: a vault write, 2 MiB of content plus 64 KiB of form
+		# (server/src/admin/vaultWrite.ts). Bridge transfers go in 1 MiB chunks below that.
+		request_body {
+			max_size 2162688
+		}
+		reverse_proxy https://{$HUB_UPSTREAM} {
+			# The hub sees its own name, so its routes, origin check and certificate all match.
+			header_up Host {$HUB_NAME}
+			# The relay sets both relay headers itself. A set replaces every copy a client sent. Do not add a
+			# "-X-Conclave-Relay-…" delete here: Caddy runs deletes after sets, so it would drop the relay's own value.
+			header_up X-Conclave-Relay-Client {remote_host}
+			header_up X-Conclave-Relay-Secret {$RELAY_SECRET}
+			# No forwarded-for chain: the hub trusts only the relay header, and only with the secret.
+			header_up -X-Forwarded-For
+			header_up -X-Forwarded-Host
+			header_up -X-Forwarded-Proto
+			# Stream every byte as it comes: the push stream, long polls and transfers are never buffered.
+			flush_interval -1
+			request_buffers 0
+			response_buffers 0
+			transport http {
+				# The hub's public certificate is checked against its name (the system trust store).
+				tls_server_name {$HUB_NAME}
+				dial_timeout 10s
+				# Above the 25 s long poll: a poll answers within 25 s, headers first.
+				response_header_timeout 60s
+				# Above the 65 s stream silence: the hub sends a heartbeat every 20 s.
+				read_timeout 90s
+			}
+		}
+	}
+}
+
+# Plain HTTP carries only the hash-checked onboarding downloads a new PC fetches before it trusts the
+# relay's CA (setup.mjs and the header helper against the SHA-256 in the prompt, ca.crt against the
+# fingerprint in the prompt). No machine traffic: MCP, the connector and transfers are HTTPS only here.
+http://:{$HTTP_PORT} {
+	log {
+		output stdout
+		format filter {
+			wrap json
+			fields {
+				request>headers delete
+				request>uri regexp \?.*$ ?
+				resp_headers delete
+			}
+		}
+	}
+	handle /onboard/ca.crt {
+		root * /data/caddy/pki/authorities/local
+		rewrite * /root.crt
+		header Content-Type application/x-x509-ca-cert
+		file_server
+	}
+	handle /onboard/client/* {
+		reverse_proxy https://{$HUB_UPSTREAM} {
+			header_up Host {$HUB_NAME}
+			header_up -X-Conclave-Relay-Client
+			header_up -X-Conclave-Relay-Secret
+			header_up -X-Forwarded-For
+			header_up -X-Forwarded-Host
+			header_up -X-Forwarded-Proto
+			transport http {
+				tls_server_name {$HUB_NAME}
+				dial_timeout 10s
+			}
+		}
+	}
+	# The hub has no OAuth; answer an MCP client's fallback with 404 so the real 401 stays visible.
+	@oauth path /authorize /authorize/* /register /token /revoke
+	handle @oauth {
+		respond 404
+	}
+	handle /.well-known/* {
+		respond 404
+	}
+	handle {
+		redir https://{$RELAY_HOST}:{$HTTPS_PORT}{uri} 308
+	}
+}

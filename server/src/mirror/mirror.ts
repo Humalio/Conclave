@@ -453,7 +453,6 @@ export class Mirror {
     S.push(['## Settings', '',
       `- Project: ${proj ? `${proj.key} ${proj.name}` : 'none'}`,
       `- Status: ${t.status}${t.status === 'paused' && t.paused_reason ? ` (${t.paused_reason.startsWith('checkout:') ? 'held by a checkout' : t.paused_reason})` : ''}`,
-      `- Delivery: ${t.delivery_mode === 'on_demand' ? 'on demand (agents act when woken)' : 'polling (agents loop on work_next)'}`,
       `- Review rounds: at most ${t.max_review_rounds}`].join('\n'));
     const rows = members.map((m) => {
       const a = this.agent(m.agent_id), sp = this.sessionLink(t, folder, m.agent_id);
@@ -556,7 +555,7 @@ export class Mirror {
 
   // ───── pages: checkout README and handouts ─────
   private async writeCheckout(c: CheckoutRow, snapshot?: { handouts: HandoutRow[]; push?: PushRepoLike[] }): Promise<void> {
-    const t = this.team(c.team_id) ?? { id: c.team_id, name: `Team ${c.team_id}`, goal: '', status: 'gone', paused_reason: null, project_id: null, delivery_mode: 'poll', max_review_rounds: 0, created_at: c.created_at, updated_at: c.created_at };
+    const t = this.team(c.team_id) ?? { id: c.team_id, name: `Team ${c.team_id}`, goal: '', status: 'gone', paused_reason: null, project_id: null, max_review_rounds: 0, created_at: c.created_at, updated_at: c.created_at };
     const teamFolder = this.team(c.team_id) ? await this.ensureTeam(t) : this.teamFolder(t);
     if (!teamFolder) return;
     const folder = this.checkoutFolder(c, teamFolder);
@@ -719,6 +718,6 @@ export class Mirror {
   }
 }
 
-interface TeamRowLite { id: string; name: string; goal: string; status: string; paused_reason: string | null; project_id: string | null; delivery_mode: string; max_review_rounds: number; created_at: number; updated_at: number }
+interface TeamRowLite { id: string; name: string; goal: string; status: string; paused_reason: string | null; project_id: string | null; max_review_rounds: number; created_at: number; updated_at: number }
 interface MemberLite { team_id: string; agent_id: string; credential_id: string; role: string; joined_at: number; removed_at: number | null }
 interface AgentLite { id: string; label: string; model_label: string | null; role: string | null; role_detail: string | null; last_seen_at: number | null }

@@ -57,12 +57,12 @@ What I want:
 `;
 
 /** The prompt for Add PC and Re-enrol PC: the template with the hub URL, hashes, CA fingerprint and the code filled in. */
-export function renderPrompt(files: ClientFiles, o: { hubUrl: string; lanUrl?: string; code: string; pc: string }): { text: string; template_sha256: string | null; hashes: Record<string, string | null> } {
+export function renderPrompt(files: ClientFiles, o: { hubUrl: string; lanUrl?: string; code: string; pc: string; relay?: { name: string; ca_sha256: string; release_base: string } }): { text: string; template_sha256: string | null; hashes: Record<string, string | null> } {
   const tpl = files.file('onboarding-prompt.md');
   const setup = files.file('setup.mjs'), helper = files.file('agent-hub-headers.mjs'), ca = files.ca();
   const vals: Record<string, string> = {
-    HUB_URL: o.hubUrl, LAN_URL: o.lanUrl ?? '', LAN_LINE: o.lanUrl ? `\nLAN plain-HTTP URL: ${o.lanUrl}` : '', PC_NAME: o.pc,
-    CA_SHA256: ca?.sha256 ?? '(no CA certificate configured on the hub)', SETUP_SHA256: setup?.sha256 ?? '(setup.mjs not installed on the hub)',
+    HUB_URL: o.hubUrl, LAN_URL: o.lanUrl ?? '', LAN_LINE: o.relay ? `\nThrough relay "${o.relay.name}"; release base (signed connector updates): ${o.relay.release_base}` : o.lanUrl ? `\nLAN plain-HTTP URL: ${o.lanUrl}` : '', PC_NAME: o.pc,
+    CA_SHA256: o.relay?.ca_sha256 ?? ca?.sha256 ?? '(no CA certificate configured on the hub)', SETUP_SHA256: setup?.sha256 ?? '(setup.mjs not installed on the hub)',
     HELPER_SHA256: helper?.sha256 ?? '(helper not installed on the hub)', ENROL_CODE: o.code,
   };
   const text = (tpl?.text ?? FALLBACK_PROMPT).replace(/\{\{([A-Z0-9_]+)\}\}/g, (m, k: string) => vals[k] ?? m);
@@ -76,7 +76,7 @@ const STATUS: Record<string, number> = {
 
 const isLoopback = (ip: string) => ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1' || ip.startsWith('127.');
 
-export function registerOnboarding(f: FastifyInstance, ob: Onboarding, files: ClientFiles): void {
+export function registerOnboarding(f: FastifyInstance, ob: Onboarding, files: ClientFiles, releaseDir?: string): void {
   const send = (reply: FastifyReply, e: unknown) => {
     if (e instanceof KeyError) {
       const extra = e.extra ?? {};
@@ -115,15 +115,26 @@ export function registerOnboarding(f: FastifyInstance, ob: Onboarding, files: Cl
     return reply.type('application/x-pem-file').header('x-ca-sha256', ca.sha256).send(ca.pem);
   });
 
+  // ── signed connector releases, for PCs behind a relay (docs/relay.md) ──
+  // Public files, like the GitHub release assets they copy: the connector checks the signature and the hashes itself, so the transport proves nothing.
+  f.get('/connector/v1/release/:tag/:name', async (req, reply) => {
+    const { tag, name } = req.params as { tag: string; name: string };
+    const ok = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(tag) && /^conclave-connector-[A-Za-z0-9][A-Za-z0-9._+-]{0,60}\.(bundle|json|json\.sig)$/.test(name);
+    const p = releaseDir && ok ? join(releaseDir, name) : null;
+    if (!p || !existsSync(p)) return reply.code(404).send({ error: 'not_found', message: 'No such release file on this hub.' });
+    return reply.type('application/octet-stream').header('cache-control', 'public, max-age=300').send(readFileSync(p));
+  });
+
   // ── enrolment (the code) ──
-  // The code may come in the x-conclave-enrol-code header (setup.mjs restore), never in a URL.
+  // The code may come in the x-conclave-enrol-code header (the legacy setup script), never in a URL.
   route('post', '/onboard/enrol', (req) => { const b = obj(req.body), h = req.headers['x-conclave-enrol-code']; return ob.enrol((b.code ?? (typeof h === 'string' ? h : undefined)) as string, b.nonce as string, req.ip); });
   route('post', '/onboard/enrol/confirm', (req) => ob.enrolConfirm(obj(req.body).nonce as string, req.ip));
 
   // ── connector pairing (docs/connector.md, "Pairing"): no key; the code is bound to this hub's id, origin and CA ──
-  const pinned = () => ({ ...ob.hubInfo(), caSha256: files.ca()?.sha256 ?? null });
-  route('get', '/connector/v1/hub', () => { const h = pinned(); return { hub_id: h.id, origin: h.origin }; });
-  route('post', '/connector/v1/pair', (req) => { const b = obj(req.body); return ob.pair(b.pairing_code, { origin: b.hub_origin, caSha256: b.hub_ca_sha256 }, pinned(), req.ip); });
+  // Through a registered relay (its secret was verified for this request) the hub the PC pins is the relay: its origin and its CA.
+  const pinned = (req: FastifyRequest) => req.relay ? { ...ob.hubInfo(), origin: req.relay.origin, caSha256: req.relay.ca_sha256 } : { ...ob.hubInfo(), caSha256: files.ca()?.sha256 ?? null };
+  route('get', '/connector/v1/hub', (req) => { const h = pinned(req); return { hub_id: h.id, origin: h.origin }; });
+  route('post', '/connector/v1/pair', (req) => { const b = obj(req.body); return ob.pair(b.pairing_code, { origin: b.hub_origin, caSha256: b.hub_ca_sha256 }, pinned(req), req.ip); });
 
   // ── requests (the PC key) ──
   route('post', '/onboard/requests', (req) => ob.file(ob.authApp(bearer(req), req.ip), req.body));

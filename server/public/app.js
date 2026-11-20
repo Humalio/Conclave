@@ -155,6 +155,90 @@ const dz = (icon, title, meta, btn) => row({ lead: ic(icon), title, meta, trail:
 const kd = (title, right = '') => `<div class="kd-h"><h3>${esc(title)}</h3>${right}</div>`;
 /* Section label inside a card: "ACTIVE · 7". extra is trusted markup after the label, for example an info() button. */
 const overline = (text, count, extra = '') => `<div class="overline"><span>${esc(text)}</span>${count === undefined || count === null ? '' : `<span aria-hidden="true">·</span><span>${esc(count)}</span>`}${extra}</div>`;
+/* A list's overline (docs/design-guidelines.md, List overline): one fixed line over a list, its parts joined by "·". A part is
+   text, { html } (trusted markup, such as the live "18 of 112") or an inline select { name, attrs, options: [[value, label]],
+   value }: its accessible name is name, its words live in its options, and it keeps sentence case and a visible ▾ inside the
+   uppercase line. */
+function listOverline(parts) {
+  const one = (x) => (typeof x === 'string' ? `<span>${esc(x)}</span>` : x.html !== undefined ? x.html
+    : `<select class="isel" ${x.attrs || ''} aria-label="${esc(x.name)}">${x.options.map(([v, l]) => `<option value="${esc(v)}"${v === x.value ? ' selected' : ''}>${esc(l)}</option>`).join('')}</select>`);
+  return `<div class="overline lov">${parts.filter((x) => x !== '' && x != null).map(one).join('<span aria-hidden="true">·</span>')}</div>`;
+}
+/* Search field with chips (docs/design-guidelines.md, Search field with chips): a list's active filters as chips before the typed
+   text, in one box. o: { attrs (the form's), label (the input's accessible name), value, chips: [{ label, name (its accessible
+   name, "Remove …"), attrs, gap }], clear (the ✕'s attrs: it clears the text and every chip, back to the screen's default),
+   more (the attrs of "+k", which opens the screen's Filters) }. A default is never a chip. "Search" is the placeholder only
+   while there are no chips; the ✕ shows only while the box holds something. The keyboard is csrchKey, the fold is csrchFit. */
+function csChipsHtml(chips, more) {
+  return chips.map((c) => `<button type="button" class="cs-chip${c.gap ? ' gap' : ''}" data-cs-chip ${c.attrs || ''} aria-label="${esc(c.name)}">${esc(c.label)}${ic('x')}</button>`).join('')
+    + (more && chips.length ? `<button type="button" class="cs-chip cs-more" data-cs-more ${more} hidden></button>` : '');
+}
+function chipSearch(o) {
+  const chips = o.chips || [], v = o.value || '';
+  return `<form class="srch csrch" role="search" ${o.attrs || ''}>${ic('search')}<span class="csrch-box">`
+    + csChipsHtml(chips, o.more)
+    + `<input class="csrch-in" type="search" name="q" value="${esc(v)}" data-q="${esc(v)}" placeholder="${chips.length ? '' : 'Search'}" aria-label="${esc(o.label)}" maxlength="200" autocomplete="off"${o.inAttrs ? ' ' + o.inAttrs : ''}></span>`
+    + (o.clear ? `<button type="button" class="ibtn csrch-x" ${o.clear} aria-label="Clear search and filters" title="Clear search and filters"${chips.length || v ? '' : ' hidden'}>${ic('x')}</button>` : '') + '</form>';
+}
+/* At most two lines of chips: past that, the last filter chips fold into "+k" (the gap chip never folds). Run after each draw
+   and when the window's width changes. */
+function csrchFit(form) {
+  const box = form && $('.csrch-box', form), more = box && $('[data-cs-more]', box);
+  if (!box) return;
+  const chips = $$('[data-cs-chip]', box);
+  chips.forEach((c) => (c.hidden = false));
+  if (!more) return;
+  more.hidden = true;
+  if (!box.offsetParent) return;
+  const lines = () => { let n = 0, last = -99; for (const t of [...box.children].filter((e) => !e.hidden).map((e) => e.offsetTop).sort((a, b) => a - b)) if (t > last + 8) { n++; last = t; } return n; };
+  const fold = chips.filter((c) => !c.classList.contains('gap'));
+  for (let k = 1; k <= fold.length && lines() > 2; k++) {
+    fold[fold.length - k].hidden = true;
+    more.hidden = false; more.textContent = `+${k}`; more.setAttribute('aria-label', `${plural(k, 'more filter')}, open Filters`);
+  }
+}
+/* The box's keyboard: Backspace in an empty input focuses the last chip and a second Backspace removes it; Arrow Left and Right
+   move between the chips and the input; Escape clears only the text (and the search it ran). Removing a chip returns focus to
+   the input (the screen's click handler). */
+function csrchKey(e) {
+  const t = e.target, form = t.closest?.('.csrch');
+  if (!form) return;
+  const inp = $('.csrch-in', form), items = [...$$('[data-cs-chip],[data-cs-more]', form).filter((c) => !c.hidden), inp], i = items.indexOf(t);
+  if (i < 0) return;
+  const isIn = t === inp, at0 = isIn && t.selectionStart === 0 && t.selectionEnd === 0;
+  const stop = () => { e.preventDefault(); e.stopImmediatePropagation(); };
+  if (isIn && e.key === 'Escape') { if (t.value) { stop(); t.value = ''; csrchMark(form); if (t.dataset.q) form.requestSubmit(); } return; }
+  if (e.key === 'ArrowLeft' && (!isIn || at0) && i > 0) { stop(); items[i - 1].focus(); return; }
+  if (e.key === 'ArrowRight' && !isIn) { stop(); items[i + 1].focus(); return; }
+  if (e.key === 'Backspace' && isIn && !t.value && i > 0) { stop(); items[i - 1].focus(); return; }
+  if ((e.key === 'Backspace' || e.key === 'Delete') && t.matches('[data-cs-chip]')) { stop(); t.click(); }
+}
+/* A screen that filters in place (no redraw of the box, so the typed text and the focus stay) swaps its chips with csrchSet. */
+function csrchSet(form, chips, more) {
+  const inp = form && $('.csrch-in', form); if (!inp) return;
+  $$('[data-cs-chip],[data-cs-more]', form).forEach((c) => c.remove());
+  inp.insertAdjacentHTML('beforebegin', csChipsHtml(chips, more));
+  inp.placeholder = chips.length ? '' : 'Search';
+  csrchMark(form); csrchFit(form);
+}
+/* The ✕ shows only while the box holds a chip or text. */
+const csrchMark = (form) => { const x = $('.csrch-x', form); if (x) x.hidden = !($('[data-cs-chip]', form) || $('.csrch-in', form)?.value); };
+document.addEventListener('keydown', csrchKey);
+document.addEventListener('input', (e) => { const f = e.target.closest?.('.csrch'); if (f) csrchMark(f); });
+// A click on the box between chips puts the caret in the input, as in any text field.
+document.addEventListener('click', (e) => { const b = e.target.closest?.('.csrch-box'); if (b && e.target === b) $('.csrch-in', b)?.focus(); });
+addEventListener('resize', () => $$('.csrch').forEach(csrchFit));
+/* Screens other than the Blueprint wire their chips, the ✕ and the empty state's Clear search and filters with data-cs-nav="<view>|<arg>":
+   the click opens that route in place and puts the focus back in the box. "+k" carries data-cs-filt="<Filters button id>". */
+document.addEventListener('click', async (e) => {
+  const b = e.target.closest?.('[data-cs-nav],[data-cs-filt]'); if (!b) return;
+  e.preventDefault();
+  if (b.dataset.csFilt) { $('#' + b.dataset.csFilt)?.click(); return; }
+  const v = b.dataset.csNav, i = v.indexOf('|');
+  await openD(v.slice(0, i), v.slice(i + 1), true); $('#dB .csrch-in')?.focus();
+});
+/* "N of M" in a list overline: the one live region of the list's count (listOverline takes it as { html }). */
+const lovN = (n, of, id = '') => ({ html: `<span class="lov-n"${id ? ` id="${id}"` : ''} tabindex="-1" aria-live="polite"><b>${n}</b> of ${of}</span>` });
 /* Info button: tooltip on hover/focus on desktop, a sheet on touch (handled by the click listener below). Keep the text to two short sentences. */
 const info = (text) => `<button type="button" class="info" data-info="${esc(text)}" aria-label="More information">${ic('info')}<span class="info-tip" role="tooltip">${esc(text)}</span></button>`;
 /* Hover cards (.info-tip inside .info, .ref and .bp-chk; docs/design-guidelines.md, Hover cards): one positioner for every
@@ -778,7 +862,7 @@ const CO = { prompt: {}, last: {}, unavail: {}, form: {}, edit: {}, team: {}, ti
 const CO_ST = { collecting: ['Collecting', 'info'], ready: ['Ready', 'acc'], rendered: ['Prompt made', 'acc'], restoring: ['Restoring', 'info'], restored: ['Restored', 'ok'], cancelled: ['Cancelled', 'idle'], expired: ['Expired', 'idle'] };
 const CO_HST = { requested: ['Asked', 'idle'], checkpointing: ['Checkpointing', 'warn'], merged: ['Merged', 'info'], written: ['Handout written', 'ok'], consumed: ['Resumed', 'ok'], removed: ['Removed', 'idle'] };
 const CO_LK = { worktrees: 'Worktree', unmerged_branches: 'Unmerged branch', uncommitted_files: 'Uncommitted files', build_output: 'Build output', scratch: 'Scratch file', processes: 'Running process' };
-const CO_TGT = { other_pc: ['Another PC', 'An enrolled PC, or a new one by name'], same_pc_other_user: ['Same PC, other user', 'Another OS user on the PC the team runs on'], same_user: ['Same PC, same user', 'Another provider or provider login, same OS user'] };
+const CO_TGT = { other_pc: ['Another PC', 'A PC already added with the connector'], same_user: ['Same PC, same user', 'Another provider or provider login, same OS user'] };
 const CO_WHY = { source_unknown: 'The hub does not know which PC this team runs on', source_inactive: 'The PC this team runs on is not active', repo_no_remote: 'A repo has no remote, so its commits cannot reach another user or PC', no_source_key: 'The source PC has no onboarding key: re-enrol it first' };
 const CO_PROV = { claude_code: 'Claude Code', codex: 'Codex' };
 const CO_PERM = { plan: 'Plan only', default: 'Ask first', acceptEdits: 'Accept edits', bypassPermissions: 'Bypass permissions' };
@@ -847,19 +931,18 @@ function coSteps(c) {
 function coForm(c, o) {
   if (CO.form[c.id]) return CO.form[c.id];
   const ch = c.choices, ms = (o.targets.other_pc?.machines || []).filter((m) => m.has_key);
-  const target = ch?.target || ['other_pc', 'same_pc_other_user', 'same_user'].find((k) => o.targets[k]?.allowed) || 'other_pc';
+  const target = ch?.target || ['other_pc', 'same_user'].find((k) => o.targets[k]?.allowed) || 'other_pc';
   const max = Object.fromEntries(Object.entries(o.agents || {}).map(([a, x]) => [a, x.permissions]));
-  return (CO.form[c.id] = { target, pc: ch?.target === 'other_pc' && !ch.new_pc ? ch.machine_id : ms[0]?.id || 'new', name: ch?.new_pc ? PC(ch.machine_id)?.name || '' : '',
+  return (CO.form[c.id] = { target, pc: ch?.target === 'other_pc' ? ch.machine_id : ms[0]?.id || '', name: '',
     rotate: ch ? ch.rotate_agent_keys : o.targets.same_user?.rotate_agent_keys?.rotate_allowed !== false, accept: false, max,
     agents: Object.fromEntries(Object.entries(o.agents || {}).map(([a, x]) => [a, { ...x, ...(ch?.agents?.[a] || {}) }])) });
 }
-const coHasCode = (f) => f.target === 'same_pc_other_user' || (f.target === 'other_pc' && f.pc === 'new');
 function coFormHtml(t, c, o, f) {
   const ms = o.targets.other_pc?.machines || [], unm = o.unmerged_work_on_source || [], su = o.targets.same_user?.rotate_agent_keys || {};
   const tg = Object.keys(CO_TGT).map((k) => { const x = o.targets[k] || {}, why = x.allowed ? '' : CO_WHY[x.reason] || 'Not possible for this team';
     return `<button type="button" class="lrow dc-opt" role="radio" aria-checked="${f.target === k}" data-co-tg="${k}"${x.allowed ? '' : ' disabled'}><span class="lrow-lead"><span class="pl-lead dc-key" aria-hidden="true">${ic(k === 'other_pc' ? 'pc' : 'user')}</span></span><span class="lrow-main"><span class="dc-opt-t">${esc(CO_TGT[k][0])}</span><span class="dc-opt-e">${esc(why || CO_TGT[k][1])}</span></span></button>`; }).join('');
-  const pcF = f.target !== 'other_pc' ? '' : `<div class="co-fg"><label class="fld"><span class="vlabel">PC</span><select class="sel" id="coPc">${ms.map((m) => `<option value="${esc(m.id)}"${m.id === f.pc ? ' selected' : ''}${m.has_key ? '' : ' disabled'}>${esc(m.name)}${m.has_key ? '' : ' (no onboarding key)'}</option>`).join('')}<option value="new"${f.pc === 'new' ? ' selected' : ''}>New PC</option></select></label>
-    ${f.pc === 'new' ? `<label class="fld"><span class="vlabel">New PC name</span><input class="inp" id="coPcName" maxlength="64" value="${esc(f.name)}" placeholder="workshop-pc" autocomplete="off"></label>` : ''}</div>`;
+  const pcF = f.target !== 'other_pc' ? '' : `<div class="co-fg"><label class="fld"><span class="vlabel">PC</span><select class="sel" id="coPc">${ms.map((m) => `<option value="${esc(m.id)}"${m.id === f.pc ? ' selected' : ''}${m.has_key ? '' : ' disabled'}>${esc(m.name)}${m.has_key ? '' : ' (no onboarding key)'}</option>`).join('')}</select></label>
+    ${ms.length ? '' : vnote('No enrolled PC yet. Add the PC with the connector first (Add PC), then approve a destination on it.')}</div>`;
   const keys = f.target === 'same_user'
     ? `<div class="seg" role="group" aria-label="Agent keys"><button type="button" data-co-rot="1" class="${f.rotate ? 'on' : ''}" aria-pressed="${f.rotate}"${su.rotate_allowed === false ? ` disabled title="${esc(CO_WHY.no_source_key)}"` : ''}>New keys</button><button type="button" data-co-rot="0" class="${f.rotate ? '' : 'on'}" aria-pressed="${!f.rotate}">Reuse keys</button></div>
        <p class="hint co-gap">${f.rotate ? 'Old keys are revoked once the agents resume.' : 'Old and new sessions look alike. New keys are safer.'}</p>`
@@ -879,12 +962,21 @@ function coFormHtml(t, c, o, f) {
     <div class="actionbar co-ab">${again ? '<button type="button" class="btn" id="coKeep">Keep the current prompt</button>' : ''}<button type="button" class="btn pri" id="coRender">${ic('key')}${again ? 'Create a new prompt' : 'Create restore prompt'}</button></div>`;
 }
 function coSumHtml(t, c, f) {
-  const n = Object.keys(f.agents).length, code = coHasCode(f), pc = f.target === 'other_pc' ? (f.pc === 'new' ? (f.name.trim() || 'a new PC') : PC(f.pc)?.name || 'the PC') : coPc(c.source_machine_id);
+  const n = Object.keys(f.agents).length, pc = f.target === 'other_pc' ? (PC(f.pc)?.name || 'the PC') : coPc(c.source_machine_id);
   return `${kd('What happens to the keys')}${kv('Target', esc(`${CO_TGT[f.target][0]} · ${pc}`))}${kv('Keys', f.target === 'same_user' && !f.rotate ? pill('Reuse', 'warn') : esc(`New for ${plural(n, 'agent')}`))}
-    ${kv('The prompt holds', code ? 'A one-time code, 30 min' : 'No secret')}${kv('Approval', f.target === 'other_pc' && f.pc === 'new' ? 'You approve the PC after it enrols' : 'At once')}
+    ${kv('The prompt holds', 'No secret')}${kv('Approval', 'At once')}
     <p class="hint co-foot">${f.target === 'same_user' && !f.rotate ? 'Current logins end when you create the prompt.' : 'Nothing changes on the keys until the prompt runs.'}</p>`;
 }
 /* The push list (F8): per repo, the branches and heads to push before running the prompt. */
+/* Restore by the connector (docs/checkout.md §6): how this checkout gets restored, what an order waits for, and how to open each agent. */
+const CO_ORD = { queued: ['Sent to the PC', 'info'], fetched: ['Running on the PC', 'info'], done: ['Restored', 'ok'], failed: ['Failed', 'bad'], expired: ['Stopped', 'idle'] };
+const coRestoreCard = (R, O) => {
+  if (!R) return '';
+  const o = O ? CO_ORD[O.state] || [O.state, 'idle'] : null, wait = O && ['queued', 'fetched'].includes(O.state);
+  return `<div class="pcard kd-card${wait && O.note ? ' co-att' : ''}">${kd('Restore by the connector', o ? pill(o[0], o[1]) : R.via === 'connector' ? pill('Ready to send', 'acc') : pill('Not ready', 'warn'))}
+    <p class="hint">${esc(R.text)}</p>${O?.note && wait ? `<p class="co-warn">${ic('warn')}<span>${esc(O.note)}</span></p>` : ''}${O?.reason ? vnote(esc(O.reason)) : ''}
+    ${O?.start_lines?.length ? `${overline('Start each agent', O.start_lines.length)}${O.start_lines.map((l) => codeBox(l, true)).join('')}<p class="hint co-foot">One terminal each. The same lines are on the connector's screen (conclave restores).</p>` : ''}</div>`;
+};
 const coPushCard = (L) => (L?.length ? `<div class="pcard kd-card">${kd('Push before running', info('Agents never push. The restore stops a repo when a recorded commit is missing from its remote.'))}
   ${L.map((rp) => row({ lead: ic('link'), title: rp.remote_name, meta: rp.url, metaId: true })
     + rp.branches.map((b) => row({ lead: ic('up'), title: b.branch, meta: `${b.tip ? 'Tip ' + coSha(b.tip) + ' · ' : ''}${plural(b.heads.length, 'recorded commit')}`, trail: b.unreviewed ? pill('Not approved yet', 'warn') : '' })).join('')
@@ -956,24 +1048,20 @@ async function coView(id) {
       + (c.missing?.length ? vnote(`Built by the hub, no notes: ${esc(c.missing.map((a) => coName(t, a)).join(', '))}.`) : '')
       + `<div class="pcard kd-card">${kd('Handouts', '<span class="meta">Locked</span>')}${H.map((h) => coHRow(t, c, h)).join('')}</div>`;
   } else if (c.status === 'rendered') {
-    const P = CO.prompt[c.id], g = d.target || {}, e = g.enrolment, enrolled = !!e && ['issued', 'confirmed'].includes(e.status), pcName = g.pc?.name || 'the PC';
-    const code = P?.code_expires_at || g.code_expires_at;
+    const P = CO.prompt[c.id], g = d.target || {}, pcName = g.pc?.name || 'the PC';
     main = `<div class="pcard kd-card">${kd('Restore prompt', P ? pill('Ready', 'acc') : pill('Shown once', 'idle'))}
-        ${P ? `<p class="co-warn">${ic('warn')}<span>${code ? `<b>It holds a one-time code.</b> Paste it only into a session on ${esc(pcName)}.` : `<b>It holds no key</b>, but it names your hub and folders. Paste it only on ${esc(pcName)}.`}</span></p>
+        ${P ? `<p class="co-warn">${ic('warn')}<span><b>It holds no key</b>, but it names your hub and folders. Paste it only on ${esc(pcName)}.</span></p>
           <div class="co-prompt">${codeBox(P.text, true)}</div><p class="hint co-foot">Shown only now: copy it before you reload or leave.</p>`
         : vnote('The prompt was shown once, when it was made. Create a new one to see it again; that revokes this one.')}
-        ${code ? kv('One-time code', `<span data-co-cd="${esc(code)}">${coLeft(code)}</span>`) : ''}${kv('Checkout', `<span data-co-cd="${esc(c.expires_at)}">${coLeft(c.expires_at)}</span>`)}
+        ${kv('Checkout', `<span data-co-cd="${esc(c.expires_at)}">${coLeft(c.expires_at)}</span>`)}
         <div class="co-more"><button type="button" class="btn" id="coNew">${ic('rot')}Change target or keys</button></div></div>`
-      + (g.new_pc ? `<div class="pcard kvc kd-card">${kd('New PC', g.approval === 'approved' ? pill('Approved', 'ok') : enrolled ? pill('Waiting for you', 'warn') : pill('Not enrolled yet', 'idle'))}
-          ${kv('Name', esc(pcName))}${kv('Address', enrolled ? esc(e.enrolled_from || 'Unknown') : '—', { id: enrolled })}${kv('Enrolled', enrolled ? esc(dt(e.used_at)) : 'Not yet')}
-          ${g.approval === 'waiting' ? (enrolled ? `<div class="actionbar co-ab"><span class="hint only-d">Approve only a PC you just enrolled yourself.</span><button type="button" class="btn pri" id="coPcOk">${ic('check')}Approve ${esc(pcName)}</button></div>` : '<p class="hint co-foot">Run the prompt on that PC. It shows here once it enrols.</p>') : ''}</div>` : '')
-      + coScanCard(t, c, d.scans) + coPushCard(d.push_list || P?.push);
+      + coRestoreCard(d.restore, d.restore_order) + coScanCard(t, c, d.scans) + coPushCard(d.push_list || P?.push);
     side = `<div class="pcard kvc kd-card">${kd('Target')}${kv('Where', esc(`${CO_TGT[g.target]?.[0] || '—'} · ${pcName}`))}${kv('Keys', g.rotate_agent_keys === false ? pill('Reuse', 'warn') : esc(`New for ${plural(H.length, 'agent')}`))}
         ${g.request ? kv('Keys collected', esc(`${g.request.pickup_issues} of ${g.request.pickup_allowed} pickups used`)) : ''}${kv('Made', esc(dt(c.rendered_at)))}</div>` + coSteps(c)
       + `<div class="pcard kd-card">${kd('Handouts', '<span class="meta">Locked</span>')}${H.map((h) => coHRow(t, c, h)).join('')}</div>`;
   } else { // restoring
     const n = H.filter((h) => h.status === 'consumed').length;
-    main = `${c.overdue_at ? `<p class="co-warn">${ic('warn')}<span><b>Overdue.</b> ${esc(plural(H.length - n, 'agent'))} have not resumed. Finish by hand once you have checked the target.</span></p>` : ''}
+    main = `${coRestoreCard(d.restore, d.restore_order)}${c.overdue_at ? `<p class="co-warn">${ic('warn')}<span><b>Overdue.</b> ${esc(plural(H.length - n, 'agent'))} have not resumed. Finish by hand once you have checked the target.</span></p>` : ''}
       <div class="pcard kd-card">${kd('Agents', `<span class="meta">${n} of ${H.length} resumed</span>`)}${H.map((h) => coHRow(t, c, h)).join('')}
       <p class="hint co-foot">Each agent's first call on the target is checkout_resume.</p>
       ${c.overdue_at ? `<div class="actionbar co-ab"><button type="button" class="btn pri" id="coFinish">${ic('check')}Finish by hand</button></div>` : ''}</div>`
@@ -1007,9 +1095,6 @@ async function coView(id) {
         else run(go); }));
       if ($('#coNew')) $('#coNew').onclick = () => { CO.edit[c.id] = true; openD('tco', id, true); };
       if ($('#coKeep')) $('#coKeep').onclick = () => { CO.edit[c.id] = false; openD('tco', id, true); };
-      if ($('#coPcOk')) $('#coPcOk').onclick = () => { const g = d.target, e = g.enrolment;
-        fbSheet({ title: `Approve ${g.pc?.name || 'the new PC'}`, label: 'Approve PC', fields: vnote(`It enrolled from <b class="mono">${esc(e?.enrolled_from || 'an unknown address')}</b> ${esc(ago(e?.used_at))} ago. Approve only a PC you enrolled yourself: the hub then releases its keys.`),
-          onGo: async () => { await post(cP + '/approve-pc'); toast('PC approved · it can collect its keys'); re(); } }); };
       if ($('#coFinish')) $('#coFinish').onclick = () => fbSheet({ title: 'Finish by hand', label: 'Finish', fields: vnote("Marks the checkout restored. Handouts of agents that haven't resumed are removed, and the team pause is lifted."),
         onGo: async () => { await post(cP + '/finish'); toast('Checkout finished'); re(); } });
       if (f) coFormWire(t, c, o, f, id, cP, re);
@@ -1021,7 +1106,6 @@ function coFormWire(t, c, o, f, id, cP, re) {
   $$('[data-co-tg]').forEach((b) => (b.onclick = () => { f.target = b.dataset.coTg; if (f.target !== 'same_user') f.rotate = true; draw(); $(`[data-co-tg="${f.target}"]`)?.focus(); }));
   $$('[data-co-rot]').forEach((b) => (b.onclick = () => { f.rotate = b.dataset.coRot === '1'; draw(); $(`[data-co-rot="${f.rotate ? 1 : 0}"]`)?.focus(); }));
   if ($('#coPc')) $('#coPc').onchange = (e) => { f.pc = e.target.value; draw(); $('#coPc').focus(); };
-  if ($('#coPcName')) $('#coPcName').oninput = (e) => { f.name = e.target.value; $('#coSum').innerHTML = coSumHtml(t, c, f); };
   if ($('#coAccept')) $('#coAccept').onchange = (e) => { f.accept = e.target.checked; };
   $$('[data-co-ag]').forEach((r) => (r.onchange = (e) => { const k = e.target.dataset.coF, a = f.agents[r.dataset.coAg]; if (!k || !a) return;
     a[k] = e.target.value.trim(); if (k === 'provider') { a.model = ''; draw(); $(`[data-co-ag="${CSS.escape(r.dataset.coAg)}"] [data-co-f="provider"]`)?.focus(); } }));
@@ -1029,14 +1113,14 @@ function coFormWire(t, c, o, f, id, cP, re) {
   const go = () => run(async () => {
     const body = { target: f.target, rotate_agent_keys: f.target === 'same_user' ? f.rotate : true,
       agents: Object.fromEntries(Object.entries(f.agents).map(([a, x]) => [a, { provider: x.provider, model: x.model || null, permissions: x.permissions }])) };
-    if (f.target === 'other_pc') { if (f.pc !== 'new') body.machine_id = f.pc; else if (f.name.trim()) body.new_pc_name = f.name.trim(); else { toast('Name the new PC first', true); $('#coPcName')?.focus(); return; } }
+    if (f.target === 'other_pc') { if (f.pc) body.machine_id = f.pc; else { toast('Add the PC with the connector first', true); return; } }
     if ((o.unmerged_work_on_source || []).length && f.target !== 'same_user') { if (!f.accept) { toast('Tick the box to leave the unmerged work on the source PC', true); $('#coAccept')?.focus(); return; } body.accept_unmerged_work = true; }
     let r;
     try { r = await post(cP + '/render', body); }
     catch (e) { if (e.code === 'restore_unavailable') { CO.unavail[c.id] = true; draw(); $('.co-warn')?.scrollIntoView({ block: 'nearest' }); return; } throw e; }
     delete CO.unavail[c.id]; CO.edit[c.id] = false;
-    CO.prompt[c.id] = { text: r.prompt.text, code_expires_at: r.prompt.code_expires_at, expires_at: r.prompt.expires_at, push: r.push_list };
-    toast(r.approval_needed ? 'Prompt ready · approve the PC when it enrols' : 'Prompt ready · copy it now'); await re();
+    CO.prompt[c.id] = { text: r.prompt.text, expires_at: r.prompt.expires_at, push: r.push_list };
+    toast('Prompt ready · copy it now'); await re();
   });
   if (c.status === 'rendered') arm($('#coRender'), go, 'Revoke the old prompt'); else $('#coRender').onclick = go;
   if ($('#coKeep')) $('#coKeep').onclick = () => { CO.edit[c.id] = false; openD('tco', id, true); };
@@ -1075,6 +1159,145 @@ function coRegister() {
 }
 
 // ==== Knowledge graph view ====
+/* Vault → Readers (docs/vault-sync.md): the sync folders that mirror part of the vault on a PC. A reader is a teamless, read-only agent;
+   its scope is ordinary allow and deny rules on the vault, written here as folders and notes. Add reader makes it and shows its
+   pairing code once; Pause, Resume, Edit scope and Remove are on its sheet, and Remove asks once more. */
+const VR_BIG_BYTES = 1024 ** 3, VR_BIG_FILES = 50000;
+const VR_STATE = { pending: ['Not paired', 'warn'], active: ['Syncing', 'ok'], paused: ['Paused', 'idle'] };
+/* A line the operator types ("Projects/Alpha", "Notes/Plan.md") as the rule's resource, and back. A name with an extension is one note, anything else a folder. */
+const vrRes = (l) => { const p = l.trim().replace(/^path:/, '').replace(/^\/?vault\//, '').replace(/^\/+|\/+$/g, ''); return !p ? '' : 'path:/vault/' + p + (/\.[A-Za-z0-9]{1,8}$/.test(p) || p.endsWith('/**') || p.endsWith('*') ? '' : '/**'); };
+const vrLine = (res) => res.replace(/^path:\/vault\//, '').replace(/\/\*\*$/, '');
+const vrScope = (allow, deny) => [...allow.split('\n').map((l) => ({ effect: 'allow', resource: vrRes(l) })), ...deny.split('\n').map((l) => ({ effect: 'deny', resource: vrRes(l) }))].filter((r) => r.resource);
+const vrSize = (r) => (r.bytes >= VR_BIG_BYTES || r.files >= VR_BIG_FILES ? pill('Large', 'warn') : '');
+const vrSummary = (r) => { const a = r.scope.filter((x) => x.effect === 'allow').map((x) => vrLine(x.resource)); return a.length > 2 ? `${a.slice(0, 2).join(', ')} +${a.length - 2}` : a.join(', ') || 'Nothing'; };
+const vrScopeFields = (r) => `<label class="fld"><span class="vlabel">Folders and notes it may mirror (one per line)</span><textarea class="inp" id="vrAllow" rows="4" autocomplete="off" spellcheck="false" aria-label="Folders it may mirror">${esc((r ? r.scope.filter((x) => x.effect === 'allow') : []).map((x) => vrLine(x.resource)).join('\n'))}</textarea></label>
+  <label class="fld"><span class="vlabel">Never mirror (one per line, optional)</span><textarea class="inp" id="vrDeny" rows="3" autocomplete="off" spellcheck="false" aria-label="Never mirror">${esc((r ? r.scope.filter((x) => x.effect === 'deny') : []).map((x) => vrLine(x.resource)).join('\n'))}</textarea></label>`;
+const vrReopen = () => openD('vreaders', '', true);
+
+async function readersView() {
+  const { readers } = await api('/vault-readers');
+  const rows = readers.map((r) => {
+    const [label, tone] = VR_STATE[r.state] || [r.state, 'idle'];
+    return row({ lead: `<span class="av">${ic('pc')}</span>`, title: r.name,
+      meta: `${r.pc || 'PC'} · ${vrSummary(r)} · ${r.last_sync_at ? 'synced ' + ago(r.last_sync_at) + ' ago' : 'never synced'} · ${plural(r.files, 'file')} · ${fmtB(r.bytes)}`,
+      trail: vrSize(r) + pill(label, tone), chev: true, attrs: { 'data-vr': r.id } });
+  }).join('');
+  const add = `<button type="button" class="btn sm pri" id="vrAdd">${ic('plus')}Add reader</button>`;
+  return {
+    t: `${ic('vault')}Vault readers`,
+    a: add,
+    b: `<div class="card kd-card">${kd('Readers', `<span class="meta">${plural(readers.length, 'reader')}</span>`)}${rows || none('pc', 'No reader yet. Add one to keep part of the vault in a folder on a PC.', false)}
+      <p class="hint">A reader only reads. Remove one to stop it for good; the copy stays on its PC for that PC's user to delete.</p></div>
+      <div class="actionbar only-m"><button type="button" class="btn pri lg" id="vrAdd2">${ic('plus')}Add reader</button></div>`,
+    after() {
+      const byId = new Map(readers.map((r) => [r.id, r]));
+      $$('[data-vr]').forEach((x) => (x.onclick = () => vrSheet(byId.get(x.dataset.vr))));
+      $$('#vrAdd,#vrAdd2').forEach((x) => (x.onclick = () => vrAddSheet()));
+    },
+  };
+}
+
+async function vrAddSheet() {
+  const OWN = await ownUsers(), pcs = (S.pcs || []).filter((p) => p.status === 'active');
+  const sh = openSheet({ title: 'Add a vault reader', html: `<div class="sheet-form">
+    <label class="fld"><span class="vlabel">Name</span><input class="inp" id="vrName" maxlength="80" autocomplete="off" aria-label="Name"></label>
+    <label class="fld"><span class="vlabel">PC</span><select class="sel" id="vrPc" aria-label="PC">${pcs.map((p) => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('')}</select></label>
+    ${ownField('vrOwn', OWN, S.me?.id || '')}${vrScopeFields(null)}
+    <div class="sheet-acts"><button type="button" class="btn lg" data-sheet-close>Cancel</button><button type="button" class="btn pri lg" id="vrGo">Add reader</button></div></div>` });
+  $('#vrGo', sh).onclick = () => run(async () => {
+    const scope = vrScope($('#vrAllow', sh).value, $('#vrDeny', sh).value);
+    if (!$('#vrName', sh).value.trim()) return toast('Give the reader a name', true);
+    if (!scope.some((r) => r.effect === 'allow')) return toast('Name at least one folder it may mirror', true);
+    const r = await post('/vault-readers', { name: $('#vrName', sh).value.trim(), pc_id: $('#vrPc', sh).value, owner: $('#vrOwn', sh).value || null, scope });
+    await vrReopen(); // the list redraws first: a redraw closes sheets
+    vrCodeSheet(r.reader, r.code);
+  });
+}
+/* The pairing code is shown once; the PC's user types it into the sync folder's connector. */
+function vrCodeSheet(r, code) {
+  openSheet({ title: `Pair ${r.name}`, html: `<div class="sheet-form">
+    ${vnote('Give this code to the person at <b>' + esc(r.pc || 'the PC') + '</b>. It works once and is not shown again. The reader starts syncing when the PC has used it.')}
+    <div class="kv"><span class="kv-k">Pairing code</span><span class="kv-v id" id="vrCode">${esc(code)}</span></div>
+    <div class="sheet-acts"><button type="button" class="btn lg" id="vrCopy">Copy code</button><button type="button" class="btn pri lg" data-sheet-close>Done</button></div></div>` });
+  $('#vrCopy').onclick = () => navigator.clipboard?.writeText(code).then(() => toast('Code copied'), () => toast('Select the code and copy it', true));
+}
+function vrSheet(r) {
+  if (!r) return;
+  const [label, tone] = VR_STATE[r.state] || [r.state, 'idle'];
+  const sh = openSheet({ title: r.name, html: `<div class="sheet-form">
+    ${kv('State', pill(label, tone))}${kv('PC', esc(r.pc || '—'))}${kv('Last sync', r.last_sync_at ? esc(dt(r.last_sync_at)) : 'Never')}${kv('Files', esc(String(r.files)))}${kv('Size', esc(fmtB(r.bytes)) + (vrSize(r) ? ' ' + vrSize(r) : ''))}
+    ${overline('May mirror', r.scope.filter((x) => x.effect === 'allow').length)}${r.scope.filter((x) => x.effect === 'allow').map((x) => row({ one: true, title: raw(`<span class="mono">${esc(vrLine(x.resource))}</span>`) })).join('')}
+    ${r.scope.some((x) => x.effect === 'deny') ? overline('Never', r.scope.filter((x) => x.effect === 'deny').length) + r.scope.filter((x) => x.effect === 'deny').map((x) => row({ one: true, title: raw(`<span class="mono">${esc(vrLine(x.resource))}</span>`) })).join('') : ''}
+    <div class="sheet-acts">${r.state === 'paused' ? '<button type="button" class="btn lg" id="vrResume">Resume</button>' : r.state === 'active' ? '<button type="button" class="btn lg" id="vrPause">Pause</button>' : ''}<button type="button" class="btn lg" id="vrEdit">Edit scope</button><button type="button" class="btn bad lg" id="vrRm">Remove</button></div></div>` });
+  const act = (path, msg) => run(async () => { await post(`/vault-readers/${r.id}/${path}`, {}); closeSheet(); toast(msg); vrReopen(); });
+  if ($('#vrPause', sh)) $('#vrPause', sh).onclick = () => act('pause', 'Paused');
+  if ($('#vrResume', sh)) $('#vrResume', sh).onclick = () => act('resume', 'Resumed');
+  $('#vrEdit', sh).onclick = () => vrEditSheet(r);
+  arm($('#vrRm', sh), () => run(async () => { await api(`/vault-readers/${r.id}`, 'DELETE'); closeSheet(); toast('Reader removed; its key no longer works'); vrReopen(); }), 'Yes, remove it');
+}
+function vrEditSheet(r) {
+  const sh = openSheet({ title: `Scope of ${r.name}`, html: `<div class="sheet-form">${vrScopeFields(r)}
+    <p class="hint">The reader lists its scope again after you save.</p>
+    <div class="sheet-acts"><button type="button" class="btn lg" data-sheet-close>Cancel</button><button type="button" class="btn pri lg" id="vrSave">Save scope</button></div></div>` });
+  $('#vrSave', sh).onclick = () => run(async () => {
+    const scope = vrScope($('#vrAllow', sh).value, $('#vrDeny', sh).value);
+    if (!scope.some((x) => x.effect === 'allow')) return toast('Name at least one folder it may mirror', true);
+    await api(`/vault-readers/${r.id}`, 'PATCH', { scope });
+    closeSheet(); toast('Scope saved'); vrReopen();
+  });
+}
+
+/* Security → Relays (docs/relay.md): the machines that pass requests on to this hub for PCs that cannot reach it directly. Add relay shows its secret
+   once; Rotate makes a new one (the old stops working at once); Remove ends it. Last seen comes from the relay's own requests. */
+const RELAY_SEEN_FRESH_MS = 10 * 60_000;
+const relaySeen = (r) => (r.last_seen_at ? (Date.now() - r.last_seen_at < RELAY_SEEN_FRESH_MS ? pill('Seen ' + ago(r.last_seen_at) + ' ago', 'ok') : pill('Last seen ' + ago(r.last_seen_at) + ' ago', 'warn')) : pill('Never seen', 'idle'));
+const relaysReopen = () => openD('relays', '', true);
+async function relaysView() {
+  const { relays } = await api('/relays');
+  const rows = relays.map((r) => row({ lead: `<span class="av">${ic('pc')}</span>`, title: r.name, meta: `${r.origin}${r.last_seen_ip ? ' · last client ' + r.last_seen_ip : ''}`, trail: relaySeen(r), chev: true, attrs: { 'data-relay': r.id } })).join('');
+  const add = `<button type="button" class="btn sm pri" id="relayAdd">${ic('plus')}Add relay</button>`;
+  return {
+    t: `${ic('pc')}Relays`,
+    a: add,
+    b: `<div class="card kd-card">${kd('Relays', `<span class="meta">${plural(relays.length, 'relay')}</span>`)}${rows || none('pc', 'No relay yet. Add one so PCs that cannot reach this hub can use a machine that can.', false)}
+      <p class="hint">A relay passes requests on and never stores them. It has its own secret; with it the hub sees each user's real address. Remove a relay and its secret stops working at once.</p></div>
+      <div class="actionbar only-m"><button type="button" class="btn pri lg" id="relayAdd2">${ic('plus')}Add relay</button></div>`,
+    after() {
+      const byId = new Map(relays.map((r) => [r.id, r]));
+      $$('[data-relay]').forEach((x) => (x.onclick = () => relaySheet(byId.get(x.dataset.relay))));
+      $$('#relayAdd,#relayAdd2').forEach((x) => (x.onclick = () => relayAddSheet()));
+    },
+  };
+}
+function relayAddSheet() {
+  const sh = openSheet({ title: 'Add a relay', html: `<div class="sheet-form">
+    <label class="fld"><span class="vlabel">Name</span><input class="inp" id="rlName" maxlength="80" autocomplete="off" aria-label="Name"></label>
+    <label class="fld"><span class="vlabel">Address PCs reach it at (https://address:port)</span><input class="inp" id="rlOrigin" autocomplete="off" spellcheck="false" aria-label="Relay address"></label>
+    <label class="fld"><span class="vlabel">Relay CA certificate SHA-256</span><input class="inp" id="rlCa" autocomplete="off" spellcheck="false" aria-label="Relay CA fingerprint"></label>
+    <div class="sheet-acts"><button type="button" class="btn lg" data-sheet-close>Cancel</button><button type="button" class="btn pri lg" id="rlGo">Add relay</button></div></div>` });
+  $('#rlGo', sh).onclick = () => run(async () => {
+    const r = await post('/relays', { name: $('#rlName', sh).value.trim(), origin: $('#rlOrigin', sh).value.trim(), ca_sha256: $('#rlCa', sh).value.trim() });
+    await relaysReopen(); // the list redraws first: a redraw closes sheets
+    relaySecretSheet(r.relay, r.secret);
+  });
+}
+/* The secret is shown once; it goes into the relay's own configuration, never into a prompt or a message. */
+function relaySecretSheet(r, secret) {
+  openSheet({ title: `Secret for ${r.name}`, html: `<div class="sheet-form">
+    ${vnote('Put this secret in the relay\'s configuration. It is shown once and not again. Never paste it into a prompt or a message.')}
+    <div class="kv"><span class="kv-k">Relay secret</span><span class="kv-v id" id="rlSecret">${esc(secret)}</span></div>
+    <div class="sheet-acts"><button type="button" class="btn lg" id="rlCopy">Copy secret</button><button type="button" class="btn pri lg" data-sheet-close>Done</button></div></div>` });
+  $('#rlCopy').onclick = () => navigator.clipboard?.writeText(secret).then(() => toast('Secret copied'), () => toast('Select the secret and copy it', true));
+}
+function relaySheet(r) {
+  if (!r) return;
+  const sh = openSheet({ title: r.name, html: `<div class="sheet-form">
+    ${kv('Address', esc(r.origin))}${kv('CA SHA-256', `<span class="mono">${esc(r.ca_sha256)}</span>`)}${kv('Release base', esc(r.release_base))}${kv('Last seen', r.last_seen_at ? esc(dt(r.last_seen_at)) : 'Never')}${r.last_seen_ip ? kv('Last client address', esc(r.last_seen_ip)) : ''}${r.rotated_at ? kv('Secret changed', esc(dt(r.rotated_at))) : ''}
+    <div class="sheet-acts"><button type="button" class="btn lg" id="rlRotate">Rotate secret</button><button type="button" class="btn bad lg" id="rlRm">Remove</button></div></div>` });
+  arm($('#rlRotate', sh), () => run(async () => { const x = await post(`/relays/${r.id}/rotate`, {}); await relaysReopen(); relaySecretSheet(x.relay, x.secret); }), 'Yes, rotate it');
+  arm($('#rlRm', sh), () => run(async () => { await api(`/relays/${r.id}`, 'DELETE'); closeSheet(); toast('Relay removed; its secret no longer works'); relaysReopen(); }), 'Yes, remove it');
+}
+
 /* Vault → Knowledge (docs/dashboard-ux.md#knowledge): is the knowledge graph keeping up, what needs review, what does it cost.
    #knowledge/<tab>: health (default), entities, flags, jobs, settings. Filters live in KG_F for the session, like the vault's. */
 const KG_TABS = [['health', 'Overview'], ['entities', 'Entities'], ['flags', 'Flags'], ['jobs', 'Jobs'], ['settings', 'Settings']];
@@ -3415,12 +3638,13 @@ const TDIR_TAB_OK = ['team', 'members', 'hub'];
 const ROUTE_OK = {
   key: (a) => RID.test(a.split('|')[0]), pc: (a) => RID.test(a), ses: (a) => RID.test(a.split('|')[0]),
   team: (a) => RID.test(a), tstatus: (a) => RID.test(a), goal: (a) => RID.test(a), ob: (a) => RID.test(a),
-  tasks: (a) => { const [i, f = '', g = ''] = a.split('|'); return RID.test(i) && /^[a-z]*$/.test(f) && /^[a-z0-9._-]{0,24}$/.test(g); },
-  backlog: (a) => !a || a.split('&').every((x) => /^l=(active|postponed)$/.test(x) || /^t=[a-z0-9._-]{1,24}$/.test(x) || (x.startsWith('p=') && RID.test(x.slice(2))) || (x.startsWith('team=') && RID.test(x.slice(5))) || x === 'from=needs'), members: (a) => RID.test(a), tsettings: (a) => RID.test(a), rules: (a) => RID.test(a), tdirs: (a) => { const [i, k, ...x] = a.split('|'); return RID.test(i) && (k === undefined || TDIR_TAB_OK.includes(k)) && !x.length; }, tchats: (a) => RID.test(a), tses: (a) => RID.test(a),
+  tasks: (a) => { const [i, f = '', g = '', h = '', ...x] = a.split('|'); return RID.test(i) && /^[a-z]*$/.test(f) && /^[a-z0-9._-]{0,24}$/.test(g) && /^[^&]{0,600}$/.test(h) && !x.length; },
+  backlog: (a) => !a || a.split('&').every((x) => /^l=(active|postponed)$/.test(x) || /^t=[a-z0-9._-]{1,24}$/.test(x) || (x.startsWith('p=') && RID.test(x.slice(2))) || (x.startsWith('team=') && RID.test(x.slice(5))) || /^q=[^&|]{1,600}$/.test(x) || x === 'from=needs'), members: (a) => RID.test(a), tsettings: (a) => RID.test(a), rules: (a) => RID.test(a), tdirs: (a) => { const [i, k, ...x] = a.split('|'); return RID.test(i) && (k === undefined || TDIR_TAB_OK.includes(k)) && !x.length; }, tchats: (a) => RID.test(a), tses: (a) => RID.test(a),
   tdir: (a) => { const [b, k] = dirAgSplit(a), p = b.split('|'); return dirAgOk(k) && (p.length === 2 || (p.length === 3 && TDIR_TAB_OK.includes(p[2]))) && RID.test(p[0]) && RID.test(p[1]); },
   plan: (a) => { const [i, k = 'req', f = ''] = a.split('|'); return RID.test(i) && ['req', 'ms', 'sum'].includes(k) && (/^[a-z]*$/.test(f) || BP_KEY.test(f)); }, room: (a) => RID.test(a), share: (a) => RID.test(a), app: (a) => !a || RID.test(a),
   task: (a) => { const p = a.split('|'); return p.length === 2 && p.every((x) => RID.test(x)); },
-  hardware: (a) => !a,
+  hardware: (a) => !a, hwm: (a) => RID.test(a),
+  relays: (a) => !a,
   needs: (a) => !a || a.split('&').every((x) => /^s=(aw|later)$/.test(x) || (/^(team|project)=/.test(x) && RID.test(x.slice(x.indexOf('=') + 1)))),
   feedback: (a) => ['', 'new', 'open', 'closed'].includes(a), fbr: (a) => RID.test(a),
   directive: (a) => { const [i, k] = dirAgSplit(a); return RID.test(i) && dirAgOk(k); }, directives: (a) => !!dirArgs(a), teams: (a) => !!tmArgs(a) || !!tmTopo(a), home: tmArgs, topology: (a) => { const t = tzArg(a); return !t.f || TM_FOCUS.test(t.f); },
@@ -3456,7 +3680,8 @@ const ROUTES = {
   // Root tabs: Work, Security, Vault, Audit, and the rail's own screens.
   home: navRoot('Home'), topology: navRoot('Topology'), sessions: navRoot('Sessions'), chats: navRoot('Chats'), feedback: navRoot('Feedback'), directives: navRoot('Directives'),
   keys: navRoot('Keys'), pcs: navRoot('PCs'), hardware: navRoot('Hardware'), users: navRoot('Users'), req: navRoot('Requests'), shares: navRoot('Shares'), grant: navRoot('Agent access'), reset: navRoot('Reset'),
-  vault: navRoot('Vault'), knowledge: navRoot('Knowledge'), log: { parent: () => null, label: (a) => LOG_TABS[navArg0(a) || 'audit'] || 'Audit' },
+  relays: navRoot('Relays'),
+  vault: navRoot('Vault'), knowledge: navRoot('Knowledge'), vreaders: navRoot('Vault readers'), log: { parent: () => null, label: (a) => LOG_TABS[navArg0(a) || 'audit'] || 'Audit' },
   account: navRoot('Account'), shortcuts: navRoot('Shortcuts'),
   // Work, under Home.
   work: navUnder(homeUp, 'Work in motion'), backlog: { parent: (a) => { const f = new URLSearchParams(a || ''); if (f.get('from') !== 'needs') return homeUp(a); return ['needs', [f.get('team') ? 'team=' + f.get('team') : '', f.get('p') ? 'project=' + f.get('p') : ''].filter(Boolean).join('&')]; }, label: () => 'Backlog' },
@@ -3483,6 +3708,7 @@ const ROUTES = {
   ses: { parent: () => ['sessions'], label: (a) => AG(navArg0(a))?.label || 'Agent' },
   key: { parent: () => ['keys'], label: (a) => { const k = K(navArg0(a)); return k ? keyName(k) : 'Key'; } },
   pc: { parent: () => ['pcs'], label: (a) => PC(a)?.name || 'PC' },
+  hwm: { parent: () => ['hardware'], label: (a) => PC(a)?.name || 'Machine' },
   new: navUnder(() => ['keys'], 'New key'), app: navUnder(() => ['keys'], 'New app key'),
   share: navUnder(() => ['shares'], 'Share'), room: navUnder(() => ['chats'], 'Chat'), fbr: navUnder(() => ['feedback'], 'Feedback'),
   directive: navUnder(() => ['directives'], 'Directive'), user: navUnder(() => ['users'], 'User'),
@@ -3651,7 +3877,7 @@ function closeD() {
   lastFocus && lastFocus.focus && lastFocus.isConnected && lastFocus.focus({ preventScroll: true });
   lastFocus = null;
 }
-const TAB_BAR = { knowledge: '#vaultBar', keys: '#securityBar', pcs: '#securityBar', hardware: '#securityBar', req: '#securityBar', shares: '#securityBar', grant: '#securityBar', reset: '#securityBar', sessions: '#agentsBar', topology: '#agentsBar', chats: '#agentsBar', feedback: '#agentsBar', log: '#auditBar' };
+const TAB_BAR = { relays: '#securityBar', knowledge: '#vaultBar', vreaders: '#vaultBar', keys: '#securityBar', pcs: '#securityBar', hardware: '#securityBar', hwm: '#securityBar', req: '#securityBar', shares: '#securityBar', grant: '#securityBar', reset: '#securityBar', sessions: '#agentsBar', topology: '#agentsBar', chats: '#agentsBar', feedback: '#agentsBar', log: '#auditBar' };
 const clearBarActions = () => $$('.ws-act,.ws-tools').forEach((x) => x.remove());
 const SECTION_BARS = { security: '#securityBar', agents: '#agentsBar', vault: '#vaultBar', log: '#auditBar' };
 /* The section tab bar a screen shows (navOn's rule): its area's, except inside a team, which has none. */
@@ -3688,9 +3914,9 @@ function tabTitle() {
 }
 /* The area a screen belongs to; the rail, the bottom nav and the bar titles all follow it (detail screens included). */
 const AREA = {
-  security: ['security', 'keys', 'key', 'new', 'app', 'pcs', 'pc', 'hardware', 'req', 'shares', 'share', 'grant', 'reset', 'lock'],
+  security: ['security', 'keys', 'key', 'new', 'app', 'pcs', 'pc', 'hardware', 'hwm', 'req', 'shares', 'share', 'grant', 'reset', 'lock', 'relays'],
   agents: ['home', 'needs', 'monitoring', 'work', 'agents', 'topology', 'sessions', 'chats', 'team', 'task', 'tstatus', 'blueprint', 'bp', 'tasks', 'members', 'tsettings', 'tbuild', 'room', 'ses', 'feedback', 'fbr', 'dec', 'decisions', 'directives', 'directive', 'ob', 'tdirs', 'tdir', 'tchats', 'tses', 'backlog', 'rules'],
-  vault: ['vault', 'diff', 'knowledge'],
+  vault: ['vault', 'diff', 'knowledge', 'vreaders'],
   log: ['log'],
 };
 /* A team and everything opened from its TEAM card: shown without the Work tab bar (docs/dashboard-ux.md, Team screen). */
@@ -3699,7 +3925,7 @@ for (const [t, ar, team] of ADM_NAV) { AREA[ar].push(t); if (team) TEAM_SCREENS.
 const areaOf = (t) => Object.keys(AREA).find((a) => AREA[a].includes(t)) || null;
 const AREA_TITLE = { agents: 'Work', vault: 'Vault', security: 'Security', log: 'Audit' };
 function navOn(t, arg, ctx = false) {
-  const securityTab = { keys: 'keys', key: 'keys', pcs: 'pcs', pc: 'pcs', hardware: 'hardware', req: 'req', shares: 'shares', share: 'shares', grant: 'grant', new: 'grant', app: 'grant', tpls: 'grant', tplnew: 'grant', reset: 'reset', users: 'users', user: 'users' }[t];
+  const securityTab = { keys: 'keys', key: 'keys', pcs: 'pcs', pc: 'pcs', hardware: 'hardware', hwm: 'hardware', req: 'req', shares: 'shares', share: 'shares', grant: 'grant', new: 'grant', app: 'grant', tpls: 'grant', tplnew: 'grant', reset: 'reset', relays: 'relays', users: 'users', user: 'users' }[t];
   // Home is Work's first tab: the overview (no screen open) and #home both light it, and so do the team screens, which hang under Home.
   const agentTab = { home: 'home', monitoring: 'home', sessions: 'sessions', ses: 'sessions', topology: 'topology', team: 'home', tasks: 'home', members: 'home', tsettings: 'home', rules: 'home', tbuild: 'home', chats: 'chats', room: 'chats', feedback: 'feedback', fbr: 'feedback', dec: 'home', decisions: 'home', directives: 'directives', directive: 'directives', ob: 'home', backlog: 'home', work: 'home', needs: 'home' }[t || 'home'];
   const area = t ? areaOf(t) : 'agents';
@@ -3931,7 +4157,7 @@ const dotH = (k) => `<span class="dot lg ${dotCls(keyTone(k))}"></span>`;
 /* Where the prompt goes, by the client the hub resolved: the same words the prompt's restart step uses. */
 const promptClient = (c) => c === 'codex' ? 'Codex' : c === 'claude_code' ? 'Claude Code' : "the agent's client (Claude Code or Codex)";
 function keyPromptNote(p) {
-  if (p.mode === 'pickup') return `Paste this prompt into ${promptClient(p.client)} on <b>${esc(p.pc)}</b>, or follow it by hand there.${p.note ? ` <b>${esc(p.note)}</b>` : ''} It holds a single-use pickup code, not the key: the code works only on ${esc(p.pc)}, until ${esc(dt(p.expires_at))}, and the key goes into keys.env as <span class="mono">${esc(p.session_var)}</span>.`;
+  if (p.mode === 'pickup') return `Paste this prompt into ${promptClient(p.client)} on <b>${esc(p.pc)}</b>, or follow it by hand there.${p.note ? ` <b>${esc(p.note)}</b>` : ''} It holds a single-use pickup code, not the key: the code works only on ${esc(p.pc)}, until ${esc(dt(p.expires_at))}, and the Conclave connector on that PC stores the key in its own key file.`;
   return 'This key is not bound to a PC, so the prompt holds the key itself. It is shown once. Do not paste it into a chat with a person or another agent.';
 }
 function secretView(res, title, note) {
@@ -3985,6 +4211,8 @@ let keyTab = 'overview', lastKeyId = null;
 const tick = (box, fn) => { box.onclick = (e) => { const b = e.target.closest('button'); if (!b) return; $$('button', box).forEach((x) => x.classList.remove('on')); b.classList.add('on'); fn && fn(b); }; };
 
 const VIEWS = {
+  relays: () => relaysView(),
+  vreaders: () => readersView(),
   knowledge: (a) => knowledgeView(a), // Vault → Knowledge, see the Knowledge graph view block
   async grant() {
     // Two list rows, each a flow: the title says what it is, one line says what you get.
@@ -4247,7 +4475,7 @@ const VIEWS = {
     const colCard = cs ? `<div class="pcard kd-card" id="colCard" data-key="${esc(k.id)}">${kd('Collect on the PC')}
       <div class="col-status ${cs.tone}" role="status"><div class="col-t">${esc(cs.t)}</div><div class="col-d">${esc(cs.d)}</div>
         <ul class="col-steps" aria-label="Progress">${CSTEP.map((n, i) => `<li class="${cs.steps[i]}">${n}${cs.steps[i] === 'x' ? '<span class="sr"> failed</span>' : ''}</li>`).join('')}</ul></div>
-      ${cs.note ? '<p class="hint">For a Claude Code agent: reconnect agent-hub in that session (/mcp) if it shows no hub tools.</p>' : ''}
+      ${cs.note ? '<p class="hint">Restart the client; if it shows no hub tools, run <span class="mono">conclave check</span> in the folder of that agent.</p>' : ''}
       ${cs.acts ? `<div class="col-acts">${cs.acts}</div>` : ''}</div>` : '';
     const canNew = !isApp && !dead && !k.first_used_at && k.effective_status === 'active';
 
@@ -5401,11 +5629,32 @@ function agMsgH(states, chats) {
       trail: wait ? pill(`${wait} not delivered yet`, 'warn') : unread ? pill('Delivered', 'info') : pill('Read', 'ok') });
   }).join('')}</div>`;
 }
+/* The agent's woken run on the Status card (docs/connector.md, "The wake"), admins only: its state and task, "No activity for
+   30 min" when it has been quiet that long (nothing stops by itself), and Stop while it lives. Stop is the operator's: one
+   audited stop order to the run's PC, from the agent page's ⋯ (destructive actions live there); the run ends after its current
+   tool call and keeps its session. */
+const WAKE_ST = { running: ['Running', 'ok'], waiting: ['Running', 'ok'], paused_usage: ['Usage limit', 'warn'], needs_approval: ['Needs approval: open the session', 'warn'], ended: ['Ended', 'idle'], stopped: ['Stopped', 'idle'] };
+const WAKE_LIVE = ['running', 'waiting', 'paused_usage', 'needs_approval'];
+function wakeRow(w) {
+  if (!w) return '';
+  const [l, tone] = WAKE_ST[w.state] || [cap(w.state), 'idle'], live = WAKE_LIVE.includes(w.state);
+  const sub = [w.task ? `on ${w.task_title || w.task}` : '', w.state === 'paused_usage' && w.resumes_at ? `resumes at ${atTime(w.resumes_at)}` : '',
+    w.no_activity ? '' : w.last_activity_at ? `active ${ago(w.last_activity_at)} ago` : '', live && S.me?.role === 'admin' ? 'Stop is in ⋯' : ''].filter(Boolean).join(' · ');
+  return kv('Woken run', `<span class="kv-wake">${pill(l, tone)}${w.no_activity ? ' ' + pill('No activity for 30 min', 'warn') : ''}${sub ? ` <span class="kv-sub">${esc(sub)}</span>` : ''}</span>`);
+}
+function wakeStopSheet(agentId, anchor) {
+  fbSheet({ title: 'Stop this run?', tone: 'bad', label: 'Stop the run', dismiss: 'Keep it running', anchor,
+    fields: vnote('The run ends after its current tool call. Its session is kept, so the next item can resume it.')
+      + `<p class="meta"><b>What is lost:</b> anything the hub and git don't hold, such as files the agent has not committed and words it has not sent yet.</p>`
+      + '<p class="meta">The stop is recorded in the audit log with your name.</p>',
+    onGo: async () => { await post(`/agents/${encodeURIComponent(agentId)}/wake/stop`, {}); toast('Stop sent to the PC'); openD('ses', agentId, true); } });
+}
 VIEWS.ses = async (arg) => {
   const [id, tab0] = String(arg).split('|'), tab = SES_TABS.some(([k]) => k === tab0) ? tab0 : 'overview';
   const u = encodeURIComponent(id);
-  const [d, lkr, conversations, teams, dv, dl, ms, use] = await Promise.all([api('/sessions/' + u), api('/links?agent=' + u), api('/conversations'), api('/teams'), api('/agents/' + u + '/directives').catch(() => ({ directives: [], reports: [] })), dlgGet(u).catch(() => null),
-    S.me?.role === 'admin' ? api('/agents/' + u + '/message-states').catch(() => null) : null, S.me?.role === 'admin' ? api('/agents/' + u + '/usage').catch(() => null) : null]);
+  const [d, lkr, conversations, teams, dv, dl, ms, use, cx, wk] = await Promise.all([api('/sessions/' + u), api('/links?agent=' + u), api('/conversations'), api('/teams'), api('/agents/' + u + '/directives').catch(() => ({ directives: [], reports: [] })), dlgGet(u).catch(() => null),
+    S.me?.role === 'admin' ? api('/agents/' + u + '/message-states').catch(() => null) : null, S.me?.role === 'admin' ? api('/agents/' + u + '/usage').catch(() => null) : null,
+    S.me?.role === 'admin' ? api('/agents/' + u + '/context').catch(() => null) : null, S.me?.role === 'admin' ? api('/agents/' + u + '/wake').catch(() => null) : null]);
   const a = d.agent, LK = lkr.links, others = S.agents.filter((x) => x.id !== id && x.status !== 'archived');
   const chats = conversations.conversations.filter(room => room.members.some(member => member.agent_id === id));
   const groups = teams.teams.filter(team => team.agent_ids.includes(id));
@@ -5440,13 +5689,13 @@ VIEWS.ses = async (arg) => {
       const playbooks = d.playbooks || [];
       const own = a.role_note || (!adminRole && a.role ? `${a.role}${a.role_detail ? ': ' + a.role_detail : ''}` : '');
       const card = (icn, title, body, act = '') => (attrs) => `<section class="agc" ${attrs}><header>${ic(icn)}<h4>${title}</h4>${act}</header>${body}</section>`;
-      const status = card('pulse', 'Status', `<div class="ag-kvs">${kv('State', `${pill(d.live ? 'Live' : 'Idle', d.live ? 'ok' : 'idle')} <span class="kv-sub">${lc || a.last_seen_at ? 'seen ' + ago(lc ? lc.at : a.last_seen_at) + ' ago' : 'never seen'}</span>`)}
+      const status = card('pulse', 'Status', `<div class="ag-kvs">${kv('State', `${pill(d.live ? 'Live' : 'Idle', d.live ? 'ok' : 'idle')} <span class="kv-sub">${lc || a.last_seen_at ? 'seen ' + ago(lc ? lc.at : a.last_seen_at) + ' ago' : 'never seen'}</span>${d.live && pcProfileText(d.pc_profile) ? ` <span class="kv-sub"${d.pc_profile.hidden ? ` title="${esc(PC_PROFILE_HIDDEN_TIP)}"` : ''}>· ${esc(pcProfileText(d.pc_profile))}</span>` : ''}`)}
         ${kv('Connected', a.connected_at ? `${esc(ago(a.connected_at))} ago` : 'Not connected yet')}
         ${kv('Last active', a.last_active_at ? `${esc(ago(a.last_active_at))} ago` : '—')}
         ${kv('Last call', lc ? `${esc(lc.tool)}${lc.result !== 'ok' ? ' ' + pill(lc.result, 'bad') : ''} <span class="kv-sub">${ago(lc.at)}</span>` : '—', { id: true })}
         ${kv('Logins', d.logins.length ? esc(`${d.logins.length} · ${d.logins.map((l) => (l.pc?.name || '—') + ' · ' + (l.app || '—')).join(', ')}`) + (d.concurrent_use ? ' ' + pill('Shared key', 'warn') : '') : 'None')}
         ${kv('Owner', d.owner ? esc(d.owner.label) + (d.owner.status !== 'active' ? ' ' + pill(cap(d.owner.status), 'warn') : '') : '<span class="faint">No owner</span>')}
-        ${dlgRow(dl)}${kv('Team', groups.length ? esc(groups.map((g) => g.name).join(', ')) : 'None')}${a.project ? kv('Project', esc(a.project)) : ''}${a.model_label ? kv('Model', esc(a.model_label)) : ''}</div>`);
+        ${wakeRow(wk?.run)}${dlgRow(dl)}${kv('Team', groups.length ? esc(groups.map((g) => g.name).join(', ')) : 'None')}${a.project ? kv('Project', esc(a.project)) : ''}${a.model_label ? kv('Model', esc(a.model_label)) : ''}</div>`);
       const AG_CARDS = [
         { key: 'role', col: 1, narrow: 4, html: card('user', 'Role', `<div id="sRoleView">
               <div class="ag-role-h"><b class="ag-role-name">${esc(a.role || 'No role yet')}</b><span class="tag txt">${adminRole ? 'Set by you' : a.role_source === 'agent' ? 'Stated by the agent' : 'Not set'}</span></div>
@@ -5472,6 +5721,7 @@ VIEWS.ses = async (arg) => {
           `${inPending ? `<span class="meta">${inPending} pending</span>` : ''}${info('What you and the hub sent this agent. Pending until the agent confirms it; opening this page confirms nothing.')}`) },
         ...(ms ? [{ key: 'msgs', col: 2, narrow: 3.5, html: card('chat', 'Messages', agMsgH(ms.states, chats), info("Per conversation: messages not delivered yet, delivered, shown to the agent's session (the PC reports this) and read (the agent confirmed them).")) }] : []),
         ...(use ? [{ key: 'usage', col: 2, narrow: 3.6, html: card('pulse', 'Usage · 30 days', cnUseH(use, 'pc'), info("Tokens, turns and cost at API list prices, summed over every PC that reported this agent's worker sessions. Admins only.")) }] : []),
+        ...(cx ? [{ key: 'context', col: 2, narrow: 1.5, html: card('pulse', 'Context', cxCardH(cx), `<button type="button" class="btn sm" id="agReset">${ic('rot')}Reset</button>${info("How full the agent's context is, from its PC under the usage opt-in: tokens in context now of the model's window. Reset gives it a fresh context: it records its progress first, and a session the connector started closes after its current turn, never in the middle. Audited.")}`) }] : []),
         { key: 'status', col: 2, narrow: 1, html: status },
       ];
       return {
@@ -5517,7 +5767,8 @@ VIEWS.ses = async (arg) => {
     ...v, bar, a: v.a || moreBtn(),
     here: { label: a.label, meta: [d.live ? 'live' : 'idle', lc || a.last_seen_at ? 'seen ' + ago(lc ? lc.at : a.last_seen_at) : 'never seen'].filter(Boolean).join(' · ') },
     dbar: { title: a.label,
-      menu: [{ label: 'Rename', icon: 'edit', fn: () => run(() => admAgentSheet(a, reopen)) }, { label: 'Change owner', icon: 'user', fn: () => run(() => admOwnerSheet(a, d.owner, reopen)) }, ...dlgActions(a, dl, reopen), sk.length ? { label: 'End logins', icon: 'out', fn: endLogins } : null, { label: 'Archive', icon: 'trash', bad: true, confirm: 'Tap again to archive', fn: archive }] },
+      menu: [{ label: 'Rename', icon: 'edit', fn: () => run(() => admAgentSheet(a, reopen)) }, { label: 'Change owner', icon: 'user', fn: () => run(() => admOwnerSheet(a, d.owner, reopen)) }, ...dlgActions(a, dl, reopen), sk.length ? { label: 'End logins', icon: 'out', fn: endLogins } : null,
+        wk?.run && WAKE_LIVE.includes(wk.run.state) ? { label: 'Stop the woken run', icon: 'x', bad: true, fn: () => wakeStopSheet(id) } : null, { label: 'Archive', icon: 'trash', bad: true, confirm: 'Tap again to archive', fn: archive }] },
     b: tabsH + v.b,
     after() {
       const on = (sel, fn) => { const e = $(sel); if (e) e.onclick = fn; };
@@ -5534,6 +5785,8 @@ VIEWS.ses = async (arg) => {
       on('[data-inbox-all]', (e) => { const b = e.currentTarget, box = $('#agInbox'), all = box.classList.toggle('all'); b.setAttribute('aria-expanded', String(all)); b.textContent = all ? 'Show fewer' : `Show all ${d.notices.length}`; });
       on('#sRoleEdit', () => { $('#sRoleView').hidden = true; $('#sRoleForm').hidden = false; $('#sRole').focus(); });
       on('#sRoleCancel', () => { $('#sRoleView').hidden = false; $('#sRoleForm').hidden = true; });
+      on('#agReset', () => { if (!confirm(`Reset ${a.label}? It records its progress, then starts its next work with a fresh context. A turn in progress finishes first.`)) return;
+        run(async () => { const r = await post(`/agents/${u}/reset`); toast(r.context?.hand_opened || r.by_hand ? 'A person must clear this chat' : r.already ? 'A reset is already waiting' : 'Reset sent'); re(); }); });
       bindTell($('#agTell'), id, { onSent: async () => { await refresh(); re(); } });
       // Kept off k rules: why this agent does not have rule X. A short list; a row opens the directive.
       on('[data-ag-kept]', (e) => { const sh = openSheet({ title: `Kept off ${a.label}`, anchor: e.currentTarget, html: `<div class="pcard">${(dv.exempted || []).map((x) => row({ title: x.title, meta: `Kept off ${x.exemption.label}${x.exemption.note ? ' · ' + x.exemption.note : ''} · ${cap(x.scope_label)}`, chev: true, attrs: { 'data-ag-kept-dir': x.id } })).join('')}</div>` });
@@ -5636,6 +5889,10 @@ const CN_WHO = { you: 'You', pc_user: "The PC's user", agent: 'The agent' };
 const CN_AG = { waiting_for_approval: ['Waiting for approval', 'warn'], ready_to_open: ['Ready to open', 'info'], connected: ['Connected', 'ok'] };
 /* What the PC reports about its own agent (docs/connector.md): only its own facts, never the hub's states. */
 const CN_PCREP = { repair_connection: 'the PC reports it cannot reach the hub', chat_in_use: 'the PC reports its chat is in use', open: 'open on the PC' };
+/* The account profile a PC reported for a run the connector started on it (docs/connector.md, Account profiles), as muted
+   meta words: "Profile: work", or "Profile hidden" when the PC user hid the name. Nothing for a chat opened by hand. */
+const pcProfileText = (p) => (p?.name ? `Profile: ${p.name}` : p?.hidden ? 'Profile hidden' : '');
+const PC_PROFILE_HIDDEN_TIP = "The PC's user hid the name of the account profile this run uses.";
 const CN_DSC = { access_revoked: ['Access revoked', 'warn'], cleanup_pending: ['Cleanup pending', 'info'], removed: ['Removed', 'ok'], needs_attention: ['Needs attention', 'bad'] };
 const CN_DSC_OPEN = ['access_revoked', 'cleanup_pending'];
 const CN_STEP = { added: 'Added to the hub', paired: 'Connector paired', request_filed: 'Team request filed', approved: 'Request approved', keys_collected: 'Keys collected on the PC', agents_connected: 'Agents connected' };
@@ -5668,6 +5925,31 @@ function pcDisconnectSheet(p, cn, done) {
 }
 const cnNum = (n) => Number(n || 0).toLocaleString('en-US');
 const cnCost = (c) => (c === null ? CN_UNK : `$${c.toFixed(2)}<span class="kv-sub"> at API list prices</span>`);
+/* Context size (docs/connector.md, "Context size"): how full an agent's context is, "62k of 200k · 31%". The bar turns warn
+   from 60 % and bad from 85 %, and the words always say the number, so the state is never colour alone. A model the
+   connector has no window for reads "window unknown" with no bar; with usage reports off the PC shares nothing. Admins only. */
+const cxK = (n) => (n >= 1e6 ? `${+(n / 1e6).toFixed(1)}M` : n >= 1000 ? `${Math.round(n / 1000)}k` : String(n));
+const cxTone = (c) => (c.level === 'red' ? 'bad' : c.level === 'amber' ? 'warn' : '');
+const cxWords = (c) => (c.window ? `${cxK(c.context_tokens)} of ${cxK(c.window)} · ${c.percent}%` : `${cxK(c.context_tokens)} · window unknown`);
+const CX_WHY = { not_shared: 'Not shared by this PC', not_reported: 'Not reported yet', no_pc: 'No PC runs it' };
+function cxBar(c, { quiet = false } = {}) {
+  if (!c) return '';
+  if (!c.shared) return quiet && c.why !== 'not_shared' ? '' : `<span class="cx-bar"><span class="cx-t faint">${CX_WHY[c.why] || 'Unknown'}</span></span>`;
+  const tone = cxTone(c), pct = Math.max(0, Math.min(100, c.percent ?? 0)), words = cxWords(c);
+  const tip = `Context: ${words}${c.stale ? ' · not reported for a while' : ''}`;
+  return `<span class="cx-bar${c.stale ? ' stale' : ''}" title="${esc(tip)}">${c.window ? `<span class="pb" role="progressbar" aria-label="Context used" aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100"><i class="${tone}" style="width:${pct}%"></i></span>` : ''}<span class="cx-t${tone ? ' ' + tone + '-t' : ''}">${esc(words)}</span></span>`;
+}
+/* The steps for a chat a person opened: the hub cannot clear it, so the person does. */
+const CX_BY_HAND = 'This agent runs in a chat a person opened, so the hub cannot reset it. In that chat, type /clear, or close it and start a new session in the same folder. The agent picks up its task from the hub.';
+/* The Context card on an agent's page: the bar, the last turn, compacts, and Reset (docs/connector.md, "Reset"). */
+function cxCardH(c) {
+  const r = c.reset, rs = !r ? '' : r.by_hand || (r.state === 'failed' && c.hand_opened) ? '' : r.state === 'queued' || r.state === 'fetched' ? `Reset asked ${ago(r.asked_at)} ago; it happens when the current turn ends.`
+    : r.state === 'done' ? `Reset ${ago(r.finished_at || r.asked_at)} ago.` : r.state === 'expired' ? 'The last reset was not picked up in time.' : '';
+  const hand = c.hand_opened || r?.by_hand;
+  const body = !c.shared ? `<p class="hint">${c.why === 'not_shared' ? "Not shared by this PC: its user has usage reports off, so the connector sends no context numbers." : c.why === 'no_pc' ? 'No PC runs this agent, so no context numbers reach the hub.' : 'Its PC has not reported context numbers yet.'}</p>`
+    : `<div class="cx-big">${cxBar(c)}</div><div class="ag-kvs">${kv('Last turn', `${esc(cxK(c.turn_tokens))} tokens`)}${kv('Model', `<span class="id">${esc(c.model)}</span>`)}${kv('Session', c.hand_opened ? 'A chat a person opened' : 'Started by the connector')}${c.compacts ? kv('Compacted', `${plural(c.compacts, 'time')}${c.compacted_at ? ` · last ${esc(ago(c.compacted_at))} ago` : ''}`) : ''}${kv('Read', c.read_at ? `${esc(ago(c.read_at))} ago${c.stale ? ' ' + pill('Not reported for a while', 'warn') : ''}` : '—')}</div>`;
+  return body + (rs ? `<p class="meta cx-rs">${esc(rs)}</p>` : '') + (hand ? vnote(esc(CX_BY_HAND)) : '');
+}
 /* Usage of an agent (one line per PC) or of a team (one line per current member), admin only (docs/connector.md, "Usage
    and cost"): tokens, turns and cost at API list prices; Unknown, never 0, until a PC reports, and a turn count or a cost
    reads Unknown when a row has none (an older connector, a model with no list price). */
@@ -5713,7 +5995,7 @@ VIEWS.pc = async (id) => {
   const tA = tl?.agents || [], inTl = new Set(tA.map((a) => a.agent_id).filter(Boolean));
   const agAll = [...tA, ...ag.filter((a) => !inTl.has(a.id)).map((a) => ({ agent_id: a.id, label: a.label, team_id: null, state: 'connected', connected_at: a.connected_at, last_active_at: a.last_active_at ?? a.last_at, pc_reported: null }))];
   const teamOf = (a) => (a.team_id ? S.teams.find((t) => t.id === a.team_id)?.name : null) || (a.agent_id ? agTeams({ id: a.agent_id }).join(' · ') : '') || 'No team';
-  const agRow = (a, i) => row({ lead: ic('bot'), title: a.label, meta: `${teamOf(a)}${CN_PCREP[a.pc_reported] ? ` · ${CN_PCREP[a.pc_reported]}` : ''}${a.next ? ` · Next: ${esc(a.next.action)} (${esc(CN_WHO[a.next.who] || a.next.who)})` : ''}`,
+  const agRow = (a, i) => row({ lead: ic('bot'), title: a.label, meta: `${teamOf(a)}${CN_PCREP[a.pc_reported] ? ` · ${CN_PCREP[a.pc_reported]}` : ''}${a.pc_reported && CN_ISO[cn.isolation] ? ` · ${CN_ISO[cn.isolation]}` : ''}${a.pc_reported === 'open' && pcProfileText(a.pc_profile) ? ` · ${esc(pcProfileText(a.pc_profile))}` : ''}${a.next ? ` · Next: ${esc(a.next.action)} (${esc(CN_WHO[a.next.who] || a.next.who)})` : ''}`,
     trail: `${pill(...(CN_AG[a.state] || [cap(a.state), 'idle']))}${a.state === 'connected' && a.last_active_at ? `<span>Last active ${ago(a.last_active_at)} ago</span>` : ''}`,
     chev: !!a.agent_id, cls: i >= AGN ? 'more-extra' : '', attrs: a.agent_id ? { 'data-ses': a.agent_id, 'aria-label': `Open agent ${a.label}` } : {} });
   const agCard = `<div class="pcard kd-card">${kd(`Agents · ${agAll.length}`, on ? `${info('Each agent of this PC: Waiting for approval, Waiting for its keys, Ready to open, or Connected after its first call from its own client.')}<button type="button" class="btn sm" id="pcKey" title="A session key bound to ${esc(p.name)}">${ic('plus')}New session key</button>` : '<span class="meta">Called from this PC, last 7 days</span>')}
@@ -5726,7 +6008,8 @@ VIEWS.pc = async (id) => {
     ${kv('Connector', cn.version ? `${cnV(cn.version)}${cn.version_status ? ' ' + pill(...CN_VER[cn.version_status]) : ''}${cn.update_available ? `<span class="kv-sub"> · ${esc(cn.update_available)} approved</span>` : ''}` : CN_UNK)}
     ${kv('Node', cnV(cn.node))}${kv('git', cnV(cn.git))}
     ${kv('Clients', cn.clients?.length ? cn.clients.map((c) => `${esc(CN_CLIENT[c.client] || c.client)} ${cnV(c.version)}`).join(' · ') : CN_UNK)}
-    ${kv('Auto-update', cnSw(cn.auto_update))}${kv('Remote cleanup', cnSw(cn.remote_cleanup))}${verRow}</div>`;
+    ${kv('Auto-update', cnSw(cn.auto_update))}${kv('Remote cleanup', cnSw(cn.remote_cleanup))}
+    ${kv('Isolation', cn.isolation ? `${esc(CN_ISO[cn.isolation] || cn.isolation)}<span class="kv-sub"> · ${esc(CN_KEYSTORE[cn.key_store] || 'key store unknown')}</span>` : CN_UNK)}${verRow}</div>`;
   const tlCard = tl ? `<div class="pcard kd-card">${kd('Setup', info('Each step of setting up this PC. A step that waits says what happens next and who does it.'))}<ol class="cn-tl">${tl.steps.map(cnStepH).join('')}</ol></div>` : '';
   // PC actions: stored on the hub, fetched by the connector on its next call.
   const lastChk = A.find((a) => a.kind === 'check'), doneChk = A.find((a) => a.kind === 'check' && a.state === 'done'), rc = p.restore_checkout, rcTeam = rc ? S.teams.find((t) => t.id === rc.team_id)?.name || 'a team' : '';
@@ -5976,20 +6259,19 @@ function owSetWire(sh) {
 // ==== Delegate one agent to a collaborator ====
 /* Delegate (docs/dashboard-ux.md "Delegate an agent"): lend one agent to a member. It is a checkout of one agent
    (docs/checkout.md), so the steps are the checkout's: the agent saves its work, the hub renders one prompt, the member
-   runs it, a new PC waits for the member to say it is theirs and then for the operator's approval, and the agent's first
-   call on the new key ends it. The agent works there in contributor mode. The operator's sheet shows status only: the
+   runs it on a PC already added with the connector, and the agent's first call on the new key ends it. The agent works there in contributor mode. The operator's sheet shows status only: the
    prompt is shown in the member's own console (Home), held in the page only (DLG.prompt), never stored. Text from the
    member and the PC is escaped. */
 const DLG = { prompt: {}, timer: 0 };
 const DLG_R = {
   list: (id) => `/delegations?agent_id=${encodeURIComponent(id)}`, preview: (id, u) => `/agents/${id}/delegate/preview?user_id=${encodeURIComponent(u)}`,
   start: (id) => `/agents/${id}/delegate`, take: (c) => `/delegations/${c}/take-back`,
-  mine: () => '/me/delegations', mprompt: (c) => `/me/delegations/${c}/prompt`, mpc: (c) => `/me/delegations/${c}/pc`,
-  approve: (c) => `/checkouts/${c}/approve-pc`, cancel: (c) => `/checkouts/${c}/cancel`,
+  mine: () => '/me/delegations', mprompt: (c) => `/me/delegations/${c}/prompt`,
+  cancel: (c) => `/checkouts/${c}/cancel`,
 };
 /* The hub's delegation object, in the shape this block draws. A released one is 'ended'. */
 const dlgNorm = (d) => (d ? { id: d.id, status: d.released_at ? 'ended' : d.status, step: d.step || '', member: { name: d.delegate?.label || d.delegate?.name || 'the member' },
-  pc: d.pc ? { name: d.pc.name, new: !!d.new_pc, enrolled: !!d.pc.id || !!d.enrolment, confirmed: !!d.pc_confirmed_at, approval: d.approval || null, enrolled_from: d.enrolment?.enrolled_from || d.enrolment?.ip || d.enrolment?.address || d.enrolment?.from || '', retire_default: !!d.new_pc } : null,
+  pc: d.pc ? { name: d.pc.name } : null,
   drafts: d.drafts_folder || null } : null);
 /* The agent's delegation (the standing one) and whether "Run on my PC" applies after a take-back. Null for someone who may not delegate. */
 const dlgGet = async (id) => {
@@ -6003,11 +6285,8 @@ function dlgStep(c) {
   const m = c.member?.name || 'the member', pc = c.pc?.name || 'their PC';
   if (c.status === 'restored') return { tone: 'ok', head: `Running on ${pc} · delegated to ${m}`, text: '' };
   if (c.status === 'collecting' || c.status === 'ready') return { tone: 'info', head: 'Saving work…', text: 'The agent is stopping at a safe point and writing its handout.' };
-  if (c.pc?.new && c.pc?.enrolled && !c.pc?.confirmed) return { tone: 'info', head: `Waiting for ${m} to confirm ${pc}`, text: `${esc(m)} is asked whether it is their PC. You can approve it once they say yes.` };
-  const waiting = c.pc?.new && c.pc?.approval === 'waiting' && c.pc?.enrolled && c.pc?.confirmed;
-  if (waiting) return { tone: 'warn', head: `Waiting for you to approve ${pc}`, text: `${esc(m)} confirmed it from ${esc(c.pc.enrolled_from || 'an unknown address')}. Approve only a PC they just set up.` };
   if (c.status === 'restoring') return { tone: 'info', head: `Restored on ${pc}`, text: `${esc(m)} ran the prompt. The agent takes over when it starts on ${esc(pc)}.` };
-  return { tone: 'acc', head: `Waiting for ${m} to run the prompt`, text: `${esc(m)} sees it in their own console. ` + (c.pc?.new ? `They enrol ${esc(pc)}, confirm it, then it waits here for your approval.` : `It runs on ${esc(pc)} and starts the agent.`) };
+  return { tone: 'acc', head: `Waiting for ${m} to run the prompt`, text: `${esc(m)} sees it in their own console. It runs on ${esc(pc)} and starts the agent.` };
 }
 /* The Status card's row, and the page's two actions. */
 const dlgRow = (dl) => {
@@ -6028,9 +6307,8 @@ function dlgTakeBack(a, c, dl, reopen) {
   fbSheet({ title: 'Take back', tone: 'bad', label: 'Take back', dismiss: 'Keep delegated',
     fields: `<p class="dlg-p">${esc(a.label)} runs on ${esc(c.pc?.name || 'a PC')} for ${esc(m)}.</p>`
       + vnote(`The copy on ${esc(m)}'s PC stops working at once, and ${esc(m)} is told. Work there that is not merged or pushed is not recovered. To keep it, ask for the agent back first.`)
-      + (c.pc?.name ? `<label class="dlg-chk"><input type="checkbox" id="dlgRetire"${c.pc.retire_default !== false && c.pc.new ? ' checked' : ''}> <span>Also retire ${esc(c.pc.name)}</span></label><p class="hint">Its key stops working. Off when another agent still uses that PC.</p>` : '')
       + `<p class="dlg-p">Afterwards you can run it on your own PC.</p>`,
-    onGo: async () => { await post(DLG_R.take(c.id), { retire_pc: !!$('#dlgRetire')?.checked }); toast('Taken back'); await refresh(); reopen(); } });
+    onGo: async () => { await post(DLG_R.take(c.id), {}); toast('Taken back'); await refresh(); reopen(); } });
 }
 const dlgPerms = (cur) => { const top = Math.max(0, DLG_RANK.indexOf(cur)); return DLG_RANK.slice(0, top + 1); };
 /* The sheet's choices: the active members and the administrator's own active PCs. */
@@ -6051,17 +6329,17 @@ function dlgFormHtml(a, o) {
     <fieldset class="dlg-pc"><legend class="vlabel">PC</legend>
       <div class="seg eq" role="group" aria-label="PC">
         <button type="button" data-dlg-pc="have" class="${hasPc ? 'on' : ''}" aria-pressed="${hasPc}"${hasPc ? '' : ' disabled'}>Already set up</button>
-        <button type="button" data-dlg-pc="new" class="${hasPc ? '' : 'on'}" aria-pressed="${!hasPc}">New PC</button></div>
+        <button type="button" data-dlg-pc="new" class="${hasPc ? '' : 'on'}" aria-pressed="${!hasPc}">PC not added yet</button></div>
       <div id="dlgPcHave"${hasPc ? '' : ' hidden'}>${dlgPcSel(pcs)}<p class="hint">One of your PCs. The member never owns or sees it.</p></div>
-      <div id="dlgPcNew"${hasPc ? ' hidden' : ''}><label class="fld"><span class="vlabel">Name of the new PC</span><input class="inp" id="dlgPcName" maxlength="60" autocomplete="off" placeholder="lena-laptop"></label>
-        <p class="hint">The member sets it up with the prompt and confirms it is theirs; you approve it before anything is released.</p></div>
+      <div id="dlgPcNew"${hasPc ? ' hidden' : ''}>
+        <p class="hint">Add this PC with the connector first (Add PC), then approve a destination on it. It then appears under Already set up.</p></div>
     </fieldset>
     <div class="dlg-run"><span class="vlabel">Run with</span>
       <div class="dlg-row">${selField('dlgProv', 'Provider', Object.entries(CO_PROV), 'claude_code')}
         <label class="fld"><span class="vlabel">Model</span><input class="inp" id="dlgModel" maxlength="80" autocomplete="off" placeholder="Agent's own"></label></div>
       ${selField('dlgPerm', 'Permissions', perms.map((p) => [p, CO_PERM[p]]), perms.at(-1))}
       <p class="hint">Permissions can be lowered for the collaborator, never raised above the agent's own.</p></div>
-    <label class="fld"><span class="vlabel">Drafts folder (optional)</span><input class="inp" id="dlgDraft" maxlength="200" autocomplete="off" placeholder="/05 Papers/…/contrib/${esc(a.label)}/"></label>
+    <label class="fld"><span class="vlabel">Drafts folder (optional)</span><input class="inp" id="dlgDraft" maxlength="200" autocomplete="off" placeholder="/Papers/…/contrib/${esc(a.label)}/"></label>
     <p class="hint">Leave it empty for none. A folder is an explicit, audited folder grant for the member that ends at Take back. In an implementation project there is no paper folder: give a folder or leave it none. The hub checks the path.</p>
     <div id="dlgPrev"></div>
     <span class="err" id="dlgErr" role="alert"></span>
@@ -6070,14 +6348,12 @@ function dlgFormHtml(a, o) {
 const dlgPcSel = (pcs) => (pcs.length ? selField('dlgPc', 'Their PC', pcs.map((p) => [p.id, p.name]), pcs[0].id) : '<p class="hint">No enrolled PC.</p>');
 /* The sheet after Make the prompt: one body that follows the delegation's step. */
 function dlgProgressHtml(a, c) {
-  const s = dlgStep(c), newPc = !!c.pc?.new, ready = newPc && c.pc.approval === 'waiting' && !!c.pc?.enrolled && !!c.pc?.confirmed;
-  const approve = ready ? `<button type="button" class="btn pri lg" id="dlgOk">${ic('check')}Approve ${esc(c.pc.name)}</button>` : '';
+  const s = dlgStep(c);
   return `<div class="sheet-form dlg" id="dlgProg">
     <div class="dlg-step ${esc(s.tone)}"><b>${esc(s.head)}</b>${s.text ? `<p>${s.text}</p>` : ''}</div>
     ${c.status === 'collecting' || c.status === 'ready' ? `<div class="sbar dlg-bar" aria-hidden="true"><i class="rest"></i></div>` : ''}
-    ${c.status === 'rendered' ? vnote('The prompt is in ' + esc(c.member?.name || 'the member') + "'s own console, behind their sign-in. Its code is good for 30 minutes from when they first open it.") : ''}
-    ${kv('Member', esc(c.member?.name || '—'))}${kv('PC', esc(`${c.pc?.name || '—'}${newPc ? ' · new' : ''}`))}
-    ${approve}
+    ${c.status === 'rendered' ? vnote('The prompt is in ' + esc(c.member?.name || 'the member') + "'s own console, behind their sign-in. They open it when they are ready.") : ''}
+    ${kv('Member', esc(c.member?.name || '—'))}${kv('PC', esc(c.pc?.name || '—'))}
     <span class="err" id="dlgErr" role="alert"></span>
     <div class="sheet-acts"><button type="button" class="btn lg bad-t" id="dlgCancel">Cancel delegation</button><button type="button" class="btn pri lg" data-sheet-close>Done</button></div></div>`;
 }
@@ -6089,7 +6365,6 @@ async function dlgSheet(a, dl, reopen) {
   const fail = (e) => err(e?.message || 'Something went wrong. Try again.');
   const draw = (c) => {
     body.innerHTML = dlgProgressHtml(a, c);
-    $('#dlgOk', sh)?.addEventListener('click', () => run(async () => { try { await post(DLG_R.approve(c.id)); await tick(); } catch (e) { fail(e); } }));
     $('#dlgCancel', sh)?.addEventListener('click', () => run(async () => { try { await post(DLG_R.cancel(c.id), {}); toast('Delegation cancelled'); closeSheet(); await refresh(); reopen(); } catch (e) { fail(e); } }));
   };
   const tick = async () => {
@@ -6116,15 +6391,14 @@ async function dlgSheet(a, dl, reopen) {
     err('');
     const b = { user_id: $('#dlgMember', sh).value, drafts_folder: $('#dlgDraft', sh).value.trim() || null,
       agents: { [a.id]: { provider: $('#dlgProv', sh).value, model: $('#dlgModel', sh).value.trim() || null, permissions: $('#dlgPerm', sh).value } } };
-    if (have()) { b.machine_id = $('#dlgPc', sh)?.value; b.new_pc_name = null; } else { b.new_pc_name = $('#dlgPcName', sh).value.trim(); b.machine_id = null; if (!b.new_pc_name) { err('Name the new PC.'); $('#dlgPcName', sh).setAttribute('aria-invalid', 'true'); $('#dlgPcName', sh).focus(); return; } }
+    if (have()) { b.machine_id = $('#dlgPc', sh)?.value; } else { err('Add this PC with the connector first, then approve a destination on it.'); return; }
     try { await post(DLG_R.start(a.id), b); } catch (e) { fail(e); return; }
     await refresh(); const r = await dlgGet(a.id); if (r.delegation) draw(r.delegation); start();
   }));
 }
 
 /* The member's side (Home): "Run <agent> for <operator>". The prompt is made when they first open it, shown only here (behind
-   their sign-in), with Copy; its code is good for 30 minutes from that first open. A new PC asks them "Is this your PC?"
-   before the administrator can approve it. After a take-back the row says so. */
+   their sign-in), with Copy. After a take-back the row says so. */
 const dlgSeen = () => { try { return JSON.parse(localStorage.getItem('dlgSeen') || '[]'); } catch { return []; } };
 const dlgDismiss = (id) => { try { localStorage.setItem('dlgSeen', JSON.stringify([...dlgSeen(), id].slice(-50))); } catch { /* the row comes back on reload, which is harmless */ } };
 const DLG_END = ['taken_back', 'ended'];
@@ -6135,20 +6409,17 @@ function dlgMemberHtml(list) {
     let tone = 'acc', body = '';
     if (DLG_END.includes(d.state)) { tone = 'idle'; body = `<b>${d.state === 'taken_back' ? `${who} took ${ag} back` : esc(d.text || `${ag} is no longer lent to you`)}</b><div class="dlg-mu-acts"><button type="button" class="btn" data-dlg-mu="dismiss" data-id="${esc(d.id)}">Dismiss</button></div>`; }
     else if (d.state === 'running') { tone = 'ok'; body = `<b>You run ${ag} for ${who}${d.pc ? ` on ${pc}` : ''}</b><p class="hint">It works in contributor mode: it reads, adds and edits its own items, and proposes changes to other people's work.</p>`; }
-    else if (d.confirm_pc) { tone = 'warn'; body = `<b>Is this your PC: ${esc(d.confirm_pc.name)}, ${esc(d.confirm_pc.enrolled_from || 'unknown address')}?</b><p class="hint">Say yes only if you just set it up. ${who} approves it after you.</p>
-      <div class="dlg-mu-acts"><button type="button" class="btn pri" data-dlg-mu="yes" data-id="${esc(d.id)}">${ic('check')}Yes, it is mine</button><button type="button" class="btn" data-dlg-mu="no" data-id="${esc(d.id)}">No</button></div>`; }
-    else if (P) body = `<b>Run ${ag} for ${who}</b><p class="co-warn">${ic('warn')}<span>${P.code ? '<b>It holds a one-time code</b>, good for 30 minutes. ' : '<b>It holds no key</b>, but it names your hub and folders. '}Paste it into Claude Code on ${pc}. Do not share it.</span></p>
-      <div class="co-prompt">${codeBox(P.text, true)}</div><p class="hint">${P.code ? 'Code' : 'Prompt'}: <span data-co-cd="${esc(P.expires_at || '')}">${coLeft(P.expires_at)}</span></p>`;
-    else if (d.prompt_available) body = `<b>Run ${ag} for ${who}</b>${text}<div class="dlg-mu-acts"><button type="button" class="btn pri" data-dlg-mu="show" data-id="${esc(d.id)}">${ic('play')}Show the prompt</button></div><p class="hint">Its code is good for 30 minutes from when you open it.</p>`;
+    else if (P) body = `<b>Run ${ag} for ${who}</b><p class="co-warn">${ic('warn')}<span><b>It holds no key</b>, but it names your hub and folders. Paste it into Claude Code on ${pc}. Do not share it.</span></p>
+      <div class="co-prompt">${codeBox(P.text, true)}</div><p class="hint">Prompt: <span data-co-cd="${esc(P.expires_at || '')}">${coLeft(P.expires_at)}</span></p>`;
+    else if (d.prompt_available) body = `<b>Run ${ag} for ${who}</b>${text}<div class="dlg-mu-acts"><button type="button" class="btn pri" data-dlg-mu="show" data-id="${esc(d.id)}">${ic('play')}Show the prompt</button></div><p class="hint">The prompt is made when you open it.</p>`;
     else { tone = 'info'; body = `<b>Run ${ag} for ${who}</b>${text}`; }
     return `<div class="card dlg-mu ${esc(tone)}">${body}</div>`;
   }).join('');
 }
 async function dlgMemberAct(kind, id) {
   try {
-    if (kind === 'show') { const r = await post(DLG_R.mprompt(id), {}), at = r.code_expires_at ?? r.expires_at; DLG.prompt[id] = { text: r.prompt?.text ?? r.prompt ?? '', code: !!r.code_expires_at, expires_at: typeof at === 'string' ? Date.parse(at) : at ?? null }; }
+    if (kind === 'show') { const r = await post(DLG_R.mprompt(id), {}), at = r.expires_at; DLG.prompt[id] = { text: r.prompt?.text ?? r.prompt ?? '', expires_at: typeof at === 'string' ? Date.parse(at) : at ?? null }; }
     else if (kind === 'dismiss') dlgDismiss(id);
-    else await post(DLG_R.mpc(id), { mine: kind === 'yes' });
   } catch (e) { toast(e.message, true); }
   await muDraw(false);
 }
@@ -6542,10 +6813,9 @@ VIEWS.ob = async (id) => {
       <label class="fld"><span class="vlabel">Team name</span><input class="inp" data-t="name" maxlength="80" value="${esc(E.team.name)}"></label>
       <label class="fld"><span class="vlabel">Goal</span><textarea class="inp" data-t="goal" rows="3" maxlength="4000">${esc(E.team.goal)}</textarea></label>`)
     + sec('How it works', `<div class="tw">
-      ${twRow('Mode', 'Polling agents loop on work_next. On-demand agents work when woken.', `<div class="seg" id="obMode"><button type="button" data-mode="poll" class="${E.team.delivery_mode === 'poll' ? 'on' : ''}">${ic('rot')}Polling</button><button type="button" data-mode="on_demand" class="${E.team.delivery_mode !== 'poll' ? 'on' : ''}">${ic('bolt')}On demand</button></div>`)}
       ${twRow('Close on approval', 'An approving review closes the task in one call.', switchBtn('Close on approval', E.team.close_on_approve !== false, 'data-ts="close_on_approve"'))}
       ${twRow('Coordinator may review', 'For small teams without a separate reviewer.', switchBtn('Coordinator may review', !!E.team.coordinator_reviews, 'data-ts="coordinator_reviews"'))}
-      ${twRow('Lease', 'Minutes a task stays with its assignee without a heartbeat.', numIn('lease_minutes', E.team.lease_minutes ?? 30, 1, 1440, 'Lease minutes'))}
+      ${twRow('Check-in time', 'Minutes until a started task needs news. Past it the task is flagged and stays with its assignee.', numIn('lease_minutes', E.team.lease_minutes ?? 30, 1, 1440, 'Check-in minutes'))}
       ${twRow('Stall after', 'Optional: minutes without progress before a member is flagged.', numIn('stall_minutes', E.team.stall_minutes, 1, 1440, 'Stall minutes'))}
       ${twRow('Review rounds', 'Most review rounds per task. The request for changes that reaches it blocks the task and tells you.', numIn('max_review_rounds', E.team.max_review_rounds ?? 3, 1, 20, 'Review rounds'))}
       ${twRow('Start when set up', 'Starts the team once the PC has collected its keys.', switchBtn('Start when set up', true, 'id="obStart"'))}</div>`)
@@ -6625,7 +6895,6 @@ VIEWS.ob = async (id) => {
         $('#obPm').onclick = (e) => { E.project = { ...E.project, more_teams: flipSwitch(e.currentTarget) }; };
         $$('[data-t]', b).forEach((i) => (i.oninput = () => { const k = i.dataset.t; if (i.type === 'number') { if (i.value === '') delete E.team[k]; else E.team[k] = Math.floor(+i.value); } else E.team[k] = i.value; if (k === 'name') drawAgents(); }));
         $$('[data-ts]', b).forEach((s) => (s.onclick = () => { E.team[s.dataset.ts] = flipSwitch(s); drawAgents(); }));
-        $$('#obMode button').forEach((m) => (m.onclick = () => { $$('#obMode button').forEach((x) => x.classList.toggle('on', x === m)); E.team.delivery_mode = m.dataset.mode; markEdited(); }));
         $('#obStart').onclick = (e) => flipSwitch(e.currentTarget);
       }
       // Decide.
@@ -6944,15 +7213,47 @@ VIEWS.topology = async (arg = '') => {
 
 /* Task deadline on a board card: overdue (on-demand), check-in or lease time, waiting to start, awaiting review. */
 const dur2 = (ms) => { const m = Math.round(Math.abs(ms) / 60000); return m < 60 ? m + ' min' : m < 2880 ? Math.round(m / 60) + ' h' : Math.round(m / 1440) + ' d'; };
+/* Whether what waits on an agent reached its session (one delivery model, docs/dashboard-ux.md "Delivered"): delivered_at
+   is set by the connector when a session started a turn on it, apart from seen (the agent read it in full). Until the
+   connector reports, an unseen item reads "Not delivered yet". Design §3g: "Not delivered: why", "Waiting behind task X" while the
+   agent's woken run works on another task, and "PC offline since hh:mm" (never "asleep"). Empty once it was delivered and read. */
+const CN_ISO = { standard: 'Standard isolation', hardened: 'Hardened isolation' };
+const CN_KEYSTORE = { dpapi: 'keys encrypted with Windows DPAPI', keychain: 'keys encrypted, secret in the macOS login keychain', secret_service: 'keys encrypted, secret in the Linux secret service', file: 'keys encrypted, secret in a private file', service: 'keys held by the key service' };
+const DELIV = { pc_offline: 'Not delivered: waiting for the PC', chat_in_use: 'Not delivered: chat in use', wake_held: 'Not delivered: wake held on this platform', agent_unknown: 'Not delivered: no session to wake', connector_too_old: 'Not delivered: connector too old' };
+const atTime = (t) => { const d = new Date(t), hm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`; return d.toDateString() === new Date().toDateString() ? hm : dt(t); };
+const delivText = (u) => (!u ? '' : u.delivered_at ? `Delivered ${atTime(u.delivered_at)}` : u.seen_at ? '' : u.waiting_behind ? `Waiting behind task ${u.waiting_behind.title}`
+  : u.pc_offline_since ? `Not delivered: PC offline since ${atTime(u.pc_offline_since)}` : DELIV[u.delivery_reason] || 'Not delivered yet');
+/* A Needs you delivery row names an offline PC without its time (the hub does not know the viewer's clock): add it here. */
+const nyOffline = (r, t) => (r.offline_since && t ? t.replace('PC offline', `PC offline since ${atTime(r.offline_since)}`) : t);
+const REASSIGN_ST = ['assigned', 'in_progress', 'changes_requested'];
+/* The task screen's delivery line under its progress: who it waits on and whether it reached them, with Reassign for the operator. */
+function delivLine(k, teamId) {
+  const u = k.turn, txt = delivText(u), canRe = S.me?.role === 'admin' && REASSIGN_ST.includes(k.status);
+  if (!u || (!txt && !canRe)) return '';
+  const bad = !u.delivered_at && !u.seen_at;
+  return `<p class="meta tk-deliv"><span>${esc(u.holder_label || AG(u.holder) || 'Its holder')}${txt ? ' · ' : ''}<span class="${bad ? 'warn-t' : ''}">${esc(txt)}</span></span>`
+    + (canRe ? `<button type="button" class="btn sm" data-reassign="${esc(teamId + '|' + k.id)}">${ic('user')}Reassign</button>` : '') + '</p>';
+}
+/* Reassign (nothing returns to open by itself): hands a task still waiting on or started by its worker to another worker or a
+   coordinator of its team (POST /api/teams/:id/tasks/:taskId/reassign). The previous worker is told to stop. */
+async function reassignSheet(teamId, taskId, anchor) {
+  const t = (await api('/teams/' + encodeURIComponent(teamId))).team, k = (t.board || []).find((x) => x.id === taskId);
+  const L = (t.members || []).filter((m) => ['worker', 'coordinator'].includes(m.role) && m.agent_id !== k?.assignee);
+  if (!L.length) return toast('No other worker in this team can take it', true);
+  fbSheet({ title: 'Reassign task', anchor, label: 'Reassign',
+    fields: `<p class="meta">${esc(k?.title || taskId)}${k?.assignee ? ` · now with ${esc(AG(k.assignee) || k.assignee)}` : ''}</p><label class="fld"><span class="vlabel">To</span><select class="inp" id="raTo">${L.map((m) => `<option value="${esc(m.agent_id)}">${esc(m.label || m.agent_id)}${m.role === 'coordinator' ? ' (coordinator)' : ''}</option>`).join('')}</select></label><p class="meta">The current worker is told to stop. The new one gets the task and its wake line.</p>`,
+    onGo: async (sh) => { await post(`/teams/${encodeURIComponent(teamId)}/tasks/${encodeURIComponent(taskId)}/reassign`, { agent_id: $('#raTo', sh).value }); toast('Reassigned'); await refresh(); } });
+}
+document.addEventListener('click', (e) => { const b = e.target.closest?.('[data-reassign]'); if (!b) return; e.preventDefault(); e.stopPropagation(); const [tm, id] = b.dataset.reassign.split('|'); run(() => reassignSheet(tm, id, b)); }, true);
 /* A waiting review (docs/dashboard-ux.md): "v3 · Code Reviewer 2 · waiting 2 h · not seen yet". Seen means the reviewer read the
    task in full or acted on it, not that it started reviewing. */
-const waitText = (k) => { const u = k.turn; return u && u.phase === 'review' ? [u.round ? 'v' + u.round : '', u.holder_label, 'waiting ' + dur2(Date.now() - u.since), u.seen_at ? `seen ${dur2(Date.now() - u.seen_at)} ago` : 'not seen yet'].filter(Boolean).join(' · ') : ''; };
+const waitText = (k) => { const u = k.turn; return u && u.phase === 'review' ? [u.round ? 'v' + u.round : '', u.holder_label, 'waiting ' + dur2(Date.now() - u.since), u.seen_at ? `seen ${dur2(Date.now() - u.seen_at)} ago` : delivText(u).toLowerCase()].filter(Boolean).join(' · ') : ''; };
 function tkText(k, t) {
   const now = Date.now();
   if (k.overdue_at) return { text: 'Overdue ' + dur2(now - (k.lease_expires_at || k.overdue_at)), cls: 'bad-t' };
-  if (k.status === 'in_review') return { text: waitText(k) || 'Awaiting review', cls: k.turn && !k.turn.seen_at && t.delivery_mode === 'on_demand' ? 'warn-t' : '', review: true };
+  if (k.status === 'in_review') return { text: waitText(k) || 'Awaiting review', cls: k.turn && !k.turn.seen_at ? 'warn-t' : '', review: true };
   if (!['assigned', 'in_progress'].includes(k.status) || !k.lease_expires_at) return null;
-  const left = k.lease_expires_at - now, label = t.delivery_mode === 'on_demand' ? 'Check-in' : 'Lease';
+  const left = k.lease_expires_at - now, label = 'Check-in';
   return { text: k.status === 'assigned' ? 'Waiting to start' : `${label} ${left > 0 ? 'in ' + dur2(left) : 'now'}`, cls: left < 30 * 60000 ? 'warn-t' : '' };
 }
 /* The team plan (the team's Blueprint part in plan words, GET /api/teams/:id plan): the team page lists its overdue and missed
@@ -7105,9 +7406,12 @@ function bpVRows(vs) {
     + `<button type="button" class="ibtn" data-bpv-link="${esc(v.id)}" aria-label="Copy the link to ${esc(v.name)}">${ic('link')}</button>`
     + `<button type="button" class="ibtn" data-bpv-del="${esc(v.id)}" aria-label="Delete ${esc(v.name)}">${ic('trash')}</button></span></div>`).join('')}</div>`;
 }
-/* Views: this screen's saved views, to open, pin, copy as a link or delete. */
-function bpViewsSheet({ pid, section, anchor }) {
-  const sh = openSheet({ title: 'Saved views', anchor, cls: 'form', html: '<div id="bpvBody"><p class="meta">Loading</p></div>' });
+/* Views: Save view first (save is set only while the view differs from the default), then this screen's saved views, to open,
+   pin, copy as a link or delete. */
+function bpViewsSheet({ pid, section, anchor, save = null }) {
+  const sv = save ? `<div class="sheet-list bpv-save">${row({ one: true, as: 'button', title: 'Save view', attrs: { 'data-bpv-save': '1', 'data-sheet-close': '1' } })}</div>` : '';
+  const sh = openSheet({ title: 'Saved views', anchor, cls: 'form', html: `${sv}<div id="bpvBody"><p class="meta">Loading</p></div>` });
+  if (save) $('[data-bpv-save]', sh).addEventListener('click', () => setTimeout(() => save(anchor)));
   let all = [];
   const paint = () => { const b = $('#bpvBody', sh); if (b) b.innerHTML = bpVRows(bpVHere(all, pid, section)); };
   const mine = (id) => all.find((v) => v.id === id);
@@ -7165,15 +7469,15 @@ const bpLaFacet = (lst, d) => (lst.facets || []).find((x) => x.id === d);
 const bpLaDim = (lst, d) => bpLaFacet(lst, d)?.label || cap(d);
 const bpLaLabel = (lst, d, v) => bpLaFacet(lst, d)?.values.find((x) => x.value === v)?.label || (d === 'status' ? bpLabel(v) : d === 'kind' ? v.split(',').map((k) => BP_KIND_PL[k] || k).join(' and ') : v);
 const bpLaAny = (f) => !!(f.f.length || f.gap);
-/* "Showing 18 of 112": the count table's header while the table is drawn, else the start of Where you are (one live region either way). */
-const bpLaShow = (lst) => `<span class="bp-show" tabindex="-1" aria-live="polite">Showing <b>${lst.total}</b> of ${lst.of ?? lst.counts.all}</span>`;
+/* "18 of 112": the count table's header while the table is drawn, else the list's overline count (one live region either way). */
+const bpLaShow = (lst) => `<span class="bp-show" tabindex="-1" aria-live="polite"><b>${lst.total}</b> of ${lst.of ?? lst.counts.all}</span>`;
 /* The count table is offered with two dimensions in view, and drawn unless the link folds it (x=-) or the hub sent no cross. */
 const bpLaDims = (lst) => (lst.facets || []).filter((x) => x.values.length);
 const bpLaXOn = (lst, f) => bpLaDims(lst).length >= 2 && f.x !== '-' && !!lst.cross;
-/* Where you are: "Showing 18 of 112" (in the table's header while it is drawn), each active filter as a removable chip, Clear,
-   Save view and, while the table is folded, Show count table; then what no longer applies. */
-function bpLaWhere(lst, f, st, goF) {
-  const chip = (label, to, name, gap) => `<button type="button" class="bp-chip on${gap ? ' gap' : ''}" data-bpv="${esc(to)}" data-bp-fk="where" aria-label="Remove ${esc(name)}">${esc(label)}${ic('x')}</button>`;
+/* The active filters as the search box's chips, in this order: status, kind, the dimension filters, then the gap. Each one's
+   link drops it; a filter the hub no longer applies is not a chip (bpLaNotes says so). */
+function bpLaChips(lst, f, st, goF) {
+  const chip = (label, to, name, gap) => ({ label, name: `Remove ${name}`, gap, attrs: `data-bpv="${esc(to)}" data-bp-fk="q"` });
   const L = [];
   if (st) L.push(chip(bpLaLabel(lst, 'status', st), goF(...bpLaSet(f, st, 'status', null)), `the filter Status: ${bpLabel(st)}`));
   if (f.kind) L.push(chip(bpLaLabel(lst, 'kind', f.kind), goF({ ...f, kind: '', at: '' }, st), 'the kind filter'));
@@ -7183,25 +7487,33 @@ function bpLaWhere(lst, f, st, goF) {
   }
   const gp = f.gap && (lst.gaps || []).find((g) => g.id === f.gap);
   if (gp) L.push(chip(`Gap: ${gp.label}`, goF({ ...f, gap: '', at: '' }, st), `the gap ${gp.label}`, true));
+  return L;
+}
+/* Under the toolbar, muted and only when they apply: what no longer applies, and why items are hidden. */
+function bpLaNotes(lst, f) {
   // A default count table the screen has no dimensions for is not the viewer's filter: only what they set counts as no longer applying.
   const ig = (lst.ignored || []).filter((x) => !x.startsWith('x:') || f.x), hid = lst.hidden?.[0]?.reason;
-  const save = BP_VIEW.save ? '<button type="button" class="btn ghost sm" data-bp-save>Save view</button>' : '';
-  const dims = bpLaDims(lst), xOn = bpLaXOn(lst, f);
-  const show = dims.length >= 2 && !xOn ? `<button type="button" class="btn sm" data-bpv="${esc(goF({ ...f, x: f.x === '-' ? '' : `${dims[0].id}*${dims[1].id}`, at: '' }, st))}" data-bp-fk="xshow" aria-expanded="false">Show count table</button>` : '';
-  const row = `${xOn ? '' : bpLaShow(lst)}${L.join('')}`
-    + `${L.length ? `<button type="button" class="btn ghost sm" data-bpv="${esc(goF({ ...f, f: [], gap: '', kind: '', at: '' }, ''))}" data-bp-fk="where">Clear</button>` : ''}${save}${show}`;
-  return (row ? `<div class="bp-where">${row}</div>` : '')
-    + (ig.length ? `<p class="meta bp-la-note">${ig.length === 1 ? '1 filter no longer applies' : `${ig.length} filters no longer apply`}</p>` : '')
+  return (ig.length ? `<p class="meta bp-la-note">${ig.length === 1 ? '1 filter no longer applies' : `${ig.length} filters no longer apply`}</p>` : '')
     + (hid ? `<p class="meta bp-la-note">${esc(hid)}</p>` : '');
 }
+/* The count table toggle, a quiet icon button at the end of the toolbar, offered only where a table is (two dimensions or more).
+   Hide folds to x=-; Show brings back the pair the link had before it folded (x= clears to the screen's default), or asks for the
+   first two dimensions when the hub sent no cross. */
+function bpLaXTog(lst, f, st, goF) {
+  const dims = bpLaDims(lst);
+  if (dims.length < 2) return '';
+  const on = bpLaXOn(lst, f), l = on ? 'Hide count table' : 'Show count table';
+  const to = on ? goF({ ...f, x: '-', at: '' }, st) : goF({ ...f, x: f.x === '-' ? '' : `${dims[0].id}*${dims[1].id}`, at: '' }, st);
+  return `<button type="button" class="ibtn bp-xtog${on ? ' on' : ''}" data-bpv="${esc(to)}" data-bp-fk="xshow" aria-expanded="${on}" aria-controls="bpX" aria-label="${l}" title="${l}">${ic('grid')}</button>`;
+}
 /* The count table (tablet and desktop): rows × columns, each cell the hub's count; a click sets both filters, a second click
-   clears them. On a phone the same counts are a list: one row per row value, opening to its column values. Its header is
-   "Showing N of M" (the one bp-show, moved here from Where you are while the table is open, at every width) with Hide count
-   table; the Rows and Columns selects and their swap are the second line. From 1180 px it sits right of the list (.bp-la)
-   when it fits there. Folded or not offered, it is not drawn: Show count table is then on the Where you are line.
+   clears them. On a phone the same counts are a list: one row per row value, opening to its column values. It is always above
+   the list, at full width. Its header is one line: "6 of 21" (the one bp-show, moved here from the list's overline while the
+   table is drawn) · Rows by Columns (inline selects) and the swap. Folded, it is an empty #bpX (the toggle's aria-controls);
+   not offered (fewer than two dimensions), it is nothing.
    v is how bpXFit fitted it: turned (rows and columns swapped) and/or keep (columns kept, the rest folded into Other). */
 function bpLaTable(lst, f, st, goF, v = {}) {
-  if (!bpLaXOn(lst, f)) return '';
+  if (!bpLaXOn(lst, f)) return bpLaDims(lst).length >= 2 ? '<div id="bpX" hidden></div>' : '';
   const dims = bpLaDims(lst).map((x) => [x.id, x.label]), c = v.turn ? bpXTurn(lst.cross) : lst.cross;
   const fo = v.keep && v.keep < c.col_values.length ? bpXFold(c, v.keep) : null, J = fo ? fo.K : c.col_values.map((_, j) => j);
   const opt = (sel) => dims.map(([d, l]) => `<option value="${esc(d)}"${d === sel ? ' selected' : ''}>${esc(l)}</option>`).join('');
@@ -7227,10 +7539,9 @@ function bpLaTable(lst, f, st, goF, v = {}) {
     + `<tbody>${c.row_values.map((rv, i) => `<tr><th scope="row" title="${esc(rv.label)}"><span>${esc(rv.label)}</span></th>${J.map((j) => cell(i, j)).join('')}${fo ? other(i) : ''}<td class="bp-xtot">${c.totals?.[i] ?? ''}</td></tr>`).join('')}</tbody></table></div>`;
   const phone = `<div class="bp-xm only-m">${c.row_values.map((rv, i) => `<details class="bp-xmr"${bpLaIs(f, st, c.rows, rv.value) ? ' open' : ''}><summary class="lrow"><span class="lrow-main"><span class="lrow-title">${esc(rv.label)}</span></span><span class="lrow-trail"><span class="meta">${c.totals?.[i] ?? ''}</span>${ic('chev', 'chev')}</span></summary>`
     + `${c.col_values.map((w, j) => (c.cells[i][j] ? (() => { const [r, on] = to(i, j); return `<button type="button" class="lrow bp-xmc${on ? ' on' : ''}" data-bpv="${esc(r)}" data-bp-fk="x:${esc(rv.value)}|${esc(w.value)}" aria-pressed="${on}" aria-label="${esc(name(i, j))}"><span class="lrow-main"><span class="lrow-title">${esc(cl)}: ${esc(w.label)}</span></span><span class="lrow-trail"><span class="meta">${c.cells[i][j]}</span></span></button>`; })() : '')).join('')}</details>`).join('')}</div>`;
-  return `<div class="bp-c bp-xcard" data-bp-x="${esc(`${c.rows}*${c.cols}`)}"><div class="bp-xh">${bpLaShow(lst)}<button type="button" class="ibtn bp-xhide" data-bpv="${esc(goF({ ...f, x: '-', at: '' }, st))}" data-bp-fk="xshow" aria-expanded="true" aria-label="Hide count table" title="Hide count table">${ic('x')}</button></div>`
-    + `<div class="bp-xsel"><label class="bp-fl"><span class="vlabel">Rows</span><select class="sel sm" data-bp-xa="r" aria-label="Rows">${opt(c.rows)}</select></label>`
+  return `<div class="bp-c bp-xcard" id="bpX" data-bp-x="${esc(`${c.rows}*${c.cols}`)}"><div class="bp-xh">${bpLaShow(lst)}<span aria-hidden="true">·</span>`
+    + `<select class="isel" data-bp-xa="r" data-bp-fk="xr" aria-label="Rows">${opt(c.rows)}</select><span class="bp-xby">by</span><select class="isel" data-bp-xa="c" data-bp-fk="xc" aria-label="Columns">${opt(c.cols)}</select>`
     + `<button type="button" class="ibtn bp-xswap" data-bpv="${esc(goF({ ...f, x: `${c.cols}*${c.rows}`, at: '' }, st))}" data-bp-fk="xswap" aria-label="Swap rows and columns" title="Swap rows and columns">${ic('swap')}</button>`
-    + `<label class="bp-fl"><span class="vlabel">Columns</span><select class="sel sm" data-bp-xa="c" aria-label="Columns">${opt(c.cols)}</select></label>`
     + `${v.turn ? '<span class="meta bp-xturn">Turned to fit</span>' : ''}</div>`
     + `${c.multi ? '<p class="meta bp-la-note">An item can sit in more than one column</p>' : ''}${desk}${phone}</div>`;
 }
@@ -7245,21 +7556,18 @@ function bpXFold(c, k) {
   const O = idx.filter((j) => !keep.has(j));
   return { K: idx.filter((j) => keep.has(j)), O, sums: c.cells.map((r) => O.reduce((s, j) => s + r[j], 0)) };
 }
-/* No scroll inside the count table, ever (Bruno). After each draw, and when the window's width changes: the table sits right
-   of the list only when it fits there, else full width above it (.full); too wide even then, it is turned when turning
-   makes it fit (unless the viewer chose these axes at this width), else the orientation with fewer columns folds its
-   smallest columns into Other until it fits. It is sticky (.pin) only beside the list and only when the whole card fits in
-   the window; otherwise it scrolls with the page. draw(v) is bpLaTable for this view; bind rewires the Rows and Columns. */
+/* No scroll inside the count table, ever (the operator's rule). After each draw, and when the window's width changes: the table is full width
+   above the list; too wide, it is turned when turning makes it fit (unless the viewer chose these axes at this width), else the
+   orientation with fewer columns folds its smallest columns into Other until it fits. It scrolls with the page. la is the
+   table's box (.bp-la); draw(v) is bpLaTable for this view; bind rewires the Rows and Columns. */
 let BP_XU = null; // { x, w }: the axes the viewer picked (swap, Rows, Columns), kept until the window's width changes
 let BP_XFIT = null;
 const bpXFits = (la) => { const w = $('.bp-xw', la); return !w || !w.offsetParent || w.firstElementChild.offsetWidth <= w.clientWidth; };
 function bpXFit(la, c, draw, bind) {
   if (!la?.isConnected || !c) return null;
-  const a = document.activeElement, fk = a && la.contains(a) && $('.bp-xcard', la)?.contains(a) ? a.dataset.bpFk : '';
-  const put = (v) => { $('.bp-xcard', la).outerHTML = draw(v); return v; };
+  const a = document.activeElement, fk = a && la.contains(a) ? a.dataset.bpFk : '';
   if (BP_XU && BP_XU.w !== innerWidth) BP_XU = null;
-  // Each try is beside the list first, then full width.
-  const at = (v) => { put(v); la.classList.remove('full'); if (bpXFits(la)) return true; la.classList.add('full'); return bpXFits(la); };
+  const at = (v) => { $('.bp-xcard', la).outerHTML = draw(v); return bpXFits(la); };
   let v = {};
   if (!at(v)) {
     const mine = BP_XU?.x === `${c.rows}*${c.cols}`;
@@ -7271,19 +7579,24 @@ function bpXFit(la, c, draw, bind) {
       for (let k = (v.turn ? c.row_values.length : c.col_values.length) - 1; k >= 1 && !ok; k--) ok = at(v = { ...v, keep: k });
     }
   }
-  const card = $('.bp-xcard', la), bar = parseFloat(getComputedStyle(la).getPropertyValue('--h-bar')) || 56;
-  card.classList.toggle('pin', !la.classList.contains('full') && card.offsetHeight <= innerHeight - bar - 32);
   bind?.();
   if (fk) $$('[data-bp-fk]', la).find((el) => el.dataset.bpFk === fk && el.offsetParent)?.focus({ preventScroll: true });
   return v;
 }
 let BP_XFIT_W = innerWidth, BP_XFIT_T = 0;
 addEventListener('resize', () => { if (innerWidth === BP_XFIT_W) return; BP_XFIT_W = innerWidth; clearTimeout(BP_XFIT_T); BP_XFIT_T = setTimeout(() => BP_XFIT?.(), 120); });
-/* The list, grouped or not: Group by and Sort, then the rows with a group row ("M2 · 14") where a group starts. */
-function bpLaList(pid, lst, f, team) {
+/* The list, grouped or not: its overline ("MATCHING · 18 · Grouped by line ▾ · Most at risk first ▾"), then the rows with a
+   group row ("M2 · 14") where a group starts. While the count table is not drawn, "18 of 112" (the one bp-show) is the
+   overline's count; it is never added to a group's count. Blueprint order is the hub's default order (no s= in the link). */
+const bpLc = (s) => (s ? s[0].toLowerCase() + s.slice(1) : s);
+function bpLaHead(lst, xOn, ctl = true) {
   const dims = (lst.facets || []).filter((x) => x.values.length);
-  const head = `<div class="bp-lh">${overline(lst.groups ? 'Grouped' : 'Matching', lst.total)}<span class="bp-xsel"><label class="bp-fl"><span class="vlabel">Group by</span><select class="sel sm" data-bp-g aria-label="Group by"><option value="">No grouping</option>${dims.map((x) => `<option value="${esc(x.id)}"${x.id === lst.filters?.g ? ' selected' : ''}>${esc(x.label)}</option>`).join('')}</select></label>`
-    + `<label class="bp-fl"><span class="vlabel">Sort</span><select class="sel sm" data-bp-s aria-label="Sort">${BP_SORTS.map(([v, l]) => `<option value="${v}"${v === (lst.filters?.s || '') ? ' selected' : ''}>${esc(l)}</option>`).join('')}</select></label></span></div>`;
+  return listOverline(['Matching', xOn ? String(lst.total) : { html: bpLaShow(lst) },
+    ctl ? { name: 'Group by', attrs: 'data-bp-g data-bp-fk="g"', value: lst.filters?.g || '', options: [['', 'Not grouped'], ...dims.map((x) => [x.id, `Grouped by ${bpLc(x.label)}`])] } : '',
+    ctl ? { name: 'Sort', attrs: 'data-bp-s data-bp-fk="s"', value: lst.filters?.s || '', options: BP_SORTS } : '']);
+}
+function bpLaList(pid, lst, f, team, xOn = true) {
+  const head = bpLaHead(lst, xOn);
   let prev = null, rows = '';
   for (const it of lst.items) {
     if (lst.groups && it.group !== prev) { const g = lst.groups.find((x) => x.value === it.group); rows += `<div class="bp-grp">${overline(g?.label || it.group, g?.count)}</div>`; prev = it.group; }
@@ -7734,6 +8047,49 @@ function bpProposal(pr, cur) {
     + '</div>';
 }
 
+/* Refine requirements (docs/blueprint.md §2.6): the coordinator's one proposal, a row per change with a tick. The hub says what each
+   op needs (pr.needs, by index); ticking a change ticks what it needs, unticking one unticks what needs it. */
+const bpRfNeed = (needs, i) => needs?.[i] || [];
+const bpRfBy = (needs, i) => (needs || []).flatMap((n, j) => (n.includes(i) ? [j] : []));
+function bpRfToggle(sel, needs, i, on) {
+  const out = new Set(sel), todo = [i];
+  while (todo.length) {
+    const k = todo.pop();
+    if (on) out.add(k); else out.delete(k);
+    for (const x of on ? bpRfNeed(needs, k) : bpRfBy(needs, k)) if (on ? !out.has(x) : out.has(x)) todo.push(x);
+  }
+  return out;
+}
+const bpRfSel = new Map(), bpRfNeeds = new Map();
+/* The keys a list shows (all its pages, at most 1000), frozen into a refine request when it is sent. */
+async function bpRfKeys(pid, q) {
+  const out = [];
+  for (let i = 0, cursor = null; i < 10; i++) { const r = await bpBrowse(pid, { ...q, x: '', limit: 100, cursor }); out.push(...r.items.map((x) => x.key)); cursor = r.next_cursor; if (!cursor) break; }
+  return out;
+}
+let bpRfOps = [];
+const bpRfKey = (j) => bpRfOps[j]?.key || bpRfOps[j]?.from || `change ${j + 1}`;
+const bpRfKind = (o, cur) => (o.op === 'upsert' && !cur ? 'Added' : o.op === 'upsert' && o.status === 'dropped' ? 'Removed' : 'Changed');
+function bpRfRow(o, i, cur, on, needs) {
+  const k = bpRfKind(o, cur), by = bpRfBy(needs, i);
+  const what = o.op === 'link' || o.op === 'unlink' ? `${o.op === 'link' ? 'Link' : 'Unlink'} ${bpK(o.from)} ${esc(BP_REL[o.rel] || o.rel)} ${bpK(o.to)}` : o.op === 'move' ? `Move ${bpK(o.key)}${o.parent_key !== undefined ? ` under ${bpK(o.parent_key || 'project')}` : ''}`
+    : k === 'Changed' && cur ? `${bpK(o.key)} ${o.title !== undefined && o.title !== cur.title ? `<del>${mdText(cur.title)}</del> <ins>${mdText(o.title)}</ins>` : mdText(o.title || cur.title)}${o.body !== undefined ? ' · text changed' : ''}`
+    : `${bpK(o.key)} ${mdText(o.title || cur?.title || '')}`;
+  const st = o.op === 'upsert' && o.status ? ` · ${esc(bpLabel(o.status))}` : '';
+  return `<li class="bp-rf-r"><label class="chk-row"><input type="checkbox" data-rfk="${i}"${on ? ' checked' : ''} aria-label="${esc(`${k} ${o.key || ''}`.trim())}"><span><b>${k}</b>${st} · ${what}`
+    + `${o.reason ? `<span class="meta bp-rf-why">${esc(o.reason)}</span>` : ''}${by.length ? `<span class="meta bp-rf-need">needed by ${by.map((j) => esc(bpRfKey(j))).join(', ')}</span>` : ''}</span></label></li>`;
+}
+function bpRefineReview(pr, cur) {
+  bpRfOps = pr.ops; bpRfNeeds.set(pr.id, pr.needs);
+  if (!bpRfSel.has(pr.id)) bpRfSel.set(pr.id, new Set(pr.ops.map((_, i) => i)));
+  const sel = bpRfSel.get(pr.id), who = pr.agent_id ? agLabel(pr.agent_id) : 'Coordinator', team = pr.team_id ? S.teams.find((x) => x.id === pr.team_id)?.name : '';
+  return `<div class="bp-c bp-prop bp-rf" data-rf="${esc(pr.id)}"><div class="bp-prop-h"><span class="bp-prop-t"><b>Refined requirements · ${esc(who)}</b><span class="meta">${[team, plural(pr.ops.length, 'change'), `${ago(pr.created_at)} ago`].filter(Boolean).map(esc).join(' · ')}</span></span>${bpSt('proposed')}</div>`
+    + (pr.reason ? `<p class="bp-reason"><span class="faint">Summary · </span>${esc(pr.reason)}</p>` : '')
+    + `<ul class="bp-diff bp-rf-l">${pr.ops.map((o, i) => bpRfRow(o, i, cur.get(o.key), sel.has(i), pr.needs)).join('')}</ul>`
+    + `<div class="bp-acts"><button type="button" class="btn sm" data-bp-rej="${esc(pr.id)}" data-bp-rej-t="Send back with a note" data-bp-rej-l="Send back">${ic('x')}Send back with a note</button>`
+    + `<button type="button" class="btn pri sm" data-bp-rfapply="${esc(pr.id)}" data-rfn="${pr.ops.length}"${sel.size ? '' : ' disabled'}>${ic('check')}<span data-rflabel>Apply ${sel.size} of ${pr.ops.length}</span></button></div></div>`;
+}
+
 /* Start over: the kinds it may reset, with the server's defaults ticked. */
 const RP_KINDS = [['fr', 'Functional requirements', 1], ['nfr', 'Non-functional requirements', 1], ['ac', 'Acceptance criteria', 1], ['milestone', 'Milestones', 1], ['release', 'Releases', 1],
   ['risk', 'Risks', 1], ['term', 'Glossary terms', 1], ['issue', 'Issues', 0], ['hypothesis', 'Hypotheses', 0], ['question', 'Questions', 0]];
@@ -7992,14 +8348,14 @@ VIEWS.blueprint = async (arg) => {
   const tab = BP_SCREENS.includes(tab0) ? tab0 : kind === 'research' ? 'res' : '1';
   const teamName = (id) => (id === 'project' ? 'Project level' : (sum.parts || []).find((x) => x.team.id === id)?.team.name || S.teams.find((x) => x.id === id)?.name || id);
   const go = (t, tm = one ? team0 : team, st = '', fl = '') => bpArg(pid, t, tm, st, fl);
-  let body = '', cur = new Map(), bpFilters = null;
+  let body = '', cur = new Map(), bpFilters = null, bpRfShown = null;
   if (tab === 'res') {
     body = await bpResearch(pid, team, status, go);
   } else if (tab === 'prop') {
     const idx = await bpLoad(pid, { detail: 'index' }).catch(() => ({ items: [] }));
     cur = new Map(idx.items.map((i) => [i.key, i]));
     const L = props.proposals.filter((p) => !team || p.team_id === (team === 'project' ? null : team));
-    body = L.length ? L.map((p) => (p.type === 'replan' ? bpReplanReview(p, rps.open.find((r) => r.id === p.replan_id)) : bpProposal(p, cur))).join('') : `<div class="bp-c">${none('check', 'No proposals wait for you', true)}</div>`;
+    body = L.length ? L.map((p) => (p.type === 'replan' ? bpReplanReview(p, rps.open.find((r) => r.id === p.replan_id)) : p.request_id != null && p.status === 'open' ? bpRefineReview(p, cur) : bpProposal(p, cur))).join('') : `<div class="bp-c">${none('check', 'No proposals wait for you', true)}</div>`;
   } else if (tab === 'needs') {
     // Blueprint Review is the project's entrance to Needs you (proposals and unclear requirements), counted as Home counts
     // them, with its For awareness rows (claims not supported, missed milestones) and the failing ACs.
@@ -8050,6 +8406,7 @@ VIEWS.blueprint = async (arg) => {
     // A team's foundation and appendix add the project-level items every team shares.
     const shared = !filtered && team && team !== 'project' && BP_SHARED.includes(+tab);
     // Filtered, the hub's page carries its counts; unfiltered, the section's own read brings them, so one request either way.
+    const refineOk = (sum.parts || []).length > 0;
     const sumMode = tab === '2' && !filtered;
     const [pg, r, rs, dl, rl] = await Promise.all([filtered ? bpBrowse(pid, { ...fq, x: la && f.x !== '-' ? f.x || bpLaX(tab, f.kind) : '', limit: 25, cursor: f.at }) : null, filtered ? null : bpLoad(pid, q), shared ? bpLoad(pid, { section: tab, team: 'project' }) : null,
       sumMode ? bpBrowse(pid, { section: '2', team, sel: 'decide', limit: 100 }).catch(() => null) : null, sumMode ? bpBrowse(pid, { section: '2', team, sel: 'risk', limit: 100 }).catch(() => null) : null]);
@@ -8063,33 +8420,39 @@ VIEWS.blueprint = async (arg) => {
     if (f.sel && !segs.some(([s]) => s === f.sel)) segs.splice(1, 0, [f.sel, lst.selection?.label || cap(f.sel), lst.total]);
     const nSet = (f.kind ? 1 : 0) + (status ? 1 : 0) + (la ? f.f.length : 0);
     const gapL = la && pg?.gaps?.length ? pg.gaps : null, gapOn = gapL?.find((g) => g.id === f.gap);
-    const tools = lst.counts.all || filtered ? `<div class="bp-tb"><form class="srch bp-q" role="search" data-bp-q>${ic('search')}<input class="inp" type="search" name="q" placeholder="Search this section" aria-label="Search this section" value="${esc(f.q)}" maxlength="200" autocomplete="off"></form>`
+    // The search box holds the active filters as chips (list analysis); its ✕ clears the text, every filter and the gap, and keeps
+    // Open · Dropped · All, the team, the table's axes, the group and the sort.
+    const chips = la && pg ? bpLaChips(pg, f, status, goF) : [], clearTo = goF({ ...f, q: '', kind: '', f: [], gap: '', at: '' }, '');
+    const xtog = la && pg ? bpLaXTog(pg, f, status, goF) : '', xOn = la && pg ? bpLaXOn(pg, f) : false;
+    const tools = lst.counts.all || filtered ? `<div class="bp-tb">${chipSearch({ attrs: 'data-bp-q', label: 'Search this section', value: f.q, chips, clear: `data-bpv="${esc(clearTo)}" data-bp-fk="q"`, more: 'data-bp-fmore', inAttrs: 'data-bp-fk="q"' })}`
       + `<div class="seg bp-seg" role="group" aria-label="Show">${segs.map(([s, l, n]) => `<button type="button" class="${!sumOk && s === (f.sel || 'all') ? 'on' : ''}" aria-pressed="${!sumOk && s === (f.sel || 'all')}" data-bpv="${esc(goF({ ...f, sel: s, at: '' }))}">${esc(l)} <span class="faint">${n}</span></button>`).join('')}</div>`
       + (gapL ? `<button type="button" class="btn sm bp-fbtn${gapOn ? ' warn' : ''}" id="bpGaps" aria-haspopup="menu"${gapOn ? ` aria-label="Gaps, ${esc(gapOn.label)} set"` : ''}>Gaps${gapOn ? ` · ${esc(gapOn.label)}` : ''}</button>` : '')
-      + `<button type="button" class="btn sm bp-fbtn" id="bpFilt" aria-haspopup="dialog"${nSet ? ' aria-label="Filters, ' + nSet + ' set"' : ''}>Filters${nSet ? ` · ${nSet}` : ''}</button>${BP_VIEW.save && BP_LA_TABS.includes(tab) ? '<button type="button" class="btn sm bp-fbtn" id="bpViews" aria-haspopup="dialog">Views</button>' : ''}</div>` : '';
+      + `<button type="button" class="btn sm bp-fbtn" id="bpFilt" aria-haspopup="dialog"${nSet ? ' aria-label="Filters, ' + nSet + ' set"' : ''}>Filters${nSet ? ` · ${nSet}` : ''}</button>${BP_VIEW.save && BP_LA_TABS.includes(tab) ? '<button type="button" class="btn sm bp-fbtn" id="bpViews" aria-haspopup="dialog">Views</button>' : ''}${tab === '2' && refineOk ? '<button type="button" class="btn sm bp-fbtn only-d" id="bpRefine" aria-haspopup="dialog">Refine with coordinator</button>' : ''}${xtog}</div>` : '';
     if (filtered) {
-      // From 1180 px the count table sits right of the list (.bp-la, 7 + 5) and the pager stays under the list; without it the list is full width.
-      const xt = la ? bpLaTable(lst, f, status, goF) : '', laBody = (h) => (xt ? `<div class="bp-la">${xt}<div class="bp-la-main">${h}</div></div>` : h);
-      body = tools + (la ? bpLaWhere(lst, f, status, goF) : '') + laBody(lst.items.length
-        ? `${la ? bpLaList(pid, lst, f, team) : `<div class="bp-c bp-flist">${overline('Matching', lst.total)}${lst.items.map((it) => bpBrowseRow(pid, it, !team)).join('')}</div>`}${bpPager(lst, (c) => goF({ ...f, at: c }))}`
+      // The count table is always above the list at full width (.bp-la, its box for bpXFit); the pager stays under the list.
+      // Without the table, the list's overline carries "N of M" (an empty list keeps that line above its empty state).
+      const xt = la ? bpLaTable(lst, f, status, goF) : '', c0 = la && !xOn ? `<div class="bp-c">${bpLaHead(lst, false, false)}` : '<div class="bp-c">';
+      body = tools + (la ? bpLaNotes(lst, f) : '') + (xOn ? `<div class="bp-la">${xt}</div>` : xt) + (lst.items.length
+        ? `${la ? bpLaList(pid, lst, f, team, xOn) : `<div class="bp-c bp-flist">${overline('Matching', lst.total)}${lst.items.map((it) => bpBrowseRow(pid, it, !team)).join('')}</div>`}${bpPager(lst, (c) => goF({ ...f, at: c }))}`
         : f.sel === 'open' && !status && !f.q && !f.kind && !laSet && lst.counts.all
-          ? `<div class="bp-c">${none('check', 'Nothing open in this section', true, emptyAct(`Show all (${lst.counts.all})`, `data-bpv="${esc(goF({ ...f, sel: 'all', at: '' }))}"`))}</div>`
+          ? `${c0}${none('check', 'Nothing open in this section', true, emptyAct(`Show all (${lst.counts.all})`, `data-bpv="${esc(goF({ ...f, sel: 'all', at: '' }))}"`))}</div>`
           : f.sel === 'open' && !status && !f.q && !f.kind && !laSet
-            ? `<div class="bp-c">${none('note', team ? 'Nothing in this section for this part' : 'Nothing in this section yet', false, team && team !== 'project' && ['2', '4'].includes(tab) ? emptyAct('Ask for a plan', 'data-bp-plan') : '')}</div>`
-            : `<div class="bp-c">${none('search', 'Nothing matches these filters', false, emptyAct('Clear filters', `data-bpv="${esc(go(tab, team))}"`))}</div>`);
+            ? `${c0}${none('note', team ? 'Nothing in this section for this part' : 'Nothing in this section yet', false, team && team !== 'project' && ['2', '4'].includes(tab) ? emptyAct('Ask for a plan', 'data-bp-plan') : '')}</div>`
+            : `${c0}${none('search', 'Nothing matches these filters', false, emptyAct('Clear search and filters', `data-bpv="${esc(clearTo)}" data-bp-fk="q"`))}</div>`);
     } else {
       // An empty part of a team offers the first action there is: ask the coordinator for a plan.
       const first = team && team !== 'project' && ['2', '4'].includes(tab) ? emptyAct('Ask for a plan', 'data-bp-plan') : '';
       body = tools + (r.items.length || (+tab === 6 && mine.plain?.undefined_codes?.length) ? (sumOk ? bpSummary(pid, r.items, kind, dl, rl, team, go) : bpSection(pid, +tab, r.items, kind, mine.plain)) : `<div class="bp-c">${none('note', team ? 'Nothing in this section for this part' : 'Nothing in this section yet', false, first)}</div>`)
         + (r.more ? '<p class="meta bp-none">Showing the first 2 500 items; search or filter to see the rest.</p>' : '');
     }
-    bpFilters = { f, fq, goF, statuses: lst.statuses, la: la && pg ? pg : null };
+    bpFilters = { f, fq, goF, statuses: lst.statuses, la: la && pg ? pg : null, canSave: la && filtered };
+    bpRfShown = filtered ? lst.total : null;
     // Foundation opens the project's information (docs/dashboard-ux.md): vision first, then teams, milestones and its projects.
     // Wide screens: the section on the left, the project and its next milestone in a narrow column on the right that stays in view; the bar stays above both.
     // Narrow screens: one column, the side cards first.
     if (tab === '1') { const side = await bpInfo(pid, sum), main = body.startsWith(tools) ? body.slice(tools.length) : body; body = `${tools}<div class="bp-fnd"><div class="bp-fnd-main">${main}</div><div class="bp-fnd-side">${side.join('')}</div></div>`; }
   }
-  // The team filter sits in the header before Ask for a report; on phones the header keeps only the overflow, so it stays above the body there.
+  // The team filter sits in the header before ⋯; on phones the header keeps only ⋯, so it stays above the body there.
   const teamOpts = `<option value="">All teams</option>${(sum.parts || []).map((p) => `<option value="${esc(p.team.id)}"${p.team.id === team ? ' selected' : ''}>${esc(p.team.name)}</option>`).join('')}<option value="project"${team === 'project' ? ' selected' : ''}>Project level</option>`;
   const teamSel = `<label class="bp-fl"><span class="vlabel">Team</span><select class="sel" data-bp-team aria-label="Team">${teamOpts}</select></label>`;
   const teamSelH = `<select class="sel sm bp-hsel" data-bp-team aria-label="Team">${teamOpts}</select>`;
@@ -8097,18 +8460,19 @@ VIEWS.blueprint = async (arg) => {
   // card is the index (or to Home without a team).
   const secLabel = tab === 'res' ? 'Papers and hypotheses' : tab === 'prop' ? 'Proposals' : tab === 'needs' ? 'Needs you' : tab === 'dropped' ? 'Dropped' : tab === 'mtg' ? 'Meetings' : tab === 'cov' ? 'Coverage' : tab === 'q' ? 'Questions' : bpSent(bpTabName(tab, kind));
   navName(pid, proj.name);
-  // The one visible action is Ask for a report; Export and Start over sit in the overflow (desktop and tablet), and Ask joins them on phones.
+  // The app bar keeps only ⋯: Ask for a report is its first row at every width, then Export and Start over (desktop and tablet).
   const wide = !matchMedia('(max-width: 767.98px)').matches;
-  let askFn, startOverFn;
+  let askFn, startOverFn, refineFn;
   const exportMd = () => download(`/api/projects/${encodeURIComponent(pid)}/export.md`);
   return {
     // Just the section's name.
     t: `${ic('graph')}<span class="ellip">${esc(secLabel)}</span>${blLink('p=' + pid, blN?.active_total, 'tmeta')}`,
-    // A project no team works on has nobody to report: Ask is disabled there (and left out of the phone overflow).
-    a: `${one ? '' : teamSelH}<button type="button" class="btn sm" id="bpAsk"${(sum.parts || []).length ? '' : ' disabled title="No team works on this project"'}>${ic('note')}Ask for a report</button>${moreBtn()}`,
+    // A project no team works on has nobody to report: Ask is left out of ⋯ there.
+    a: `${one ? '' : teamSelH}${moreBtn()}`,
     here: { label: secLabel },
     dbar: { title: secLabel,
-      menu: [wide || !(sum.parts || []).length ? null : { label: 'Ask for a report', icon: 'note', fn: () => askFn($('[data-dbar-more]')) }, wide ? { label: 'Export', icon: 'dl', fn: exportMd } : null, wide ? { label: 'Start over', icon: 'rot', bad: true, fn: () => startOverFn($('[data-dbar-more]')) } : null] },
+      menu: [!(sum.parts || []).length ? null : { label: 'Ask for a report', icon: 'note', fn: () => askFn($('[data-dbar-more]')) }, wide ? { label: 'Export', icon: 'dl', fn: exportMd } : null, wide ? { label: 'Start over', icon: 'rot', bad: true, fn: () => startOverFn($('[data-dbar-more]')) } : null,
+      !wide && tab === '2' && (sum.parts || []).length ? { label: 'Refine with coordinator', icon: 'graph', fn: () => refineFn($('[data-dbar-more]')) } : null] },
     b: `<div class="bp-main">${one ? '' : `<div class="bp-tools only-m">${teamSel}</div>`}${rps.open.map((r) => bpReplanBanner(r, go, tab)).join('')}${body}</div>`,
     after() {
       $$('[data-bp-line]').forEach((s) => (s.onchange = (e) => openD('blueprint', e.target.value, true)));
@@ -8117,8 +8481,11 @@ VIEWS.blueprint = async (arg) => {
       // The workspace's filters keep one milestone or hypothesis in the filter slot (m:<key> or h:<key>); choosing one replaces the other.
       $$('[data-bp-rf]').forEach((s) => (s.onchange = (e) => openD('blueprint', go('res', one ? team0 : team, e.target.value), true)));
       if (bpFilters) {
-        const { f, fq, goF, statuses, la } = bpFilters;
+        const { f, fq, goF, statuses, la, canSave } = bpFilters;
         const qf = $('[data-bp-q]', $('#dB'));
+        csrchFit(qf);
+        // "+k" (the chips folded past two lines) opens Filters, where every filter is.
+        const fm = $('[data-bp-fmore]', $('#dB')); if (fm) fm.onclick = () => $('#bpFilt')?.click();
         if (qf) qf.onsubmit = (e) => { e.preventDefault(); openD('blueprint', goF({ ...f, q: qf.q.value.trim(), at: '' }), true); };
         // Paging keeps the route (Back returns to this page) and moves focus to the first row of the new page.
         $$('[data-bp-page]', $('#dB')).forEach((b) => (b.onclick = async () => { await openD('blueprint', b.dataset.bpPage, true); $('#dB .bp-flist .lrow')?.focus(); }));
@@ -8144,11 +8511,11 @@ VIEWS.blueprint = async (arg) => {
           const laEl = $('#dB .bp-la');
           BP_XFIT = laEl ? () => bpXFit(laEl, la.cross, (v) => bpLaTable(la, f, status, goF, v), bindX) : null;
           BP_XFIT?.();
-          const sv = $('[data-bp-save]', $('#dB'));
-          if (sv) sv.onclick = () => BP_VIEW.save?.({ pid, section: tab, team, state: { q: f.q, kind: f.kind, sel: f.sel, status, f: f.f, gap: f.gap, x: f.x, g: f.g, s: f.s }, anchor: sv });
         }
+        // Save view is the first row of Views, only while the view differs from the default (a filtered list).
+        const save = canSave && BP_VIEW.save ? (anchor) => BP_VIEW.save({ pid, section: tab, team, state: { q: f.q, kind: f.kind, sel: f.sel, status, f: f.f, gap: f.gap, x: f.x, g: f.g, s: f.s }, anchor }) : null;
         const vw = $('#bpViews');
-        if (vw) vw.onclick = () => bpViewsSheet({ pid, section: tab, anchor: vw });
+        if (vw) vw.onclick = () => bpViewsSheet({ pid, section: tab, anchor: vw, save });
         const fb = $('#bpFilt');
         if (fb) fb.onclick = () => fbSheet({ title: 'Filters', anchor: fb, label: 'Show',
           fields: `<label class="fld"><span class="vlabel">Kind</span><select class="sel" id="bpFk"><option value="">Every kind</option>${bpKindOpts(tab, kind).map(([v, l]) => `<option value="${esc(v)}"${v === f.kind ? ' selected' : ''}>${esc(l)}</option>`).join('')}</select></label>`
@@ -8171,12 +8538,42 @@ VIEWS.blueprint = async (arg) => {
       askFn = (anchor) => fbSheet({ title: 'Ask for a status report', anchor, label: 'Ask',
         fields: `<p class="meta">Every running team of ${esc(proj.name)} reports for its own part.</p>${fbArea('bpRq', 'What should the reports cover? (optional)', 500, 2)}`,
         onGo: async (sh) => { const r = await post(P + '/report-request', { note: fbVal(sh, 'bpRq') || undefined }); toast(`Asked ${plural(r.teams.length, 'team')}`); openD('blueprint', arg, true); } });
-      $('#bpAsk').onclick = (e) => askFn(e.currentTarget);
       $$('[data-bp-def]', $('#dB')).forEach((b) => (b.onclick = () => bpDefine(pid, b.dataset.bpDef, b)));
       $$('[data-bp-qcopy]', $('#dB')).forEach((b) => (b.onclick = () => bpQCopy(b)));
       $$('[data-bp-apply]', $('#dB')).forEach((b) => (b.onclick = () => run(async () => { const r = await post(`/proposals/${encodeURIComponent(b.dataset.bpApply)}/apply`, {}); toast(r.proposal.status === 'applied' ? 'Applied' : `Not applied: ${r.proposal.status}`, r.proposal.status !== 'applied'); openD('blueprint', arg, true); })));
       $$('[data-bp-rej]', $('#dB')).forEach((b) => (b.onclick = () => fbSheet({ title: b.dataset.bpRejT || 'Reject the proposal', anchor: b, label: b.dataset.bpRejL || 'Reject', tone: 'bad', fields: fbArea('bpRj', 'Note for the agent (optional)', 2000),
         onGo: async (sh) => { await post(`/proposals/${encodeURIComponent(b.dataset.bpRej)}/reject`, { note: fbVal(sh, 'bpRj') || null }); toast(b.dataset.bpRejL ? 'Sent back' : 'Rejected'); openD('blueprint', arg, true); } })));
+      // Refine with coordinator (docs/dashboard-ux.md): what should change, which requirements (frozen as keys now), the checks.
+      refineFn = (anchor) => {
+        const parts = sum.parts || [], t0 = team && team !== 'project' ? team : parts.length === 1 ? parts[0].team.id : '', n = bpRfShown;
+        fbSheet({ title: 'Refine with coordinator', anchor, label: 'Send to coordinator',
+          fields: `<p class="meta">The coordinator reads your note and proposes changes. You review each one and apply the ones you keep.</p>`
+            + fbArea('bpRfN', 'What should change', 2000, 4)
+            + (t0 ? '' : `<label class="fld"><span class="vlabel">Coordinator of</span><select class="sel" id="bpRfT">${parts.map((x) => `<option value="${esc(x.team.id)}">${esc(x.team.name)}</option>`).join('')}</select></label>`)
+            + `<fieldset class="rp-kinds"><legend class="vlabel">Which requirements</legend><label class="chk-row"><input type="radio" name="bpRfS" value="shown" checked>The ones shown${n != null ? ` (${n})` : ''}</label><label class="chk-row"><input type="radio" name="bpRfS" value="all">All of them</label></fieldset>`
+            + `<fieldset class="rp-kinds"><legend class="vlabel">Checks</legend>${[['consistency', 'Consistency', 1], ['duplicates', 'Duplicates', 1], ['missing_ac', 'Missing acceptance criteria', 0]].map(([k, l, on]) => `<label class="chk-row"><input type="checkbox" data-bprfc="${k}"${on ? ' checked' : ''}>${l}</label>`).join('')}</fieldset>`,
+          onGo: async (sh) => {
+            const note = fbVal(sh, 'bpRfN');
+            if (!note) return ['Say what should change.', 'bpRfN'];
+            const all = $('input[name="bpRfS"]:checked', sh).value === 'all', tm = t0 || $('#bpRfT', sh).value;
+            const keys = await bpRfKeys(pid, all ? { section: '2' } : bpFilters?.fq || { section: '2', team });
+            if (!keys.length) return 'No requirement is shown to send.';
+            const checks = Object.fromEntries($$('[data-bprfc]', sh).map((c) => [c.dataset.bprfc, c.checked]));
+            await post(`/teams/${encodeURIComponent(tm)}/plan-request`, { note, scope: keys, checks });
+            toast(`Sent to the coordinator · ${plural(keys.length, 'requirement')}`); openD('blueprint', arg, true);
+          } });
+      };
+      const rfb = $('#bpRefine'); if (rfb) rfb.onclick = () => refineFn(rfb);
+      // Review of a refine proposal: ticks follow what the hub says each change needs; Apply sends the ticked ones.
+      $$('[data-rf]', $('#dB')).forEach((box) => {
+        const id = box.dataset.rf, needs = bpRfNeeds.get(id), btn = $('[data-bp-rfapply]', box);
+        const sync = () => { const sel = bpRfSel.get(id); $$('[data-rfk]', box).forEach((c) => (c.checked = sel.has(+c.dataset.rfk))); $('[data-rflabel]', btn).textContent = `Apply ${sel.size} of ${btn.dataset.rfn}`; btn.disabled = !sel.size; };
+        $$('[data-rfk]', box).forEach((c) => (c.onchange = () => { bpRfSel.set(id, bpRfToggle(bpRfSel.get(id), needs, +c.dataset.rfk, c.checked)); sync(); }));
+        btn.onclick = () => run(async () => {
+          const ops = [...bpRfSel.get(id)].sort((a, b) => a - b).map((i) => i + 1), r = await post(`/proposals/${encodeURIComponent(id)}/apply`, { ops });
+          bpRfSel.delete(id); toast(r.proposal.status === 'applied' ? `Applied ${ops.length} of ${btn.dataset.rfn}` : `Not applied: ${r.proposal.status}`, r.proposal.status !== 'applied'); openD('blueprint', arg, true);
+        });
+      });
       // Start over: the operator picks the scope and the kinds; a snapshot is saved first.
       startOverFn = (anchor) => fbSheet({ title: 'Start over', anchor, label: 'Start over', tone: 'bad',
         fields: `<p class="hint">The chosen kinds go back to their first status and are marked to be rebuilt. Nothing is deleted: keys, links, task references and history stay. A snapshot is saved first, and cancelling the start over restores it. The coordinator rebuilds the part and submits it once for your review.</p>`
@@ -8690,15 +9087,18 @@ const backlogBtns = (teamId, k) => `<span class="tk-btns">${blPpBtn(teamId, k)}`
   + `<button type="button" class="btn sm ok" data-bl="accept|${esc(teamId)}|${esc(k.id)}" aria-label="Accept ${esc(k.title)}">${ic('check')}Accept</button></span>`;
 /* Task tags (docs/dashboard-ux.md, Tags): what the creator filed a task under, at most 8. On a list row up to 3 chips sit
    in the trailing area from 768 px (the rest as "+n"); on phones "#docs #ux" leads the meta line. A row of filter chips
-   (.dl-cats, as in Directives) narrows a list to one tag: data-ktag="<list>|<tag>", "" for all. */
+   (.dl-cats) narrows Home's Backlog card to one tag: data-ktag="home|<tag>", "" for all (Work → Backlog and a team's tasks pick the tag in Filters). */
 const tkTagTrail = (k) => { const g = k.tags || []; return g.length ? `<span class="tk-tags only-d">${g.slice(0, 3).map((x) => `<span class="tag txt">#${esc(x)}</span>`).join('')}${g.length > 3 ? `<span class="tag txt" title="${esc(g.slice(3).map((x) => '#' + x).join(' '))}">+${g.length - 3}</span>` : ''}</span>` : ''; };
 const tkTagMeta = (k) => ((k.tags || []).length ? `<span class="only-m">${esc(k.tags.map((x) => '#' + x).join(' '))} · </span>` : '');
 const tagCounts = (L) => { const m = new Map(); for (const k of L) for (const g of k.tags || []) m.set(g, (m.get(g) || 0) + 1); return [...m].map(([tag, n]) => ({ tag, n })).sort((a, b) => b.n - a.n || a.tag.localeCompare(b.tag)); };
-function tagChips(list, tags, cur) {
+function tagChips(list, tags, cur, card) {
   if (!tags.length && !cur) return '';
-  const L = cur && !tags.some((g) => g.tag === cur) ? [...tags, { tag: cur, n: 0 }] : tags;
+  const top = card ? tags.slice(0, 7) : tags; // Home's card: All and at most 7 tags (a project's list is at most 7)
+  // A picked tag outside them stays in the row: in the card it takes the last of the 7 places, with its count and display name.
+  const pick = cur && !top.some((g) => g.tag === cur) ? tags.find((g) => g.tag === cur) || { tag: cur, n: 0 } : null;
+  const L = !pick ? top : card ? [...top.slice(0, 6), pick] : [...top, pick];
   const chip = (v, label, n) => `<button type="button" class="btn sm${cur === v ? ' on' : ''}" data-ktag="${esc(list)}|${esc(v)}" aria-pressed="${cur === v}">${esc(label)}${n === undefined ? '' : ` <span class="fcount">${n}</span>`}</button>`;
-  return `<div class="dl-cats tk-tagf" role="group" aria-label="Filter by tag">${chip('', 'All tags')}${L.map((g) => chip(g.tag, '#' + g.tag, g.n)).join('')}</div>`;
+  return `<div class="dl-cats tk-tagf${card ? ' tg-card' : ''}" role="group" aria-label="Filter by tag">${chip('', card ? 'All' : 'All tags')}${L.map((g) => chip(g.tag, g.name || '#' + g.tag, g.n)).join('')}</div>`;
 }
 /* The tag filter of Home's Backlog card (kept while the console is open); Work → Backlog carries its own in the route. */
 const BL_UI = { tag: '' };
@@ -8706,8 +9106,6 @@ const blQ = () => (BL_UI.tag ? '?tag=' + encodeURIComponent(BL_UI.tag) : '');
 function tagPick(v) {
   const i = v.lastIndexOf('|'), list = v.slice(0, i), tag = v.slice(i + 1);
   if (list === 'home') { BL_UI.tag = tag; return run(async () => { S.bl = await api('/tasks/backlog' + blQ()); renderBacklog(); }); }
-  if (list === 'backlog') return openD('backlog', blArg({ ...blArgOf(DR.type === 'backlog' ? DR.arg : ''), t: tag }), true);
-  if (list.startsWith('tasks:')) return openD('tasks', list.slice(6) + (tag ? '|' + tag : ''), true);
 }
 /* A backlog task as a list row with its action line (Home's Backlog card, Work → Backlog, a team's Backlog tab). The meta line names the
    team and refs; In short (short_summary, or the hub's cut of the brief) follows as plain text: whole when it fits four lines, else
@@ -8765,63 +9163,77 @@ function renderBacklog() {
   const go = { 'data-go': 'backlog', ...(tag ? { 'data-arg': 't=' + tag } : {}) };
   const allBtn = $('#blCard .hd [data-go]'); if (allBtn) { if (tag) allBtn.dataset.arg = 't=' + tag; else delete allBtn.dataset.arg; }
   const team = (k) => S.teams.find((t) => t.id === k.team_id)?.name || k.team_name;
-  htmlIf($('#blL'), tagChips('home', S.bl?.tags || [], tag) + L.slice(0, BL_N).map((k) => backlogRow(k, team(k), blNoDesc(k, team(k)))).join('')
+  htmlIf($('#blL'), tagChips('home', S.bl?.tags || [], tag, true) + L.slice(0, BL_N).map((k) => backlogRow(k, team(k), blNoDesc(k, team(k)))).join('')
     + (n > BL_N ? row({ one: true, title: `All ${n} in the backlog`, chev: true, attrs: go }) : '')
-    + (tag && !L.length && !R.length ? none('note', `Nothing tagged #${tag}`, false, emptyAct('Show all tags', 'data-ktag="home|"')) : '')
+    + (tag && !L.length && !R.length ? none('note', `Nothing tagged ${esc((S.bl?.tags || []).find((g) => g.tag === tag)?.name || '#' + tag)}`, false, emptyAct('Show all tags', 'data-ktag="home|"')) : '')
     + (R.length ? overline(RELAYED_HEAD, R.length) + R.slice(0, BL_N).map((k) => relayedRow(k, team(k))).join('')
       + (R.length > BL_N ? row({ one: true, title: `All ${R.length} relayed`, chev: true, attrs: go }) : '') : ''));
   gistFit($('#blL'));
 }
 /* Work → Backlog's route arg (docs/dashboard-ux.md, Backlog): l=postponed (the active list is the default), p=<project id>,
-   team=<team id> (the team page's "Backlog · n") and t=<tag>, joined by &. The hub applies them together before it pages and counts. */
-const blArgOf = (a) => Object.fromEntries(String(a || '').split('&').map((x) => /^([lpt]|team|from)=(.*)$/.exec(x)).filter(Boolean).map((m) => [m[1], m[2]]));
-const blArg = (f) => [f.l === 'postponed' ? 'l=postponed' : '', f.p ? 'p=' + f.p : '', f.team ? 'team=' + f.team : '', f.t ? 't=' + f.t : '', f.from === 'needs' ? 'from=needs' : ''].filter(Boolean).join('&');
+   team=<team id> (the team page's "Backlog · n"), t=<tag> and q=<search, encoded>, joined by &. The hub applies them together before it pages and counts. */
+const blDec = (v) => { try { return decodeURIComponent(v); } catch { return ''; } };
+const blArgOf = (a) => Object.fromEntries(String(a || '').split('&').map((x) => /^([lptq]|team|from)=(.*)$/.exec(x)).filter(Boolean).map((m) => [m[1], m[1] === 'q' ? blDec(m[2]) : m[2]]));
+const blArg = (f) => [f.l === 'postponed' ? 'l=postponed' : '', f.p ? 'p=' + f.p : '', f.team ? 'team=' + f.team : '', f.t ? 't=' + f.t : '', f.q ? 'q=' + encodeURIComponent(f.q) : '', f.from === 'needs' ? 'from=needs' : ''].filter(Boolean).join('&');
 /* "Backlog · n" in a team or project header (docs/dashboard-ux.md): the active backlog in the scope of the list it opens
    (SPEC-BLUEPRINT-05), hidden at 0. */
 const blLink = (arg, n, cls = '', sep = '') => (n ? `${sep}<a href="#backlog/${esc(arg)}" class="bl-link${cls ? ' ' + cls : ''}" data-bl-open="${esc(arg)}">Backlog · ${n}</a>` : '');
 document.addEventListener('click', async (e) => { if (!e.target.closest?.('[data-mu-ny-retry]')) return; await muLoadCommon(); await muDraw(false); });
 document.addEventListener('click', (e) => { const n = e.target.closest?.('[data-ny-go]'); if (n && VIEWS.needs) { e.preventDefault(); openD('needs', n.dataset.nyGo); } });
 document.addEventListener('click', (e) => { const a = e.target.closest?.('[data-bl-open]'); if (a) { e.preventDefault(); openD('backlog', a.dataset.blOpen); } });
-const blQs = (f, cursor) => { const q = new URLSearchParams(); if (f.l === 'postponed') q.set('list', 'postponed'); if (f.p) q.set('project', f.p); if (f.team) q.set('team', f.team); if (f.t) q.set('tag', f.t); if (cursor) q.set('cursor', cursor); const s = String(q); return s ? '?' + s : ''; };
+const blQs = (f, cursor) => { const q = new URLSearchParams(); if (f.l === 'postponed') q.set('list', 'postponed'); if (f.p) q.set('project', f.p); if (f.team) q.set('team', f.team); if (f.t) q.set('tag', f.t); if (f.q) q.set('q', f.q); if (cursor) q.set('cursor', cursor); const s = String(q); return s ? '?' + s : ''; };
 VIEWS.backlog = async (arg) => {
-  const f = blArgOf(arg), pp = f.l === 'postponed', tag = f.t || '', filtered = !!(f.p || f.team || tag);
+  const f = blArgOf(arg), pp = f.l === 'postponed', tag = f.t || '', filtered = !!(f.p || f.team || tag || f.q);
   const r = await api('/tasks/backlog' + blQs(f)), acc = [...r.tasks]; let cursor = r.next_cursor;
   const tn = (k) => S.teams.find((t) => t.id === k.team_id)?.name || k.team_name;
   // Grouped by team, oldest first within each; Show more fetches the next page and draws the groups again.
   const groupsH = (L) => { const by = new Map(); for (const k of L) { if (!by.has(k.team_id)) by.set(k.team_id, []); by.get(k.team_id).push(k); }
     return [...by].map(([tid, G]) => ({ tid, name: tn(G[0]), G })).sort((a, b) => a.name.localeCompare(b.name))
       .map((g) => overline(g.name, g.G.length, `<button type="button" class="btn ghost sm ml-auto" data-tasks="${esc(g.tid)}|backlog">Team tasks</button>`) + g.G.map((k) => backlogRow(k, '', blNoDesc(k, ''))).join('')).join(''); };
-  const shownH = (n) => (r.total > n ? `Showing the oldest ${n} of ${r.total}.` : '');
+  const shownH = (n) => `<b>${n}</b> of ${r.total}`;
   const R = r.relayed || [];
   const relayed = R.length ? sec(`${esc(RELAYED_HEAD)} · ${R.length}`, `<p class="meta">Opened at once in the last ${plural(r.relayed_days, 'day')}; nobody holds them yet. Send one back if you did not ask for it.</p><div class="bl-list">${R.map((k) => relayedRow(k, tn(k))).join('')}</div>`) : '';
   const pname = f.p ? r.project_name || r.projects.find((x) => x.id === f.p)?.name || 'Unknown project' : '';
   const tname = f.team ? S.teams.find((t) => t.id === f.team)?.name || r.team_name || 'Unknown team' : '';
   const segB = (v, l, n) => `<button type="button" data-v="${v}" class="${(pp ? 'postponed' : 'active') === v ? 'on' : ''}" aria-pressed="${(pp ? 'postponed' : 'active') === v}">${l} <span class="tabn">${n}</span></button>`;
-  const tools = vtools(`<div class="seg" id="blSeg" role="group" aria-label="Backlog list">${segB('active', 'Active', r.active_total)}${segB('postponed', 'Postponed', r.postponed_total)}</div>${filterBtn('blF', (f.p ? 1 : 0) + (f.team ? 1 : 0))}`);
-  const empty = filtered ? none('note', pp ? 'No postponed task matches these filters' : 'No backlog task matches these filters', false, emptyAct('Clear filters', 'id="blClear"'))
+  /* One toolbar row (docs/dashboard-ux.md, Backlog): the team, project and tag as chips in the search box, the list, then
+     Filters. The ✕ goes back to the default (this list, no filter, no search); a default is never a chip. */
+  // A tag shows by its display name where the project's tag list names it (Project settings, Tags), else as #tag.
+  const tagLabel = tag ? (r.tags || []).find((g) => g.tag === tag)?.name || '#' + tag : '';
+  const go = (nf) => `data-cs-nav="backlog|${esc(blArg(nf))}"`, clearTo = go({ l: f.l, from: f.from });
+  const chips = [f.team ? { label: tname, name: `Remove team ${tname}`, attrs: go({ ...f, team: '' }) } : null,
+    f.p ? { label: pname, name: `Remove project ${pname}`, attrs: go({ ...f, p: '' }) } : null,
+    tag ? { label: tagLabel, name: `Remove tag ${tagLabel}`, attrs: go({ ...f, t: '' }) } : null].filter(Boolean);
+  const tools = `<div class="ltb">${chipSearch({ attrs: 'id="blQ"', label: 'Search the backlog', value: f.q, chips, clear: clearTo, more: 'data-cs-filt="blF"' })}`
+    + `<div class="seg" id="blSeg" role="group" aria-label="Backlog list">${segB('active', 'Active', r.active_total)}${segB('postponed', 'Postponed', r.postponed_total)}</div>${filterBtn('blF', chips.length)}</div>`;
+  const empty = filtered ? none('note', pp ? 'No postponed task matches these filters' : 'No backlog task matches these filters', false, emptyAct('Clear search and filters', clearTo))
     : pp ? none('clock', 'Nothing postponed', false) + '<p class="meta bl-hint">Postpone sets a backlog task aside without discarding it; Return to active brings it back.</p>' : none('note', 'No tasks in the backlog');
   return {
     t: `${ic('note')}Backlog <span class="n">${r.active_total}</span>`,
-    here: { label: 'Backlog', meta: [pp ? 'Postponed' : '', tname, pname, tag ? '#' + tag : '', r.total ? `${r.total} ${pp ? 'postponed' : 'waiting'}` : pp ? 'Nothing postponed' : 'Nothing waiting', R.length ? `${R.length} relayed` : ''].filter(Boolean).join(' · ') },
+    here: { label: 'Backlog', meta: [pp ? 'Postponed' : '', tname, pname, tagLabel, f.q ? `“${f.q}”` : '', r.total ? `${r.total} ${pp ? 'postponed' : 'waiting'}` : pp ? 'Nothing postponed' : 'Nothing waiting', R.length ? `${R.length} relayed` : ''].filter(Boolean).join(' · ') },
     dbar: { title: 'Backlog' },
-    b: tools + (f.team ? `<p class="meta bl-proj">Team: <b>${esc(tname)}</b> <button type="button" class="btn ghost sm" id="blAllTeams">All teams</button></p>` : '') + (f.p ? `<p class="meta bl-proj">Project: <b>${esc(pname)}</b></p>` : '') + tagChips('backlog', r.tags || [], tag)
-      + (r.total ? `<section class="sec bl-list"><div id="blGroups">${groupsH(acc)}</div><p class="meta" id="blShown">${shownH(acc.length)}</p>`
+    // The list's overline: "WAITING · 50 of 112 · Oldest first" (the backlog has one order), above every team group.
+    b: tools
+      + (r.total ? `<section class="sec bl-list">${listOverline([pp ? 'Postponed' : 'Waiting', lovN(acc.length, r.total, 'blShown'), 'Oldest first'])}<div id="blGroups">${groupsH(acc)}</div>`
         + `<button type="button" class="btn" id="blMore"${cursor ? '' : ' hidden'}>Show more</button></section>` : R.length && !filtered && !pp ? '' : empty) + relayed,
     after() {
-      gistFit($('#dB'));
+      gistFit($('#dB')); csrchFit($('#blQ'));
+      $('#blQ').onsubmit = async (e) => { e.preventDefault(); await openD('backlog', blArg({ ...f, q: $('#blQ').q.value.trim() }), true); $('#dB .csrch-in')?.focus(); };
       $$('#blSeg button').forEach((b) => (b.onclick = () => openD('backlog', blArg({ ...f, l: b.dataset.v }), true)));
+      // Filters holds every picker: the team, the project and the tag, each with what the list holds.
       $('#blF').onclick = (e) => {
         const P = r.projects.some((x) => x.id === f.p) || !f.p ? r.projects : [...r.projects, { id: f.p, name: pname, n: 0 }];
-        const sh = openSheet({ title: 'Filter the backlog', anchor: e.currentTarget, html: `<div class="sheet-form">${selField('blProj', 'Project', [['', 'All projects'], ...P.map((x) => [x.id, `${x.name} · ${x.n}`])], f.p || '')}</div>` });
-        $('#blProj', sh).onchange = () => { const p = $('#blProj', sh).value; closeSheet(); openD('backlog', blArg({ ...f, p }), true); };
+        const T = [...S.teams].sort((a, b) => a.name.localeCompare(b.name)), TT = T.some((t) => t.id === f.team) || !f.team ? T : [...T, { id: f.team, name: tname }];
+        const G = r.tags || [], GG = G.some((g) => g.tag === tag) || !tag ? G : [...G, { tag, n: 0 }];
+        const sh = openSheet({ title: 'Filter the backlog', anchor: e.currentTarget, html: `<div class="sheet-form">${selField('blTeam', 'Team', [['', 'All teams'], ...TT.map((t) => [t.id, t.name])], f.team || '')}`
+          + `${selField('blProj', 'Project', [['', 'All projects'], ...P.map((x) => [x.id, `${x.name} · ${x.n}`])], f.p || '')}${selField('blTag', 'Tag', [['', 'All tags'], ...GG.map((g) => [g.tag, `${g.name || '#' + g.tag} · ${g.n}`])], tag)}</div>` });
+        $$('select', sh).forEach((x) => (x.onchange = () => { const nf = { ...f, team: $('#blTeam', sh).value, p: $('#blProj', sh).value, t: $('#blTag', sh).value }; closeSheet(); openD('backlog', blArg(nf), true); }));
       };
-      const allT = $('#blAllTeams'); if (allT) allT.onclick = () => openD('backlog', blArg({ ...f, team: '' }), true);
-      const clear = $('#blClear'); if (clear) clear.onclick = () => openD('backlog', blArg({ l: f.l }), true);
       const more = $('#blMore');
       if (more) more.onclick = () => run(async () => {
         more.disabled = true;
         try { const n = await api('/tasks/backlog' + blQs(f, cursor)); acc.push(...n.tasks); cursor = n.next_cursor; } finally { more.disabled = false; }
-        $('#blGroups').innerHTML = groupsH(acc); $('#blShown').textContent = shownH(acc.length); more.hidden = !cursor; gistFit($('#blGroups'));
+        $('#blGroups').innerHTML = groupsH(acc); $('#blShown').innerHTML = shownH(acc.length); more.hidden = !cursor; gistFit($('#blGroups'));
       });
     },
   };
@@ -8936,7 +9348,7 @@ VIEWS.dec = async (id) => {
   const relayMeta = d.relay_state === 'pending' ? `Relayed by ${relayer} from ${d.relayed_source}, ${dt(d.relayed_at)} · not confirmed yet`
     : d.relay_state === 'confirmed' ? `Relayed by ${relayer} from ${d.relayed_source}, ${dt(d.relayed_at)} · confirmed by ${d.answered_by_name || 'you'}, ${dt(d.relay_settled_at)}`
     : d.relay_state === 'overturned' ? `You overturned the answer ${relayer} relayed from ${d.relayed_source} (${relayedLine}), ${dt(d.relay_settled_at)}` : '';
-  const answeredBy = d.relay_state === 'pending' ? '' : d.answered_at ? `${d.status === 'answered' ? 'Answered' : 'Closed'} by ${d.answered_by_name || 'the operator'}, ${dt(d.answered_at)}` : '';
+  const answeredBy = d.relay_state === 'pending' ? '' : d.answered_at ? `${d.status === 'answered' ? 'Answered' : 'Closed'} by ${d.answered_by_name || 'the operator'}, ${dt(d.answered_at)}${d.status === 'answered' && d.delivered_at ? ` · Reached ${d.agent_label || 'the coordinator'} at ${atTime(d.delivered_at)}` : ''}` : '';
   const relayActs = decRelayPending(d) ? `<div class="dc-relay-acts"><button type="button" class="btn pri" id="dcConfirm">${ic('check')}Confirm the answer</button><button type="button" class="btn" id="dcOverturn">${ic('rot')}Overturn…</button></div>` : '';
   const settled = open ? '' : sec(d.status === 'answered' ? (decRelayPending(d) ? 'Relayed answer' : 'Decision') : (DEC_ST[d.status] || [d.status])[0],
     `${d.status === 'answered' ? `<p class="dc-answer">${esc(decAnswer(d))}</p>` : d.answer_text ? prose(d.answer_text) : ''}${relayMeta ? `<p class="meta dc-relay">${esc(relayMeta)}</p>` : ''}<p class="meta">${esc([answeredBy, d.log_revision ? 'copied to the vault note' : ''].filter(Boolean).join(' · '))}</p>${relayActs}`);
@@ -9115,7 +9527,7 @@ async function dirMergeSheet(group, anchor, onDone) {
 const DIR_KINDS = ['hub', 'project', 'team', 'role', 'agent'];
 const DIR_KIND_LABEL = { hub: 'All agents', project: 'Project', team: 'Team', role: 'Role', agent: 'Agent' };
 const DIR_READS = [['', 'Any read state'], ['behind', 'Not read by everyone'], ['old', 'Read an old version'], ['all', 'Read by everyone'], ['new', 'Not reviewed']];
-const DIR_GROUPS = [['', 'Group by scope'], ['cat', 'Group by category'], ['none', 'No grouping']];
+const DIR_GROUPS = [['', 'Grouped by scope'], ['cat', 'Grouped by category'], ['none', 'Not grouped']];
 /* The hub's fixed category list (docs/directives.md#categories-and-tags); "none" filters directives without one. */
 const DIR_CATS = [['access', 'Access & security'], ['communication', 'Communication'], ['tokens', 'Token economy'], ['reporting', 'Reporting'], ['sources', 'Sources & quality'], ['process', 'Process & workflow'], ['tooling', 'Tooling']];
 const DIR_CAT_LABEL = Object.fromEntries(DIR_CATS);
@@ -9167,13 +9579,13 @@ const dirMatch = (d, f) => {
 const dirCatKey = (d) => d.category || 'none';
 /* Category shown on a row: the operator's, or what the agent proposed while the rule waits for review. */
 const dirCatText = (d) => d.category ? DIR_CAT_LABEL[d.category] : d.status === 'active' && !d.reviewed_at && d.proposed_category ? `Proposed: ${DIR_CAT_LABEL[d.proposed_category]}` : '';
-/* Category chips over the list: All, each category and No category, counted under the other filters. */
-function dirCatChips(f) {
-  const base = DIR_UI.data.directives.filter((d) => dirMatch(d, { ...f, c: '' }));
-  const chip = (k, label, n) => `<button type="button" class="btn sm${f.c === k ? ' on' : ''}" data-dcat="${k}" aria-pressed="${f.c === k}">${esc(label)} <span class="fcount">${n}</span></button>`;
-  const tag = f.t ? `<button type="button" class="btn sm on" data-dtagclr aria-label="Remove the tag filter ${esc(f.t)}">#${esc(f.t)}${ic('x')}</button>` : '';
-  return `<div class="dl-cats" role="group" aria-label="Category">${chip('', 'All', base.length)}${[...DIR_CATS, ['none', 'No category']].map(([k, l]) => chip(k, l, base.filter((d) => dirCatKey(d) === k).length)).join('')}${tag}</div>`;
-}
+/* The active filters as chips in the search box, in this order: category, scope, read state, tag (a default is never a chip). */
+const dirChips = (f) => [
+  f.c && { label: f.c === 'none' ? 'No category' : DIR_CAT_LABEL[f.c], name: `Remove the category filter ${f.c === 'none' ? 'No category' : DIR_CAT_LABEL[f.c]}`, attrs: 'data-dl-rm="c"' },
+  f.sc && { label: `Scope: ${DIR_KIND_LABEL[f.sc]}`, name: `Remove the scope filter ${DIR_KIND_LABEL[f.sc]}`, attrs: 'data-dl-rm="sc"' },
+  f.rd && { label: DIR_READS.find(([k]) => k === f.rd)[1], name: `Remove the read state filter ${DIR_READS.find(([k]) => k === f.rd)[1]}`, attrs: 'data-dl-rm="rd"' },
+  f.t && { label: '#' + f.t, name: `Remove the tag filter ${f.t}`, attrs: 'data-dl-rm="t"' },
+].filter(Boolean);
 /* "7/9 read": muted when everyone read the current version, a warn pill when some lag (the team page's "not read" is warn too). */
 const dirReadPill = (d) => !d.agents ? '<span class="faint">No agents</span>'
   : d.current >= d.agents ? `<span class="dl-n">${d.current}/${d.agents} read</span>` : pill(`${d.current}/${d.agents} read`, 'warn');
@@ -9203,7 +9615,7 @@ const dirGroups = (f, L) => (f.g === 'cat'
 /* Matching directives in display order: by group (unless ungrouped), not reviewed first, then the hub's order. */
 const dirOrdered = (f) => { const L = DIR_UI.data.directives.filter((d) => dirMatch(d, f)).sort((a, b) => !!a.reviewed_at - !!b.reviewed_at);
   return f.g === 'none' ? L : dirGroups(f, L).flatMap(([, , g]) => g); };
-/* The list pane: summary line with select-all, folding groups, and the bulk bar while rows are ticked. */
+/* The list pane: the overline (Select all shown, the count, Group by), folding groups, and the bulk bar while rows are ticked. */
 function dirListHtml(f) {
   const D = DIR_UI.data, all = D.directives, live = f.st === 'active';
   const L = dirOrdered(f);
@@ -9211,11 +9623,15 @@ function dirListHtml(f) {
   const shown = new Set(L.map((d) => d.id)); for (const id of DIR_UI.checked) if (!shown.has(id)) DIR_UI.checked.delete(id);
   const unrev = L.filter((d) => live && !d.reviewed_at).length, behind = L.filter((d) => live && d.current < d.agents).length;
   const ticked = L.filter((d) => DIR_UI.checked.has(d.id)).length;
-  const sum = `<div class="dl-sum">${live && L.length ? `<input type="checkbox" class="dl-chk" id="dlAll" aria-label="Select all shown"${ticked && ticked === L.length ? ' checked' : ''}>` : ''}
-    <span class="meta"><b>${L.length}</b> of ${all.length}${unrev ? ` · <span class="info-t">${unrev} not reviewed</span>` : ''}${behind ? ` · <span class="warn-t">${behind} not read by everyone</span>` : ''}</span></div>`;
+  // Select all shown ticks only the rows shown and sits outside the live count.
+  const sum = all.length ? listOverline([
+    live && L.length ? { html: `<input type="checkbox" class="dl-chk" id="dlAll" aria-label="Select all shown" title="Select all shown"${ticked && ticked === L.length ? ' checked' : ''}>` } : '',
+    { html: `<span class="lov-n" id="dlShown" tabindex="-1" aria-live="polite"><b>${L.length}</b> of ${all.length}${unrev ? ` · <span class="info-t">${unrev} not reviewed</span>` : ''}${behind ? ` · <span class="warn-t">${behind} not read by everyone</span>` : ''}</span>` },
+    L.length ? { name: 'Group by', attrs: 'id="dlG"', options: DIR_GROUPS, value: f.g } : '',
+  ]) : '';
   let body;
   const narrowed = ['q', 'sc', 'rd', 'c', 't'].some((k) => f[k]);
-  if (!L.length) body = none('sl', all.length ? 'No directive matches these filters' : f.st === 'retired' ? 'No retired directives' : 'No directives yet', false, all.length && narrowed ? emptyAct('Clear filters', 'data-dclr') : '');
+  if (!L.length) body = none('sl', all.length ? 'No directive matches these filters' : f.st === 'retired' ? 'No retired directives' : 'No directives yet', false, all.length && narrowed ? emptyAct('Clear search and filters', 'data-dclr') : '');
   else if (f.g === 'none') body = L.map((d) => dirRow(d, f)).join('');
   else body = dirGroups(f, L).map(([k, label, g]) => {
     const open = !DIR_UI.folded.has(k);
@@ -9224,16 +9640,15 @@ function dirListHtml(f) {
   const n = DIR_UI.checked.size, canRev = [...DIR_UI.checked].some((id) => all.find((d) => d.id === id && !d.reviewed_at));
   const bulk = n ? `<div class="dl-bulk" role="region" aria-label="Selected directives"><span class="dl-bn">${n} selected</span>
     <button type="button" class="btn sm" id="dlRev"${canRev ? '' : ' disabled'}>${ic('check')}Mark reviewed</button><button type="button" class="btn sm" id="dlCat">${ic('tag')}Set category</button><button type="button" class="btn sm" id="dlRet">${ic('ban')}Retire</button><button type="button" class="btn sm ic ghost" id="dlClr" aria-label="Clear selection">${ic('x')}</button></div>` : '';
-  return (all.length ? dirCatChips(f) : '') + sum + `<div class="dl-rows">${body}</div>` + bulk;
+  return sum + `<div class="dl-rows">${body}</div>` + bulk;
 }
-/* The toolbar: In force / Retired, then search, scope, read state and grouping inline from 768 px; on phones these four are in a filter sheet. */
+/* The toolbar, one row (two on a phone): the search box with the active filters as chips, In force / Retired, then Filters
+   (Category, Scope, Read state). The ✕ clears the text and every filter and keeps In force / Retired and the grouping. */
+const DIR_MORE = 'data-cs-filt="dlMore"';
 function dirToolbar(f) {
-  const n = ['q', 'sc', 'rd', 'g'].filter((k) => f[k]).length;
-  const sel = (id, label, items, cur) => `<select class="sel" id="${id}" aria-label="${esc(label)}">${items.map(([v, l]) => `<option value="${esc(v)}"${v === cur ? ' selected' : ''}>${esc(l)}</option>`).join('')}</select>`;
-  return vtools(subTabs('data-dirs', [['', 'In force'], ['retired', 'Retired']], f.st === 'retired' ? 'retired' : '')
-    + `<div class="srch only-d dl-q">${ic('search')}<input class="inp" id="dlQ" type="search" placeholder="Search title, text, tags" aria-label="Search directives" value="${esc(f.q)}" autocomplete="off"></div>`
-    + `<span class="only-d dl-sels">${sel('dlSc', 'Scope', [['', 'Any scope'], ...DIR_KINDS.map((k) => [k, DIR_KIND_LABEL[k]])], f.sc)}${f.st === 'active' ? sel('dlRd', 'Read state', DIR_READS, f.rd) : ''}${sel('dlG', 'Group by', DIR_GROUPS, f.g)}</span>`
-    + `<span class="only-m">${filterBtn('dlMore', n)}</span>`);
+  const ch = dirChips(f);
+  return `<div class="ltb">${chipSearch({ attrs: 'id="dlQ"', label: 'Search directives', value: f.q, chips: ch, clear: 'data-dl-clr', more: DIR_MORE })}`
+    + subTabs('data-dirs', [['', 'In force'], ['retired', 'Retired']], f.st === 'retired' ? 'retired' : '') + filterBtn('dlMore', ch.length) + '</div>';
 }
 /* One directive in the side pane: the same parts as its own screen, with the title as the pane heading. */
 const dirPaneHtml = (r) => `<div class="dl-dh"><h3>${r.t}</h3><div class="dact">${r.a || ''}</div></div>${r.b}`;
@@ -9252,7 +9667,7 @@ function dirSet(patch) {
   const f = { ...(dirArgs(DR.arg) || dirArgs('')), ...patch };
   DR.arg = dirArgStr(f); setRoute('directives', DR.arg, false);
   const box = $('#dlList'); if (box) { box.innerHTML = dirListHtml(f); dirBindList(f); }
-  setFilterCount('dlMore', ['q', 'sc', 'rd', 'g'].filter((k) => f[k]).length);
+  const ch = dirChips(f); csrchSet($('#dlQ'), ch, DIR_MORE); setFilterCount('dlMore', ch.length);
   return f;
 }
 /* Select a row: side by side, show it in the pane; narrower, open its screen (Back returns to the list as it was). */
@@ -9276,15 +9691,13 @@ async function dirEach(ids, fn) { for (let i = 0; i < ids.length; i += 8) await 
 function dirBindList(f) {
   const box = $('#dlList'); if (!box) return;
   // Ticking rows and folding groups are not edits: keep them from pausing the background redraw (viewInUse).
-  box.onchange = (e) => e.stopPropagation();
+  box.onchange = (e) => { e.stopPropagation(); if (e.target.id === 'dlG') { dirSet({ g: e.target.value }); $('#dlG')?.focus(); } };
   box.onclick = (e) => {
     const t = e.target;
     if (t.closest('.dl-hit') && !t.matches('input')) return; // the label passes the click on to its box
     const chk = t.closest('[data-dchk]'); if (chk) { DIR_UI.checked[chk.checked ? 'add' : 'delete'](chk.dataset.dchk); dirSet({}); return; }
     if (t.id === 'dlAll') { const L = DIR_UI.data.directives.filter((d) => dirMatch(d, f)); L.forEach((d) => DIR_UI.checked[t.checked ? 'add' : 'delete'](d.id)); dirSet({}); return; }
-    const cat = t.closest('[data-dcat]'); if (cat) { dirSet({ c: cat.dataset.dcat }); $(`[data-dcat="${cat.dataset.dcat}"]`)?.focus(); return; }
-    if (t.closest('[data-dtagclr]')) { dirSet({ t: '' }); $('[data-dcat].on')?.focus(); return; }
-    if (t.closest('[data-dclr]')) { dirSet({ q: '', sc: '', rd: '', c: '', t: '' }); for (const id of ['dlQ', 'dlSc', 'dlRd']) { const el = $('#' + id); if (el) el.value = ''; } $('[data-dcat].on')?.focus(); return; }
+    if (t.closest('[data-dclr]')) { dirClear(); return; }
     const g = t.closest('[data-dgrp]'); if (g) { const k = g.dataset.dgrp; DIR_UI.folded[DIR_UI.folded.has(k) ? 'delete' : 'add'](k); dirSet({}); $(`[data-dgrp="${k}"]`)?.focus(); return; }
     const r = t.closest('[data-dsel]'); if (r) { e.preventDefault(); dirSelect(r.dataset.dsel); }
   };
@@ -9305,17 +9718,23 @@ function dirBindList(f) {
     fbSheet({ title: `Retire ${plural(ids.length, 'directive', 'directives')}`, anchor: e.currentTarget, label: 'Retire', tone: 'bad', fields: `<p class="meta">Agents they reach are told to stop following them.</p>${fbArea('dsN', 'Why (optional, agents see it)', 500, 2)}`,
       onGo: (s) => { const note = fbVal(s, 'dsN') || null; run(async () => { await dirEach(ids, (id) => post('/directives/' + encodeURIComponent(id) + '/retire', { note })); toast(`${plural(ids.length, 'directive', 'directives')} retired; agents are told`); DIR_UI.checked.clear(); await refresh(); reopen(); }); } }); };
 }
+/* Back to the default: no text and no filter; In force / Retired and the grouping stay. The focus goes back to the box. */
+function dirClear() {
+  const inp = $('#dlQ .csrch-in'); if (inp) { inp.value = ''; inp.dataset.q = ''; }
+  dirSet({ q: '', sc: '', rd: '', c: '', t: '' }); inp?.focus();
+}
+/* Filters: Category (each with its count under the other filters), Scope and Read state (in force only). */
 function dirFilterSheet(btn) {
   const f = dirArgs(DR.arg) || dirArgs('');
+  const base = DIR_UI.data.directives.filter((d) => dirMatch(d, { ...f, c: '' }));
+  const cats = [['', `Any category · ${base.length}`], ...[...DIR_CATS, ['none', 'No category']].map(([k, l]) => [k, `${l} · ${base.filter((d) => dirCatKey(d) === k).length}`])];
   const sh = openSheet({ title: 'Filter directives', anchor: btn, html: `<div class="sheet-form">
-    <label class="fld"><span class="vlabel">Search</span><div class="srch">${ic('search')}<input class="inp" id="dlQm" type="search" placeholder="Search title, text, tags" aria-label="Search directives" value="${esc(f.q)}"></div></label>
+    ${selField('dlCm', 'Category', cats, f.c)}
     ${selField('dlScm', 'Scope', [['', 'Any scope'], ...DIR_KINDS.map((k) => [k, DIR_KIND_LABEL[k]])], f.sc)}
     ${f.st === 'active' ? selField('dlRdm', 'Read state', DIR_READS, f.rd) : ''}
-    ${selField('dlGm', 'Group', DIR_GROUPS, f.g)}
-    <div class="sheet-acts"><button type="button" class="btn lg" id="dlClear">Clear</button><button type="button" class="btn pri lg" data-sheet-close>Done</button></div></div>` });
-  onSearch($('#dlQm', sh), (q) => dirSet({ q }));
-  [['#dlScm', 'sc'], ['#dlRdm', 'rd'], ['#dlGm', 'g']].forEach(([s, k]) => { const el = $(s, sh); if (el) el.onchange = () => dirSet({ [k]: el.value }); });
-  $('#dlClear', sh).onclick = () => { dirSet({ q: '', sc: '', rd: '', g: '' }); closeSheet(); };
+    <div class="sheet-acts"><button type="button" class="btn lg" id="dlClear">Clear filters</button><button type="button" class="btn pri lg" data-sheet-close>Done</button></div></div>` });
+  [['#dlCm', 'c'], ['#dlScm', 'sc'], ['#dlRdm', 'rd']].forEach(([s, k]) => { const el = $(s, sh); if (el) el.onchange = () => dirSet({ [k]: el.value }); });
+  $('#dlClear', sh).onclick = () => { dirSet({ sc: '', rd: '', c: '', t: '' }); closeSheet(); };
 }
 
 /* Work → Directives: what agents must follow, at which scope, and who has read the current version. Rules agents
@@ -9338,8 +9757,12 @@ VIEWS.directives = async (arg = '') => {
       $('#dirNew').onclick = (e) => dirSheet({ anchor: e.currentTarget, onDone: (d) => openD('directive', d.id) });
       const ra = $('#admRevAll'); if (ra) ra.onclick = (e) => admRevAll(e.currentTarget); admRepBind();
       dirBindList(f);
-      const q = $('#dlQ'); if (q) { onSearch(q, (v) => dirSet({ q: v })); q.addEventListener('input', (e) => e.stopPropagation()); }
-      [['#dlSc', 'sc'], ['#dlRd', 'rd'], ['#dlG', 'g']].forEach(([s, k]) => { const el = $(s); if (el) el.addEventListener('change', (e) => { e.stopPropagation(); dirSet({ [k]: el.value }); }); });
+      // The search runs as you type; Enter and Escape (csrchKey) run it at once. A chip's ✕ removes that filter, the box's ✕ all of them.
+      const form = $('#dlQ'), q = form && $('.csrch-in', form);
+      if (q) { const go = (v) => { q.dataset.q = v; dirSet({ q: v }); }; onSearch(q, go); q.addEventListener('input', (e) => e.stopPropagation());
+        form.onsubmit = (e) => { e.preventDefault(); go(q.value.trim().toLowerCase()); };
+        form.onclick = (e) => { const rm = e.target.closest('[data-dl-rm]'); if (rm) { dirSet({ [rm.dataset.dlRm]: '' }); q.focus(); } else if (e.target.closest('[data-dl-clr]')) dirClear(); };
+        csrchFit(form); }
       const m = $('#dlMore'); if (m) m.onclick = (e) => dirFilterSheet(e.currentTarget);
       if (dirWide()) dirShowPane(f.d, detScroll);
     },
@@ -9370,7 +9793,11 @@ const dirAgTeams = (C) => { const m = new Map();
   for (const c of C) for (const t of c.teams || []) { const x = m.get(t.id) || { id: t.id, name: t.name, n: 0, u: 0 }; x.n++; if (c.read === 'unread') x.u++; m.set(t.id, x); }
   return [...m.values()].sort((a, b) => a.name.localeCompare(b.name)); };
 const dirAgTeamLabel = (C, f) => { if (!f.at.length) return ''; if (f.at.length > 1) return `${f.at.length} teams`; return dirAgTeams(C).find((t) => t.id === f.at[0])?.name || '1 team'; };
-const dirAgNf = (f) => (f.at.length ? 1 : 0) + (f.as ? 1 : 0);
+/* The active filters as chips in the search box: each chosen team, then the state. */
+const dirAgChips = (C, f) => { const T = dirAgTeams(C);
+  return [...f.at.map((id) => { const n = T.find((t) => t.id === id)?.name || id; return { label: n, name: `Remove team ${n}`, attrs: `data-dag-rm="t:${esc(id)}"` }; }),
+    ...(f.as ? [{ label: DIR_AG[f.as][0], name: `Remove the state filter ${DIR_AG[f.as][0]}`, attrs: 'data-dag-rm="as"' }] : [])]; };
+const DAG_MORE = 'data-cs-filt="dagMore"';
 /* One agent: its teams and roles, when it confirmed, and its state. */
 function dirAgRow(c) {
   const tm = (c.teams || []).map((t) => `${t.name} · ${t.role}`).join(', '), [l, tone] = DIR_AG[c.read];
@@ -9378,24 +9805,19 @@ function dirAgRow(c) {
   return row({ lead: `<span class="av lg">${esc(initials(c.label))}</span>`, title: c.label, meta: [tm, when].filter(Boolean).join(' · '),
     trail: pill(c.read === 'outdated' && c.version ? `${l} · v${c.version}` : l, tone), chev: true, attrs: { 'data-ses': c.agent_id, role: 'listitem' } });
 }
-/* The part that changes with the filters: state chips (from 768 px), the count line and the list, sorted not confirmed first, then out of date. */
+/* The part that changes with the filters: the list overline ("4 of 9 agents · 2 not confirmed", the live region) and the list,
+   sorted not confirmed first, then out of date. */
 function dirAgBody(C, f) {
   const L = C.filter((c) => dirAgMatch(c, f)).sort((a, b) => DIR_AG_RANK[a.read] - DIR_AG_RANK[b.read] || a.label.localeCompare(b.label));
-  const forChips = C.filter((c) => dirAgMatch(c, f, 'as'));
-  const chips = `<div class="dl-cats dag-chips" role="group" aria-label="State" title="Agents confirm a version when they read it.">${DIR_AG_CHIPS.map(([k, l]) => `<button type="button" class="btn sm${f.as === k ? ' on' : ''}" data-dag-st="${k}" aria-pressed="${f.as === k}">${l} <span class="fcount">${k ? forChips.filter((c) => c.read === k).length : forChips.length}</span></button>`).join('')}</div>`;
-  // The chip counts already say how many agents and how many are not confirmed: the line shows only what the filters narrowed to.
-  const any = !!(f.q || f.at.length || f.as);
-  const T = dirAgTeams(C), what = [f.at.map((id) => T.find((t) => t.id === id)?.name || id).join(', '), f.as ? DIR_AG[f.as][0] : '', f.q ? `“${f.q}”` : ''].filter(Boolean).map(esc);
-  const cnt = any ? `<div class="dag-cnt" aria-live="polite"><span class="meta">${[`<b>${L.length} of ${plural(C.length, 'agent')}</b>`, ...what].join(' · ')}</span>${emptyAct('Clear filters', 'data-dag-clr')}</div>` : '';
-  const list = L.length ? L.map(dirAgRow).join('') : none('user', 'No agent matches these filters', false, emptyAct('Clear filters', 'data-dag-clr'));
-  return chips + cnt + `<div role="list" aria-label="Agents">${list}</div>`;
+  const u = L.filter((c) => c.read === 'unread').length;
+  const ov = listOverline([{ html: `<span class="lov-n" tabindex="-1" aria-live="polite" title="Agents confirm a version when they read it."><b>${L.length}</b> of ${plural(C.length, 'agent')}${u && f.as !== 'unread' ? ` · <span class="bad-t">${u} not confirmed</span>` : ''}</span>` }]);
+  const list = L.length ? L.map(dirAgRow).join('') : none('user', 'No agent matches these filters', false, emptyAct('Clear search and filters', 'data-dag-clr'));
+  return ov + `<div role="list" aria-label="Agents">${list}</div>`;
 }
-/* The Agents section: who the directive applies to, search and Team (Filters on phones), then the body above. */
+/* The Agents section: one toolbar row (the search box with the team and state chips, then Filters), then the body above. */
 function dirAgSection(d, C, f) {
-  const tl = dirAgTeamLabel(C, f), T = dirAgTeams(C);
-  const team = T.length ? `<button type="button" class="btn${f.at.length ? ' on' : ''}" id="dagTeam" aria-haspopup="dialog">${ic('team')}Team<span class="fcount">${tl ? ' · ' + esc(tl) : ''}</span>${ic('down')}</button>` : '';
-  const tools = `<div class="dag-flt"><div class="srch dag-q">${ic('search')}<input class="inp" id="dagQ" type="search" placeholder="Search label, id or role" aria-label="Search agents" value="${esc(f.q)}" autocomplete="off"></div>`
-    + `<span class="only-d">${team}</span><span class="only-m">${filterBtn('dagMore', dirAgNf(f))}</span></div>`;
+  const ch = dirAgChips(C, f);
+  const tools = `<div class="ltb">${chipSearch({ attrs: 'id="dagQ"', label: 'Search agents', value: f.q, chips: ch, clear: 'data-dag-clr', more: DAG_MORE })}${filterBtn('dagMore', ch.length)}</div>`;
   return `<section class="sec dir-sec" id="dirAg" tabindex="-1" aria-label="Agents">${tools}<div id="dagBody">${dirAgBody(C, f)}</div></section>`;
 }
 /* The route with the agent-list filters: #directives keeps them beside its own keys; #directive and #tdir after the first &. */
@@ -9406,37 +9828,38 @@ function dirAgRoute(f) {
   else return;
   setRoute(DR.type, DR.arg, false);
 }
-/* Team choices, ticked live; on phones the same sheet also holds the state. */
-function dirAgSheet(C, get, set, anchor, phone) {
+/* Filters: Team (ticked live, each with its agents and how many have not confirmed) and the state, each with its count under
+   the other filters. */
+function dirAgSheet(C, get, set, anchor) {
   const f = get(), T = dirAgTeams(C), forChips = C.filter((c) => dirAgMatch(c, f, 'as'));
   const teams = T.map((t) => `<label class="chk-row"><input type="checkbox" data-dag-t="${esc(t.id)}"${f.at.includes(t.id) ? ' checked' : ''}><span><b>${esc(t.name)}</b> <span class="meta">${plural(t.n, 'agent')}${t.u ? ` · <span class="bad-t">${t.u} not confirmed</span>` : ''}</span></span></label>`).join('');
-  const states = phone ? `<fieldset class="rp-kinds"><legend class="vlabel">State</legend>${DIR_AG_CHIPS.map(([k, l]) => `<label class="chk-row"><input type="radio" name="dagSt" data-dag-sr="${k}"${f.as === k ? ' checked' : ''}><span>${l} <span class="meta">${k ? forChips.filter((c) => c.read === k).length : forChips.length}</span></span></label>`).join('')}</fieldset>` : '';
+  const states = `<fieldset class="rp-kinds"><legend class="vlabel">State</legend>${DIR_AG_CHIPS.map(([k, l]) => `<label class="chk-row"><input type="radio" name="dagSt" data-dag-sr="${k}"${f.as === k ? ' checked' : ''}><span>${l} <span class="meta">${k ? forChips.filter((c) => c.read === k).length : forChips.length}</span></span></label>`).join('')}</fieldset>`;
   const shown = () => C.filter((c) => dirAgMatch(c, get())).length;
-  const sh = openSheet({ title: phone ? 'Filter agents' : 'Teams in its reach', anchor, html: `<div class="sheet-form">${T.length ? `<fieldset class="rp-kinds"><legend class="vlabel">Team</legend>${teams}</fieldset>` : ''}${states}
-    <div class="sheet-acts"><button type="button" class="btn lg" id="dagClear">Clear</button><button type="button" class="btn pri lg" data-sheet-close id="dagShow">${phone ? `Show ${plural(shown(), 'agent')}` : 'Done'}</button></div></div>` });
-  const upd = () => { const b = $('#dagShow', sh); if (b && phone) b.textContent = `Show ${plural(shown(), 'agent')}`; };
+  const sh = openSheet({ title: 'Filter agents', anchor, html: `<div class="sheet-form">${T.length ? `<fieldset class="rp-kinds"><legend class="vlabel">Team</legend>${teams}</fieldset>` : ''}${states}
+    <div class="sheet-acts"><button type="button" class="btn lg" id="dagClear">Clear filters</button><button type="button" class="btn pri lg" data-sheet-close id="dagShow">Show ${plural(shown(), 'agent')}</button></div></div>` });
   sh.addEventListener('change', (e) => { e.stopPropagation(); const t = e.target;
     if (t.dataset.dagT !== undefined) set({ at: [...sh.querySelectorAll('[data-dag-t]')].filter((x) => x.checked).map((x) => x.dataset.dagT) });
     if (t.dataset.dagSr !== undefined) set({ as: t.dataset.dagSr });
-    upd(); });
-  $('#dagClear', sh).onclick = () => { set(phone ? { at: [], as: '' } : { at: [] }); closeSheet(); };
+    $('#dagShow', sh).textContent = `Show ${plural(shown(), 'agent')}`; });
+  $('#dagClear', sh).onclick = () => { set({ at: [], as: '' }); closeSheet(); };
 }
-/* Wire the Agents section: every change redraws its body in place and replaces the route (no history entry per keystroke). */
+/* Wire the Agents section: every change redraws its body in place, swaps the chips in the box (the text and the focus stay)
+   and replaces the route (no history entry per keystroke). */
 function dirAgBind(C, f0) {
   const sec = $('#dirAg'); if (!sec) return;
   let f = { ...f0, at: [...f0.at] };
-  const get = () => f;
+  const get = () => f, form = $('#dagQ', sec), q = form && $('.csrch-in', form);
   const set = (patch) => {
     f = { ...f, ...patch }; $('#dagBody', sec).innerHTML = dirAgBody(C, f);
-    const tb = $('#dagTeam', sec); if (tb) { const l = dirAgTeamLabel(C, f); tb.classList.toggle('on', !!f.at.length); tb.querySelector('.fcount').textContent = l ? ' · ' + l : ''; }
-    setFilterCount('dagMore', dirAgNf(f)); dirAgRoute(f);
+    const ch = dirAgChips(C, f); csrchSet(form, ch, DAG_MORE); setFilterCount('dagMore', ch.length); dirAgRoute(f);
   };
-  const q = $('#dagQ', sec); if (q) { onSearch(q, (v) => set({ q: v.slice(0, 100) })); q.addEventListener('input', (e) => e.stopPropagation()); }
-  const tb = $('#dagTeam', sec); if (tb) tb.onclick = () => dirAgSheet(C, get, set, tb, false);
-  const mb = $('#dagMore', sec); if (mb) mb.onclick = () => dirAgSheet(C, get, set, mb, true);
+  if (q) { onSearch(q, (v) => set({ q: v.slice(0, 100) })); q.addEventListener('input', (e) => e.stopPropagation());
+    form.onsubmit = (e) => { e.preventDefault(); set({ q: q.value.trim().toLowerCase().slice(0, 100) }); }; csrchFit(form); }
+  const mb = $('#dagMore', sec); if (mb) mb.onclick = () => dirAgSheet(C, get, set, mb);
   sec.addEventListener('click', (e) => {
-    const st = e.target.closest('[data-dag-st]'); if (st) { set({ as: st.dataset.dagSt }); $(`[data-dag-st="${st.dataset.dagSt}"]`, sec)?.focus(); return; }
-    if (e.target.closest('[data-dag-clr]')) { set({ q: '', at: [], as: '' }); if (q) { q.value = ''; q.focus(); } }
+    const rm = e.target.closest('[data-dag-rm]');
+    if (rm) { const k = rm.dataset.dagRm; set(k === 'as' ? { as: '' } : { at: f.at.filter((id) => id !== k.slice(2)) }); q?.focus(); return; }
+    if (e.target.closest('[data-dag-clr]')) { if (q) q.value = ''; set({ q: '', at: [], as: '' }); q?.focus(); }
   });
 }
 /* The one meta line under the title: reach (to the agent list), category (to Directives filtered by it), version and date
@@ -9518,9 +9941,9 @@ const twRow = (label, tip, ctrl, cls = '') => `<div class="tw-row${cls ? ' ' + c
 function teamWorkflow(t, mg) {
   const h = (t.lease_minutes / 60).toFixed(t.lease_minutes % 60 ? 1 : 0);
   return `<div class="tw">
-    ${twRow('Mode', 'Polling: agents loop on work_next and a silent task goes back to open when its lease ends. On demand: agents work when woken and never poll; a task past its check-in time raises an alert and keeps its assignee.', `<div class="seg" id="twMode" role="group" aria-label="Mode"><button data-mode="poll" class="${t.delivery_mode === 'poll' ? 'on' : ''}">${ic('rot')}Polling</button><button data-mode="on_demand" class="${t.delivery_mode === 'on_demand' ? 'on' : ''}">${ic('bolt')}On demand</button></div>`)}
     ${twRow('Close on approval', 'An approving review closes the task in the same call. With "Approval before done" the task waits for you instead.', switchBtn('Close on approval', t.close_on_approve, 'id="twClose"'))}
     ${twRow('Coordinator may review', 'A coordinator named as a task\'s reviewer may review it; never their own work.', switchBtn('Coordinator may review', t.coordinator_reviews, 'id="twCoord"'))}
+    ${twRow('Coordinator records past work', 'The coordinator may record work finished outside a task as done, in one step. It skips review, so such a task is marked not reviewed and never counts toward a requirement or as evidence. You can always do it from the board. Off by default.', switchBtn('Coordinator records past work', !!t.coordinator_records_done, 'id="twRecDone"'))}
     ${twRow('Feedback nudge', 'Adds one line to what task_submit and team_complete return: if something in Conclave slowed the task down, file it. Off by default, so reporting stays a habit, not a ritual.', switchBtn('Feedback nudge', !!t.feedback_nudge, 'id="twNudge"'))}
     ${twRow('Stall warnings', 'Shows a member that has gone quiet past its check-in time under For awareness, on Home and the team page, and in the team\'s badges. Off by default.', switchBtn('Stall warnings', !!t.stall_warnings, 'id="twStall"'))}
     ${t.project_id && mg?.project ? twRow('Missed milestones', 'For this team\'s whole project. Shows a milestone marked missed under For awareness, on Home, the team page and Blueprint Review. Off by default.', switchBtn('Missed milestones', !!mg.project.missed_warnings, 'id="twMissed"')) : ''}
@@ -9528,8 +9951,9 @@ function teamWorkflow(t, mg) {
     ${t.project_id && mg?.rule ? twRow('Release notes rule', 'In this team\'s own Blueprint part, the coordinator creates releases for a deploy and writes their title, body and notes without asking you. Dates, shipped items and anything else still come to you as a proposal. Each change names the rule in its history and shows under For awareness as changes applied by rules; it stays the coordinator\'s writing, not your approval. Paused: nothing applies until you turn it on again. Off by default.', `<div class="seg" id="twRule" role="group" aria-label="Release notes rule">${[['off', 'Off'], ['on', 'On'], ['paused', 'Paused']].map(([v, l]) => `<button type="button" data-rule="${v}" class="${mg.rule.state === v ? 'on' : ''}" aria-pressed="${mg.rule.state === v}">${l}</button>`).join('')}</div>`) : ''}
     ${t.project_id ? twRow('Review', 'For every team of this team\'s project. Required: every task is reviewed. Per task: the coordinator decides when it creates a task. None: tasks need no review unless created asking for it; a submitted task is approved at once, and that is audited. Nobody ever reviews their own work.', `<div class="seg" id="twRev" role="group" aria-label="Review">${[['required', 'Required'], ['per_task', 'Per task'], ['none', 'None']].map(([v, l]) => `<button type="button" data-rev="${v}" class="${(t.review_policy || 'required') === v ? 'on' : ''}" aria-pressed="${(t.review_policy || 'required') === v}">${l}</button>`).join('')}</div>`) : ''}
     ${t.project_id ? twRow('New tasks', 'For every team of this team\'s project. Backlog: tasks agents create wait for you to accept or discard them. Open: they open at once. A coordinator relaying your own request opens it either way.', `<div class="seg" id="twIntake" role="group" aria-label="New tasks">${[['backlog', 'Backlog'], ['open', 'Open']].map(([v, l]) => `<button type="button" data-intake="${v}" class="${(t.task_intake || 'backlog') === v ? 'on' : ''}" aria-pressed="${(t.task_intake || 'backlog') === v}">${l}</button>`).join('')}</div>`) : ''}
+    ${t.project_id ? twRow('Task tags', 'For every team of this team\'s project. A fixed list of at most 7 tags; each task has 1 or 2 of them, and agents are refused any other. With no list, tasks take free tags, at most 2. Changing the list moves the old tags onto it with a map you review first.', `<span class="tw-tags">${(t.task_tags || []).length ? t.task_tags.map((g) => `<span class="tag txt">${esc(g.name)}</span>`).join(' ') : '<span class="meta">No list: free tags, at most 2 per task and 7 in use</span>'}${t.tags_over ? ' <span class="err">More than 7 tags: set a list</span>' : ''}</span><button type="button" class="btn sm" id="twTags">Edit tags</button>`) : ''}
     ${t.project_id ? twRow('Members can see the task board', 'For every team of this team\'s project. Collaborators with access to the project see its task board in their view, read only: titles, assignees and states, and a task\'s description and summary when they open it. Collaborators from outside your organisation never see it. Off by default.', switchBtn('Members can see the task board', !!t.member_board, 'id="twBoard"')) : ''}
-    ${twRow(t.delivery_mode === 'on_demand' ? 'Default check-in time' : 'Lease', 'Hours until a started task needs news. Agents set their own with task_progress until.', `<label class="tw-num"><input class="inp" id="twLease" type="number" min="0.05" max="24" step="0.5" value="${h}" aria-label="Hours"> h</label>`)}
+    ${twRow('Default check-in time', 'Hours until a started task needs news; past it the task is flagged and stays with its assignee. Agents set their own with task_progress until.', `<label class="tw-num"><input class="inp" id="twLease" type="number" min="0.05" max="24" step="0.5" value="${h}" aria-label="Hours"> h</label>`)}
     ${twRow('Recruiting', 'Lets the coordinator add agents with team_recruit. Ask me: you approve each one. Automatic: created at once within the limits below. Either way the key goes straight to the coordinator\'s PC through a pickup, never to you or the coordinator. Switching it off revokes recruited agents\' keys.', `<div class="seg" id="twRec">${[['off', 'Off'], ['propose', 'Ask me'], ['auto', 'Automatic']].map(([v, l]) => `<button data-rec="${v}" class="${t.recruiting === v ? 'on' : ''}">${l}</button>`).join('')}</div>`)}
     <div class="tw-row tw-rec"${t.recruiting === 'off' ? ' hidden' : ''}><div class="tw-l"><b>Recruit limits</b>${info('Never a coordinator. Access: a template you choose, refused if it exceeds the coordinator\'s own; by default a read-only copy of the coordinator\'s vault access.')}</div>
       <div class="tw-recf">
@@ -9545,12 +9969,13 @@ function teamWorkflow(t, mg) {
    Phones: the detail app bar. Desktop: the header row; from 1180 px two columns of cards sit above the board. */
 const BOARD_COLS = [['open', 'Open', ['open', 'assigned'], 'idle'], ['doing', 'Doing', ['in_progress', 'changes_requested'], 'accent'], ['review', 'Review', ['in_review', 'approved'], 'warn'], ['blocked', 'Blocked', ['blocked'], 'bad'], ['done', 'Done', ['done'], 'ok']];
 const teamNm = (t) => (aid) => t.members.find((m) => m.agent_id === aid)?.label || agLabel(aid);
-/* The board's columns with their tasks. Done keeps growing: it shows the newest few; the rest is one tap away. */
-function taskGroups(t, id) {
+/* The board's columns with their tasks. Done keeps growing: it shows the newest few; the rest is one tap away. every (a search on
+   the tasks screen): every task, hidden ones too, with no cap. */
+function taskGroups(t, id, every = false) {
   return BOARD_COLS.map(([key, label, sts, tone]) => {
     const all = t.board.filter((k) => sts.includes(k.status)), hiddenN = all.filter((k) => k.dismissed_at).length;
-    const L = all.filter((k) => key !== 'done' || !k.dismissed_at || DONE_HIDDEN.has(id)).sort((a, b) => b.awaiting_approval - a.awaiting_approval || (key === 'done' ? b.updated_at - a.updated_at : 0));
-    const capped = key === 'done' && !DONE_ALL.has(id) && L.length > DONE_CAP;
+    const L = all.filter((k) => key !== 'done' || every || !k.dismissed_at || DONE_HIDDEN.has(id)).sort((a, b) => b.awaiting_approval - a.awaiting_approval || (key === 'done' ? b.updated_at - a.updated_at : 0));
+    const capped = key === 'done' && !every && !DONE_ALL.has(id) && L.length > DONE_CAP;
     // vis: the done tasks still on the board, which "Hide all" hides in one call.
     return { key, label, tone, sts, L, hiddenN, capped, shown: capped ? L.slice(0, DONE_CAP) : L, vis: key === 'done' ? all.filter((k) => !k.dismissed_at).map((k) => k.id) : [] };
   });
@@ -9584,7 +10009,7 @@ function cardState(k, t) {
   if (k.awaiting_approval) return { ico: 'check', text: 'Approved · waits for you', tone: 'warn', tip: 'The reviewer approved it; it waits for you' };
   if (k.blocked_reason) return { ico: 'warn', text: tkReason(k.blocked_reason), tone: 'bad', clamp: true };
   const ts = tkText(k, t); if (!ts) return null;
-  const tip = k.overdue_at ? `Past its check-in time since ${dt(k.overdue_at)}; the assignee still holds it` : k.status === 'in_review' ? 'Submitted; waiting for the reviewer' : k.lease_expires_at ? `${t.delivery_mode === 'on_demand' ? 'Check-in' : 'Lease'} ${dt(k.lease_expires_at)}` : '';
+  const tip = k.overdue_at ? `Past its check-in time since ${dt(k.overdue_at)}; the assignee still holds it` : k.status === 'in_review' ? 'Submitted; waiting for the reviewer' : k.lease_expires_at ? `Check-in ${dt(k.lease_expires_at)}` : '';
   return { ico: ts.review ? 'eye' : 'clock', text: ts.text, tone: ts.cls === 'bad-t' ? 'bad' : ts.cls === 'warn-t' ? 'warn' : '', tip };
 }
 /* A plan reference on a task (R1, M2): hover or focus shows what it is; on touch the same text opens in a sheet. */
@@ -9636,15 +10061,15 @@ function taskRow(k, main, t, id, nm) {
   // The last change as "3m" on the right, so rows with the same title still tell apart (the full date in the title).
   const when = k.updated_at ? `<span class="tk-when" title="Last change ${esc(dt(k.updated_at))}">${esc(ago(k.updated_at))}</span>` : '';
   return row({ title: k.title, chev: true, cls: k.awaiting_approval ? 'aw' : '', trail: tkTagTrail(k) + taClip(k.attachments) + when, attrs: { 'data-task': `${id}|${k.id}` },
-    meta: raw(`${tkTagMeta(k)}${esc(k.assignee ? nm(k.assignee) : 'Unassigned')}${st ? ' · ' + esc(st) : ''}${k.review_rounds ? ` · round ${k.review_rounds}` : ''}${k.operator_request ? ' · on your relayed request' : ''}${ts ? ` · <span class="${ts.cls}">${esc(ts.text)}</span>` : ''}`) })
+    meta: raw(`${tkTagMeta(k)}${esc(k.assignee ? nm(k.assignee) : 'Unassigned')}${st ? ' · ' + esc(st) : ''}${k.review_rounds ? ` · round ${k.review_rounds}` : ''}${k.operator_request ? ' · on your relayed request' : ''}${k.recorded ? ' · recorded, not reviewed' : ''}${ts ? ` · <span class="${ts.cls}">${esc(ts.text)}</span>` : ''}`) })
     + (k.awaiting_approval ? `<div class="tk-act"><span>Waiting for your approval</span><button type="button" class="btn sm ok" data-appr="${esc(k.id)}">${ic('check')}Approve</button></div>` : '')
     + (t.decTask?.[k.id] ? `<div class="tk-act"><span>Question for you</span><button type="button" class="btn sm" data-dec="${esc(t.decTask[k.id].id)}">${ic('chat')}Answer</button></div>`
       : (k.blocked_reason ? tkBlock(k.blocked_reason) : '') + (k.status === 'blocked' ? unblockBar(id, k) : ''));
 }
-const memberRow = (m, nm) => row({ lead: `<span class="av lg">${esc(initials(m.label || m.agent_id || '?'))}<i class="st ${m.stalled ? 'warn' : 'on'}"></i></span>`,
+const memberRow = (m, nm, cx) => row({ lead: `<span class="av lg">${esc(initials(m.label || m.agent_id || '?'))}<i class="st ${m.stalled ? 'warn' : 'on'}"></i></span>`,
   title: raw(`<button type="button" class="mem-name" data-ses="${esc(m.agent_id)}">${esc(m.label || m.agent_id)}</button>`),
   meta: `${cap(m.role)}${m.recruited_by ? ` · recruited by ${nm(m.recruited_by)}` : ''} · active ${ago(m.last_activity_at)} ago${m.pending_items ? ` · ${m.pending_items} pending` : ''}`,
-  trail: `${m.stalled ? pill('Stalled', 'warn') : ''}<button type="button" class="btn ic sm only-d" data-hand="${esc(m.agent_id)}" aria-label="Copy handoff for ${esc(m.label || m.agent_id)}" title="Copy handoff">${ic('copy')}</button>${canTell() ? `<button type="button" class="btn ic sm" data-tell="${esc(m.agent_id)}" aria-label="Message ${esc(m.label || m.agent_id)}" title="Message" aria-haspopup="dialog">${ic('chat')}</button>` : ''}${tmgMemMore(m)}` });
+  trail: `${cxBar(cx?.[m.agent_id], { quiet: true })}${m.stalled ? pill('Stalled', 'warn') : ''}<button type="button" class="btn ic sm only-d" data-hand="${esc(m.agent_id)}" aria-label="Copy handoff for ${esc(m.label || m.agent_id)}" title="Copy handoff">${ic('copy')}</button>${canTell() ? `<button type="button" class="btn ic sm" data-tell="${esc(m.agent_id)}" aria-label="Message ${esc(m.label || m.agent_id)}" title="Message" aria-haspopup="dialog">${ic('chat')}</button>` : ''}${tmgMemMore(m)}` });
 /* The team's attention: Needs you first (the operator's decisions here), then For awareness (problems, then plan items). */
 function teamAttention(t, id, nm, bps, ny) {
   // Needs you: the team's entrance to the operator's list (GET /needs-you?team=), resolved from its rows. Everything else
@@ -9684,6 +10109,38 @@ function teamPauseSheet(t, tp, done) {
       return null;
     } });
 }
+/*
+ * Start team (docs/connector.md, "Reason orders"): each member's PC runs one check-in turn, coordinator first. One line per member:
+ * where its order stands and what its PC's wake last said. Fixed words only, from the hub's codes.
+ */
+const START_CODE = { chat_in_use: 'Chat in use on its PC', wake_held: 'Wake held on its PC', agent_unknown: 'No folder for it on its PC', team_paused: 'Dropped: the team was paused' };
+const startLine = (m) => {
+  if (!m.order) return m.pc_online === null ? ['No PC holds its key', 'idle'] : ['Not started from the console', 'idle'];
+  const o = m.order, run = m.run && m.run.updated_at >= o.created_at ? m.run.state : null;
+  if (o.state === 'queued') return [m.pc_online ? 'Sent to its PC' : 'Waiting for its PC to come online', 'info'];
+  if (o.state === 'fetched') return ['Its PC has it', 'info'];
+  if (o.state === 'failed') return [START_CODE[o.code] || 'Its PC could not start the turn', 'warn'];
+  if (o.state === 'expired') return ['Its PC did not take it in time', 'warn'];
+  return run === 'running' ? ['Checking in now', 'ok'] : run === 'paused_usage' ? ['Waiting for its plan limit to reset', 'warn'] : run === 'needs_approval' ? ['Stopped at an approval on its PC', 'warn'] : ['Checked in', 'ok'];
+};
+const startMeta = (st) => {
+  const ls = st.members.map(startLine), on = ls.filter((l) => l[0] === 'Checking in now').length, ok = ls.filter((l) => l[0] === 'Checked in').length, warn = ls.filter((l) => l[1] === 'warn').length;
+  return [on ? `${on} checking in` : '', ok ? `${ok} of ${ls.length} checked in` : '', warn ? `<span class="warn-t">${plural(warn, 'member')} not started</span>` : ''].filter(Boolean).join(' · ') || 'Not started from the console yet';
+};
+function teamStartSheet(t, tp, st, done) {
+  const list = `<div class="doors">${st.members.map((m) => { const [w, tone] = startLine(m); return row({ title: m.label, meta: m.role === 'coordinator' ? 'Coordinator' : '', trail: pill(w, tone) }); }).join('')}</div>`;
+  fbSheet({ title: 'Start team', label: 'Start team', tone: t.status === 'running' ? 'pri' : '',
+    fields: vnote(t.status === 'running'
+      ? 'Each member\'s PC runs one check-in turn, coordinator first: it reads its directives, checks its tasks and stops. Pressing again while a member\'s turn waits sends nothing new.'
+      : 'The team is paused. Resume it first, then start it.') + list,
+    onGo: async () => {
+      if (t.status !== 'running') return 'The team is paused. Resume it first, then start it.';
+      const r = await post(`${tp}/start-turns`), sent = r.members.filter((m) => m.order && !m.already).length, none = r.members.filter((m) => !m.order).length;
+      toast(sent ? `Sent to ${plural(sent, 'member')}'s PC${none ? `; ${none} without a PC` : ''}` : none === r.members.length ? 'No member has a PC to wake' : 'Already sent; waiting for the PCs');
+      await done();
+      return null;
+    } });
+}
 /* The team's conversations: its room, then direct chats between its members or with the operator (anyone who is not an agent). */
 function teamChats(t, convs) {
   const mem = new Set(t.members.map((m) => m.agent_id)), agent = (id) => S.agents.some((a) => a.id === id);
@@ -9706,11 +10163,13 @@ VIEWS.team = async (id) => {
   const withReview = (sp) => sp.then((s) => (s ? Promise.all([s, nyRead(bpReviewQ(s.project.id, bpReviewTeam(s.contributing, id))).catch(() => null)]) : [null, null]));
   const [t, tdir, cv, bps0, nyT, tUse] = await Promise.all([api(tp).then((r) => withDecisions({ ...r.team, setup: r.setup || null })), api(tp + '/directives').catch(() => null), api('/conversations').catch(() => null), pid0 ? withReview(summary(pid0)) : [null, null],
     nyRead(`${NY_Q}&team=${encodeURIComponent(id)}`).catch(() => null), S.me?.role === 'admin' ? api(tp + '/usage').catch(() => null) : null]), nm = teamNm(t);
+  // Start team's state per member (admin only): which PCs ran their check-in turn.
+  const tStart = S.me?.role === 'admin' && ['running', 'paused'].includes(t.status) ? await api(tp + '/start-turns').catch(() => null) : null;
   const [bps, bpRev] = pid0 ? bps0 : t.project_id ? await withReview(summary(t.project_id)) : [null, null];
 
   const chats = cv ? teamChats(t, cv.conversations) : null, sess = teamSessions(t), liveN = sess.filter((x) => x.live).length;
   const stalled = t.members.filter((m) => m.stalled).length, pendingRec = (t.recruits || []).filter((q) => q.status === 'pending');
-  const onDemand = t.delivery_mode === 'on_demand', nMem = t.members.length;
+  const nMem = t.members.length;
   const stopTeam = () => run(async () => { await post(`${tp}/stop`); await refresh(); openD('team', id, true); });
   const act = (cls, ico, lbl, p, sm) => `<button class="btn${sm ? ' sm' : ''} ${cls}" data-ta="${p}">${ic(ico)}${lbl}</button>`;
   // The same actions as prim() for the phone app bar's ⋯ (phone: desktop shows them in the header).
@@ -9721,10 +10180,11 @@ VIEWS.team = async (id) => {
       t.status === 'paused' && !coHeld(t) ? { label: 'Resume', icon: 'play', phone: true, fn: ta('resume') } : null,
       t.room_id ? { label: 'Chat', icon: 'chat', phone: true, fn: () => openD('room', t.room_id) } : null];
   };
+  const startSheet = () => teamStartSheet(t, tp, tStart, async () => { await refresh(); openD('team', id, true); });
   const prim = (sm) => `${t.status === 'draft' ? act('ok', 'play', 'Start', 'start', sm) : ''}${t.status === 'running' ? act('', 'pause', 'Pause', 'pause', sm) : ''}${t.status === 'paused' && !coHeld(t) ? act('ok', 'play', 'Resume', 'resume', sm) : ''}${t.room_id ? `<button class="btn${sm ? ' sm' : ''}" data-room="${esc(t.room_id)}">${ic('chat')}Chat</button>` : ''}`;
   // Hourly limits, when set, read as part of the settings line: "tasks 2/10 · messages 14/60".
   const limitList = Object.entries(t.limits || {}).map(([k, v]) => { const u = t.usage?.[k] ?? t.usage?.[k.replace('_per_hour', '')] ?? 0; return { k: k.replace(/_per_hour|_bytes/g, '').replace(/_/g, ' '), u, v }; });
-  const settings = [onDemand ? 'On demand' : 'Polling', `Messaging ${t.grant_messaging ? 'on' : 'off'}`, limitList.length ? 'Limits ' + limitList.map((x) => `${x.k} ${x.u}/${x.v}`).join(' · ') : '', t.close_on_approve ? 'Closes on approval' : '', t.coordinator_reviews ? 'Coordinator reviews' : '', t.checkpoints?.length ? 'Approval before done' : '', t.project_id ? (t.task_intake === 'open' ? 'New tasks open at once' : 'New tasks to backlog') : ''].filter(Boolean);
+  const settings = [`Messaging ${t.grant_messaging ? 'on' : 'off'}`, limitList.length ? 'Limits ' + limitList.map((x) => `${x.k} ${x.u}/${x.v}`).join(' · ') : '', t.close_on_approve ? 'Closes on approval' : '', t.coordinator_reviews ? 'Coordinator reviews' : '', t.checkpoints?.length ? 'Approval before done' : '', t.project_id ? (t.task_intake === 'open' ? 'New tasks open at once' : 'New tasks to backlog') : ''].filter(Boolean);
   const G = [...taskGroups(t, id), ...tkExtra(t)], total = t.progress.total, bl = G.find((g) => g.key === 'backlog').L.length, dc = G.find((g) => g.key === 'discarded').L.length;
   const tasksIdx = total ? `${progressBar(t)}<p class="meta tm-counts">${t.progress.done} of ${total} tasks done</p><div class="doors tm-idx">${['backlog', 'doing', 'review', 'blocked', 'open', 'done', 'discarded'].map((k) => G.find((g) => g.key === k)).filter((g) => g.L.length)
     .map((g) => row({ one: true, lead: `<span class="dot ${g.tone}"></span>`, dot: true, title: g.label, trail: `<span>${g.L.length}</span>`, chev: true, attrs: { 'data-tasks': `${id}|${g.key}` } })).join('')}</div>`
@@ -9738,21 +10198,23 @@ VIEWS.team = async (id) => {
     + row({ lead: ic('dec'), title: 'Decisions', meta: raw(decDoor(t)), chev: true, attrs: { 'data-decs': id, title: 'Open the questions the team asked you' } })
     + row({ lead: ic('user'), title: 'Sessions', meta: sess.length ? `${liveN} live of ${sess.length}` : 'No sessions', chev: true, attrs: { 'data-tses': id, title: 'Open the members\' sessions' } })
     + admTeamHistRow(t, id)
+    + (tStart ? row({ lead: ic('play'), title: 'Start on PCs', meta: raw(startMeta(tStart)), chev: true, attrs: { 'data-tstart': id, title: 'See each member\'s check-in turn, or start the team on its PCs' } }) : '')
     + row({ lead: ic('limit'), title: 'Settings', meta: settings.join(' · '), chev: true, attrs: { 'data-tsettings': id, title: 'Open how the team works' } }));
   const recruits = (pendingRec.length ? sec('Recruit requests', `<div class="rq-list">${pendingRec.map((q) => `<div class="rq" data-rq="${esc(q.id)}"><div><b>${esc(q.label)}</b> <span class="tag">${esc(q.role)}</span><small>${esc(q.purpose)} · asked by ${esc(nm(q.requested_by))}, ${ago(q.created_at)} ago</small></div><div class="row"><button class="btn ok sm" data-rq-ok="${esc(q.id)}">${ic('check')}Approve</button><button class="btn sm" data-rq-no="${esc(q.id)}">${ic('x')}Deny</button></div><div class="rq-out"></div></div>`).join('')}</div>`) : '');
   return {
-    t: `${ic('team')}<span class="ellip">${esc(t.name)}</span>${coHeld(t) ? pill('Paused for checkout', 'warn') : pill(teamStatusText(t), TEAM_TONE[t.status] || 'idle')}<span class="tmeta">${esc(`${onDemand ? 'On demand' : 'Polling'} · ${plural(nMem, 'member')}${stalled ? ` · ${stalled} stalled` : ''}`)}${blLink('team=' + id, t.counts?.backlog ?? S.teams.find((x) => x.id === id)?.counts?.backlog, '', ' · ')}</span>`,
+    t: `${ic('team')}<span class="ellip">${esc(t.name)}</span>${coHeld(t) ? pill('Paused for checkout', 'warn') : pill(teamStatusText(t), TEAM_TONE[t.status] || 'idle')}<span class="tmeta">${esc(`${plural(nMem, 'member')}${stalled ? ` · ${stalled} stalled` : ''}`)}${blLink('team=' + id, t.counts?.backlog ?? S.teams.find((x) => x.id === id)?.counts?.backlog, '', ' · ')}</span>`,
     a: prim(true) + moreBtn(),
     // Under Home with the list filters (ROUTES.team); opened from an agent, Back names that agent (navTrail).
-    here: { label: t.name, meta: `${teamStatusText(t)} · ${onDemand ? 'on demand' : 'polling'} · ${plural(nMem, 'member')}` },
+    here: { label: t.name, meta: `${teamStatusText(t)} · ${plural(nMem, 'member')}` },
     dbar: { title: t.name,
-      menu: [...teamPhoneActs(), { label: 'Team status', icon: 'note', fn: () => openD('tstatus', id) }, coMenuItem(t), t.status === 'paused' && ['admin', 'coordinator'].includes(t.paused_reason) ? { label: 'Change the pause', icon: 'clock', fn: () => teamPauseSheet(t, tp, async () => { await refresh(); openD('team', id, true); }) } : null, ['draft', 'running', 'paused'].includes(t.status) ? { label: 'Stop team', icon: 'stop', bad: true, confirm: 'Tap again to stop the team', fn: stopTeam } : null] },
+      menu: [...teamPhoneActs(), tStart && t.status === 'running' ? { label: 'Start team on its PCs', icon: 'play', fn: startSheet } : null, { label: 'Team status', icon: 'note', fn: () => openD('tstatus', id) }, coMenuItem(t), t.status === 'paused' && ['admin', 'coordinator'].includes(t.paused_reason) ? { label: 'Change the pause', icon: 'clock', fn: () => teamPauseSheet(t, tp, async () => { await refresh(); openD('team', id, true); }) } : null, ['draft', 'running', 'paused'].includes(t.status) ? { label: 'Stop team', icon: 'stop', bad: true, confirm: 'Tap again to stop the team', fn: stopTeam } : null] },
     b: `<div class="tm-grid"><div class="tm-a">${coTeamSlot(id)}${teamAttention(t, id, nm, bps, nyT)}${recruits}${t.setup && !obSetupFolds(t.setup, bps) ? obSetupCard(t.setup, t.project_id) : ''}</div><div class="tm-gp">${bpCard(t, id, bps, bpRev)}</div>`
       + `<div class="tm-tasks only-m">${sec(total ? `Tasks · ${total}` : 'Tasks', tasksIdx)}</div><div class="tm-team">${teamCard}${tUse ? sec('Usage · 30 days', `<div class="kvc" id="tmUse">${cnUseH(tUse, 'agent')}</div>`, info("Tokens, turns and cost at API list prices of the team's current members, from every PC that reported them, whatever team the work was for. Admins only.")) : ''}</div></div>`
-      + `<section class="sec tm-board only-d"><div class="bh"><h4>Board</h4>${total ? progressBar(t) + `<span class="meta">${t.progress.done} of ${total} done</span>` : ''}${bl || dc ? `<span class="bh-lists">${bl ? `<button type="button" class="btn sm" data-tasks="${esc(id)}|backlog">Backlog<span class="cnt">${bl}</span></button>` : ''}${dc ? `<button type="button" class="btn sm" data-tasks="${esc(id)}|discarded">Discarded<span class="cnt">${dc}</span></button>` : ''}</span>` : ''}</div>${boardHtml(t, id, nm)}</section>`,
+      + `<section class="sec tm-board only-d"><div class="bh"><h4>Board</h4>${total ? progressBar(t) + `<span class="meta">${t.progress.done} of ${total} done</span>` : ''}${bl || dc ? `<span class="bh-lists">${bl ? `<button type="button" class="btn sm" data-tasks="${esc(id)}|backlog">Backlog<span class="cnt">${bl}</span></button>` : ''}${dc ? `<button type="button" class="btn sm" data-tasks="${esc(id)}|discarded">Discarded<span class="cnt">${dc}</span></button>` : ''}</span>` : ''}${S.me?.role === 'admin' ? `<button type="button" class="btn sm" data-rec-done>${ic('check')}Record past work</button>` : ''}</div>${boardHtml(t, id, nm)}</section>`,
     after() {
       const again = async () => { await refresh(); openD('team', id, true); };
       $$('[data-ta]').forEach((b) => (b.onclick = () => (b.dataset.ta === 'pause' ? teamPauseSheet(t, tp, again) : run(async () => { await post(`${tp}/${b.dataset.ta}`); await again(); }))));
+      $$('[data-tstart]', $('#dB')).forEach((b) => (b.onclick = startSheet));
       // Only this screen's buttons: the hidden overview's alert chips carry data-appr too.
       $$('[data-appr]', $('#dB')).forEach((b) => (b.onclick = () => run(async () => { await post(`${tp}/tasks/${b.dataset.appr}/approve`); toast('Approved'); await refresh(); openD('team', id, true); })));
       $$('[data-rq-ok]').forEach((b) => (b.onclick = () => run(async () => {
@@ -9762,6 +10224,7 @@ VIEWS.team = async (id) => {
         toast(`Approved: ${r.agent.label}'s key waits for pickup on ${r.pickup.pc.name}. The coordinator has the command.`); await refresh(); openD('team', id, true);
       })));
       $$('[data-rq-no]').forEach((b) => (b.onclick = () => run(async () => { const note = prompt('Reason for the coordinator (optional)') ?? ''; await post(`/recruits/${b.dataset.rqNo}/deny`, { note }); toast('Denied'); openD('team', id, true); })));
+      $$('[data-rec-done]').forEach((b) => (b.onclick = () => recordDoneSheet(tp, b, async (k) => { await refresh(); openD('task', `${id}|${k.id}`); })));
       $$('[data-done-hidden]').forEach((b) => (b.onclick = () => { if (DONE_HIDDEN.has(id)) DONE_HIDDEN.delete(id); else DONE_HIDDEN.add(id); openD('team', id, true); }));
       $$('[data-done-all]').forEach((b) => (b.onclick = () => { if (DONE_ALL.has(id)) DONE_ALL.delete(id); else DONE_ALL.add(id); openD('team', id, true); }));
       armHideDone(id, G.find((g) => g.key === 'done').vis, () => openD('team', id, true));
@@ -9770,14 +10233,26 @@ VIEWS.team = async (id) => {
   };
 };
 coRegister(); // ==== Checkout console panel ====: #tco/<team>
-/* Tasks of a team, one status at a time: #tasks/<team>|doing|review|blocked|open|done|all. */
+/* Tasks of a team, one status at a time: #tasks/<team>|doing|review|blocked|open|done|all, then |<tag> and |<search> (encoded). */
+const tkArg = (team, st, tg, q) => [team, st, tg, q ? encodeURIComponent(q) : ''].join('|').replace(/\|+$/, '');
+const tkDec = (h) => { try { return decodeURIComponent(h || ''); } catch { return ''; } };
+/* The search reads the title and the brief, every word. */
+const tkMatch = (k, q) => { const hay = `${k.title} ${k.description || ''}`.toLowerCase(); return q.toLowerCase().split(/\s+/).filter(Boolean).every((w) => hay.includes(w)); };
 VIEWS.tasks = async (arg) => {
-  const [teamId, fl = '', tg = ''] = String(arg).split('|'), tp = '/teams/' + encodeURIComponent(teamId);
-  // A tag narrows every tab; the chips count the tag over all the team's tasks.
-  const t0 = await withDecisions((await api(tp)).team), tags = tagCounts(t0.board), t = tg ? { ...t0, board: t0.board.filter((k) => (k.tags || []).includes(tg)) } : t0;
-  const nm = teamNm(t), G = [...taskGroups(t, teamId), ...tkExtra(t)];
+  const [teamId, fl = '', tg = '', qh = ''] = String(arg).split('|'), q = tkDec(qh).trim().slice(0, 200), tp = '/teams/' + encodeURIComponent(teamId);
+  // A tag and the search narrow every tab; the tag's counts in Filters are over all the team's tasks. The search reads the
+  // whole loaded board: done tasks past the cap and hidden ones too.
+  const t0 = await withDecisions((await api(tp)).team), tags = tagCounts(t0.board);
+  const t = tg || q ? { ...t0, board: t0.board.filter((k) => (!tg || (k.tags || []).includes(tg)) && (!q || tkMatch(k, q))) } : t0;
+  const nm = teamNm(t), G = [...taskGroups(t, teamId, !!q), ...tkExtra(t)];
   const order = ['backlog', 'doing', 'review', 'blocked', 'open', 'done', 'discarded'].map((k) => G.find((g) => g.key === k)).filter((g) => g.L.length || g.hiddenN);
   const cur = fl === 'all' ? 'all' : order.find((g) => g.key === fl)?.key || order[0]?.key || 'all';
+  // The toolbar: the search box with the tag as a chip, then Filters (Tag). The ✕ keeps the status tab (a tab is not a filter).
+  const go = (g, qq) => `data-cs-nav="tasks|${esc(tkArg(teamId, fl, g, qq))}"`, clearTo = go('', '');
+  // A tag shows by its display name where the project's list names it (Project settings, Tags), else as #tag.
+  const tgName = (g) => (t0.task_tags || []).find((x) => x.tag === g)?.name || '#' + g;
+  const chips = tg ? [{ label: tgName(tg), name: `Remove tag ${tgName(tg)}`, attrs: go('', q) }] : [];
+  const tools = `<div class="ltb">${chipSearch({ attrs: 'id="tkQ"', label: 'Search tasks', value: q, chips, clear: clearTo, more: 'data-cs-filt="tkF"' })}${filterBtn('tkF', chips.length)}</div>`;
   // The Done list's actions sit under the rows as labelled buttons (as on the board), so they never read as one more task.
   const doneFoot = (g) => {
     const b = [g.L.length > DONE_CAP ? `<button type="button" class="btn sm" data-done-all="${esc(teamId)}">${ic('down')}${g.capped ? `Show all ${g.L.length}` : 'Show newest only'}</button>` : '',
@@ -9787,15 +10262,15 @@ VIEWS.tasks = async (arg) => {
   };
   const list = (g) => g.shown.map((k) => (g.key === 'backlog' ? backlogRow(k, '') : taskRow(k, g.sts[0], t, teamId, nm))).join('')
     + (g.key === 'done' ? doneFoot(g) : '');
-  const tab = (key, label, n) => `<button type="button" role="tab" class="${key === cur ? 'on' : ''}" aria-selected="${key === cur}" data-tasks-f="${esc(teamId)}|${key}${tg ? '|' + esc(tg) : ''}">${label}<span class="cnt">${n}</span></button>`;
-  const body = tagChips(`tasks:${teamId}|${cur}`, tags, tg) + (order.length
+  const tab = (key, label, n) => `<button type="button" role="tab" class="${key === cur ? 'on' : ''}" aria-selected="${key === cur}" data-tasks-f="${esc(tkArg(teamId, key, tg, q))}">${label}<span class="cnt">${n}</span></button>`;
+  const body = tools + (order.length
     ? `<nav class="tabs" role="tablist" aria-label="Task status">${order.map((g) => tab(g.key, g.label, g.L.length)).join('')}${tab('all', 'All', order.reduce((n, g) => n + g.L.length, 0))}</nav>`
       + `<section class="sec"><div>${cur === 'all' ? order.map((g) => overline(g.label, g.L.length) + list(g)).join('') : list(order.find((g) => g.key === cur))}</div></section>`
-    : `<section class="sec">${none('note', tg ? `No task tagged #${esc(tg)}` : 'No tasks yet')}</section>`);
+    : `<section class="sec">${tg || q ? none('note', q ? 'No task matches this search' : `No task tagged ${esc(tgName(tg))}`, false, emptyAct('Clear search and filters', clearTo)) : none('note', 'No tasks yet')}</section>`);
   return {
     // Desktop: the same progress line as the phone app bar, under the title.
-    t: `${ic('team')}<span class="tk-ht"><span class="ellip">${esc(t.name)} · Tasks</span>${t.progress.total ? `<span class="tmeta">${tg ? `#${esc(tg)} · ` : ''}${t.progress.done} of ${plural(t.progress.total, 'task')} done</span>` : ''}</span>`,
-    here: { label: 'Tasks', meta: `${tg ? '#' + tg + ' · ' : ''}${t.progress.total ? `${t.progress.done} of ${t.progress.total} done` : 'none yet'}` },
+    t: `${ic('team')}<span class="tk-ht"><span class="ellip">${esc(t.name)} · Tasks</span>${t.progress.total ? `<span class="tmeta">${tg ? `${esc(tgName(tg))} · ` : ''}${t.progress.done} of ${plural(t.progress.total, 'task')} done</span>` : ''}</span>`,
+    here: { label: 'Tasks', meta: `${tg ? tgName(tg) + ' · ' : ''}${t.progress.total ? `${t.progress.done} of ${t.progress.total} done` : 'none yet'}` },
     dbar: { title: 'Tasks' },
     b: body,
     after() {
@@ -9803,6 +10278,10 @@ VIEWS.tasks = async (arg) => {
       $$('[data-done-hidden]').forEach((b) => (b.onclick = () => { if (DONE_HIDDEN.has(teamId)) DONE_HIDDEN.delete(teamId); else DONE_HIDDEN.add(teamId); openD('tasks', arg, true); }));
       $$('[data-done-all]').forEach((b) => (b.onclick = () => { if (DONE_ALL.has(teamId)) DONE_ALL.delete(teamId); else DONE_ALL.add(teamId); openD('tasks', arg, true); }));
       armHideDone(teamId, G.find((g) => g.key === 'done').vis, () => openD('tasks', arg, true));
+      const form = $('#tkQ'); csrchFit(form);
+      form.onsubmit = async (e) => { e.preventDefault(); await openD('tasks', tkArg(teamId, fl, tg, form.q.value.trim()), true); $('#dB .csrch-in')?.focus(); };
+      $('#tkF').onclick = (e) => { const sh = openSheet({ title: 'Filter tasks', anchor: e.currentTarget, html: `<div class="sheet-form">${selField('tkTag', 'Tag', [['', 'All tags'], ...(tg && !tags.some((g) => g.tag === tg) ? [{ tag: tg, n: 0 }] : []).concat(tags).map((g) => [g.tag, `${tgName(g.tag)} · ${g.n}`])], tg)}</div>` });
+        $('#tkTag', sh).onchange = () => { const v = $('#tkTag', sh).value; closeSheet(); openD('tasks', tkArg(teamId, fl, v, q), true); }; };
     },
   };
 };
@@ -9814,7 +10293,10 @@ VIEWS.members = async (teamId) => {
   const tp = '/teams/' + encodeURIComponent(teamId), t = (await api(tp)).team;
   if (DR.type !== 'members' || DR.arg !== teamId) { egoReset(); TG_S.focus = { kind: 'team', id: teamId }; }
   S.convs = (await api('/conversations').catch(() => ({ conversations: S.convs }))).conversations;
-  const list = (T) => T.members.length ? T.members.map((m) => memberRow(m, teamNm(T))).join('') : none('team', 'No members');
+  // Context bars (admins only): fetched with the page and again on each redraw, so a long turn shows its growth.
+  const ctxOf = () => (S.me?.role === 'admin' ? api(tp + '/context').then((r) => r.agents).catch(() => null) : Promise.resolve(null));
+  let cx = await ctxOf();
+  const list = (T) => T.members.length ? T.members.map((m) => memberRow(m, teamNm(T), cx)).join('') : none('team', 'No members');
   return {
     t: `${ic('team')}<span class="ellip">${esc(t.name)} · Members</span>`,
     here: { label: 'Members', meta: plural(t.members.length, 'member') },
@@ -9826,7 +10308,7 @@ VIEWS.members = async (teamId) => {
     after() {
       const bind = (T = t) => { tmgBindMembers(T); $$('[data-hand]', $('#memL')).forEach((b) => (b.onclick = () => run(async () => { const h = await api(`${tp}/handoff`); const m = h.messages.find((x) => x.agent_id === b.dataset.hand); if (m) copy(m.text); }))); };
       bind();
-      MEM_DRAW = async () => { const T = (await api(tp)).team; const L = $('#memL'); if (!L || DR.type !== 'members' || DR.arg !== teamId) return; if (htmlIf(L, list(T))) bind(T); };
+      MEM_DRAW = async () => { const [T, c2] = await Promise.all([api(tp).then((r) => r.team), ctxOf()]); cx = c2; const L = $('#memL'); if (!L || DR.type !== 'members' || DR.arg !== teamId) return; if (htmlIf(L, list(T))) bind(T); };
       egoPanelBind($('#topoFeed')); egoPanelBind($('#tgRank'));
       renderAgentGraph();
     },
@@ -9963,17 +10445,17 @@ VIEWS.tsettings = async (teamId) => {
     after() {
       tmgSettingsBind(t, mg);
       // These controls are buttons, not inputs: mark the form edited so the background refresh leaves it alone.
-      $$('#twMode button').forEach((b) => (b.onclick = () => { markEdited(); $$('#twMode button').forEach((x) => x.classList.toggle('on', x === b)); }));
       $$('#twRev button, #twIntake button, #twRule button').forEach((b) => (b.onclick = () => { markEdited(); $$('button', b.parentElement).forEach((x) => { x.classList.toggle('on', x === b); x.setAttribute('aria-pressed', String(x === b)); }); }));
       $$('#twRec button').forEach((b) => (b.onclick = () => { markEdited(); $$('#twRec button').forEach((x) => x.classList.toggle('on', x === b)); $('.tw-rec').hidden = b.dataset.rec === 'off'; }));
       $$('.tw [role=switch]').forEach((b) => (b.onclick = () => { markEdited(); flipSwitch(b); }));
+      const tgBtn = $('#twTags'); if (tgBtn) tgBtn.onclick = () => tagListSheet(t, tgBtn);
       $('#twSave').onclick = () => run(async () => {
-        const mode = $('#twMode button.on')?.dataset.mode || t.delivery_mode, mins = Math.round(Number($('#twLease').value) * 60);
+        const mins = Math.round(Number($('#twLease').value) * 60);
         if (!(mins >= 1 && mins <= 1440)) return toast('Check-in time: between 1 minute and 24 hours', true);
         const rec = $('#twRec button.on')?.dataset.rec || t.recruiting, roles = $$('[data-recrole]').filter((x) => x.checked).map((x) => x.dataset.recrole);
         if (rec !== 'off' && !roles.length) return toast('Pick at least one role a recruit may take', true);
         if (rec === 'off' && t.recruiting !== 'off' && !confirm('Switching recruiting off revokes the keys of agents this team recruited. Continue?')) return;
-        await api(tp, 'PATCH', { delivery_mode: mode, close_on_approve: $('#twClose').classList.contains('on'), coordinator_reviews: $('#twCoord').classList.contains('on'), feedback_nudge: $('#twNudge').classList.contains('on'), ...($('#twDecide') ? { coordinator_decides_blueprint: $('#twDecide').classList.contains('on') } : {}), lease_minutes: mins,
+        await api(tp, 'PATCH', { close_on_approve: $('#twClose').classList.contains('on'), coordinator_reviews: $('#twCoord').classList.contains('on'), feedback_nudge: $('#twNudge').classList.contains('on'), coordinator_records_done: $('#twRecDone').classList.contains('on'), ...($('#twDecide') ? { coordinator_decides_blueprint: $('#twDecide').classList.contains('on') } : {}), lease_minutes: mins,
           recruiting: rec, ...(rec !== 'off' ? { recruit_max: Math.max(1, Math.min(20, +$('#twRecMax').value || 4)), recruit_days: Math.max(1, Math.min(90, +$('#twRecDays').value || 7)), recruit_roles: roles, recruit_template_id: $('#twRecTpl').value || null } : {}) });
         const stall = $('#twStall').classList.contains('on'), missed = $('#twMissed')?.classList.contains('on');
         if (stall !== !!t.stall_warnings) await api(tp + '/attention', 'PUT', { stall_warnings: stall });
@@ -9992,6 +10474,53 @@ VIEWS.tsettings = async (teamId) => {
     },
   };
 };
+/* Project settings → Tags (docs/dashboard-ux.md): the project's fixed list of at most 7 tags, and the one-time map of the old tags onto
+   it. Nothing is saved before the screen has shown which tags are dropped, which tasks lose a tag and which end up with none. */
+const tgWord = (s) => String(s).trim().toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9._-]/g, '').slice(0, 24);
+async function tagListSheet(t, anchor) {
+  const pid = t.project_id, u = '/projects/' + encodeURIComponent(pid) + '/task-tags';
+  const st = await api(u), MAXT = st.max || 7;
+  // a project over 7 tags without a list is shown a note until it is mapped (the hub leaves its tasks as they are)
+  let rows = st.list.map((g) => g.name), map = {}, previewed = '';
+  const cur = () => { const out = []; for (const n of rows) { const name = n.trim().slice(0, 24); const tag = tgWord(name); if (tag && !out.some((g) => g.tag === tag)) out.push({ tag, name }); } return out; };
+  const prune = () => { const L = cur(); for (const k of Object.keys(map)) if (!L.some((x) => x.tag === map[k])) delete map[k]; }; // a mapping to a removed or renamed row goes
+  const key = () => { prune(); return JSON.stringify([cur(), map]); };
+  const sh = openSheet({ title: 'Task tags', anchor, cls: 'form', html: '<div class="sheet-form" id="tgBody"></div>' });
+  const draw = () => {
+    prune();
+    const L = cur(), old = st.in_use.filter((g) => !L.some((x) => x.tag === g.tag));
+    $('#tgBody', sh).innerHTML = `${st.over ? `<p class="err">More than 7 tags are in use: set a list.</p>` : ''}<p class="hint">At most ${MAXT} tags. Each task has 1 or 2 of them. Agents are refused any tag outside the list. Leave it empty to go back to free tags (at most 2 per task).</p>
+      <div class="tg-rows">${rows.map((n, i) => `<div class="tg-row"><input class="inp" data-tgn="${i}" maxlength="24" value="${esc(n)}" aria-label="Tag ${i + 1}"><button type="button" class="ibtn" data-tgx="${i}" aria-label="Remove tag ${i + 1}">${ic('x')}</button></div>`).join('')}</div>
+      <button type="button" class="btn sm" id="tgAdd"${rows.length >= MAXT ? ' disabled' : ''}>Add a tag</button>
+      ${L.length && old.length ? `<h4 class="tg-h">Map the old tags</h4><p class="hint">Each task keeps at most two tags, in list order. A tag left unmapped is dropped.</p>${old.map((g, i) => selField('tgm' + i, '#' + g.tag + ' · ' + g.n + (g.n === 1 ? ' task' : ' tasks'), [['', 'Leave unmapped'], ...L.map((x) => [x.tag, x.name])], map[g.tag] || '')).join('')}` : ''}
+      <div id="tgPrev"></div><span class="err" id="tgErr" role="alert"></span>
+      <div class="sheet-acts"><button type="button" class="btn lg" data-sheet-close>Cancel</button><button type="button" class="btn lg pri" id="tgGo">${previewed === key() ? 'Save the list' : 'Show what changes'}</button></div>`;
+    $$('[data-tgn]', sh).forEach((i) => (i.oninput = () => { rows[+i.dataset.tgn] = i.value; }));
+    $$('[data-tgn]', sh).forEach((i) => (i.onchange = () => { previewed = ''; draw(); }));
+    $$('[data-tgx]', sh).forEach((b) => (b.onclick = () => { rows.splice(+b.dataset.tgx, 1); previewed = ''; draw(); }));
+    $('#tgAdd', sh).onclick = () => { rows.push(''); previewed = ''; draw(); $$('[data-tgn]', sh).at(-1)?.focus(); };
+    old.forEach((g, i) => { $('#tgm' + i, sh).onchange = (e) => { if (e.target.value) map[g.tag] = e.target.value; else delete map[g.tag]; previewed = ''; draw(); }; });
+    $('#tgGo', sh).onclick = () => run(async () => {
+      prune();
+      const body = { tags: cur(), map }, err = $('#tgErr', sh); err.textContent = '';
+      try {
+        if (previewed !== key()) {
+          const pv = await post(u + '/preview', body), name = (g) => '#' + g, titles = (L, n = 8) => L.slice(0, n).map((k) => `<li>${esc(k.title)}${k.lost && k.lost.length ? ` <span class="meta">loses ${esc(k.lost.map(name).join(', '))}</span>` : ''}</li>`).join('') + (L.length > n ? `<li class="meta">and ${L.length - n} more</li>` : '');
+          previewed = key();
+          draw();
+          $('#tgPrev', sh).innerHTML = body.tags.length ? `<div class="tg-pv"><p><b>${pv.changed}</b> of ${pv.total} tasks change their tags; versions stay as they are.</p>
+            ${pv.dropped.length ? `<p>Dropped: ${pv.dropped.map((g) => `#${esc(g.tag)} (${g.n})`).join(', ')}</p>` : ''}
+            ${pv.lose.length ? `<p>Tasks that lose a tag · ${pv.lose.length}</p><ul>${titles(pv.lose)}</ul>` : ''}
+            ${pv.none.length ? `<p>Tasks left with no tag · ${pv.none.length}</p><ul>${titles(pv.none)}</ul>` : '<p>No task is left without a tag.</p>'}</div>` : '<div class="tg-pv"><p>Free tags again, at most 2 per task. No task changes.</p></div>';
+          return;
+        }
+        const r = await api(u, 'PUT', body);
+        closeSheet(); toast(body.tags.length ? `Tags saved: ${r.remapped} task${r.remapped === 1 ? '' : 's'} remapped` : 'Tag list removed'); openD('tsettings', t.id, true);
+      } catch (e) { err.textContent = e.message || 'Not saved'; }
+    });
+  };
+  draw();
+}
 /* The team's Release notes rule in its project (docs/blueprint.md §4 Rules), or null when it cannot be read. */
 const rulesOf = async (pid, teamId) => { try { return (await api('/projects/' + encodeURIComponent(pid) + '/rules')).rules.find((r) => r.team_id === teamId && r.rule === 'release_notes') || null; } catch { return null; } };
 /* Changes applied by rules (#rules/<team>): what a team's rules applied without a proposal, newest first by day, and the
@@ -10039,6 +10568,23 @@ const dHM = (ms) => { const m = Math.round(ms / 60000); return m < 60 ? m + ' mi
 /* Lifecycle: the six steps a task passes through. changes_requested sits on In progress (the assignee reworks it); blocked stays on the step it was
    blocked at; cancelled leaves every step untouched. */
 /* A task status as people say it, sentence case ("In progress"), for meta lines. */
+/* Record past work as done (the operator): one step, no review round, no files; the task is marked "recorded by you, not reviewed". */
+function recordDoneSheet(tp, anchor, done) {
+  fbSheet({ title: 'Record past work', anchor, label: 'Record as done',
+    fields: `<p class="hint">For work already finished outside a task. It is recorded as done without review, so it never counts toward a requirement or as evidence. Audited.</p>
+      <label class="fld"><span class="vlabel">What was delivered</span><input class="inp" id="rdTitle" maxlength="200" data-req autocomplete="off"></label>
+      ${fbArea('rdSum', 'Summary: what was done and where it lives', 20000, 4)}
+      <label class="fld"><span class="vlabel">Requirements it served (optional, comma-separated keys)</span><input class="inp" id="rdRefs" maxlength="400" autocomplete="off" placeholder="e.g. FR-TEAM-04"></label>
+      <label class="fld"><span class="vlabel">Fixes a done task (optional, its id)</span><input class="inp" id="rdFix" maxlength="100" autocomplete="off" placeholder="task_…"></label>`,
+    onGo: async (sh) => {
+      const title = fbVal(sh, 'rdTitle'), summary = fbVal(sh, 'rdSum'), fixes = fbVal(sh, 'rdFix');
+      if (!title) return ['Say what was delivered.', 'rdTitle'];
+      if (!summary) return ['Add a summary: what was done and where it lives.', 'rdSum'];
+      const refs = fbVal(sh, 'rdRefs').split(/[\s,]+/).filter(Boolean);
+      const r = await post(`${tp}/tasks/record`, { title, summary, ...(refs.length ? { refs } : {}), ...(fixes ? { fixes } : {}) });
+      toast('Recorded as done, not reviewed'); await done(r.task);
+    } });
+}
 const tkStatus = (st) => ({ backlog: 'In the backlog', changes_requested: 'Changes requested', blocked: 'Blocked', discarded: 'Discarded', cancelled: 'Cancelled' })[st] || LC.find(([k]) => k === st)?.[1] || cap(String(st || '').replace(/_/g, ' '));
 const LC = [['open', 'Open'], ['assigned', 'Assigned'], ['in_progress', 'In progress'], ['in_review', 'In review'], ['approved', 'Approved'], ['done', 'Done']];
 const LC_AT = { open: 0, assigned: 1, in_progress: 2, changes_requested: 2, in_review: 3, approved: 4, done: 5 };
@@ -10156,6 +10702,8 @@ VIEWS.task = async (arg) => {
   const [teamId, taskId] = String(arg).split('|'), tp = '/teams/' + encodeURIComponent(teamId);
   const [{ task: k, events }, { team: t }, fbk] = await Promise.all([api(`${tp}/tasks/${encodeURIComponent(taskId)}`), api(tp),
     S.me?.role === 'admin' ? api('/feedback/by-task/' + encodeURIComponent(taskId)).catch(() => null) : null]);
+  // The assignee's context bar while the task is open (admins only).
+  const kcx = k?.assignee && S.me?.role === 'admin' && !['done', 'cancelled', 'discarded'].includes(k.status) ? await api('/agents/' + encodeURIComponent(k.assignee) + '/context').catch(() => null) : null;
   if (!k) return { t: `${ic('note')}Task`, b: none('note', 'Task not found'), dbar: { title: 'Task' } };
   TA_G = [];
   const nm = (aid) => (aid ? t.members.find((m) => m.agent_id === aid)?.label || agLabel(aid) : '—');
@@ -10183,7 +10731,7 @@ VIEWS.task = async (arg) => {
   // People: who does the work and who reviews it, then the dates.
   const person = (aid, what) => {
     const r = t.members.find((m) => m.agent_id === aid)?.role;
-    return aid ? row({ as: 'div', lead: `<span class="av lg">${esc(initials(nm(aid)))}</span>`, title: raw(who(aid)), meta: [what, r && cap(r) !== what && cap(r)].filter(Boolean).join(' · ') })
+    return aid ? row({ as: 'div', lead: `<span class="av lg">${esc(initials(nm(aid)))}</span>`, title: raw(who(aid)), meta: [what, r && cap(r) !== what && cap(r)].filter(Boolean).join(' · '), trail: what === 'Assignee' ? cxBar(kcx, { quiet: true }) : '' })
       : row({ as: 'div', cls: 'tk-none', lead: `<span class="av lg tk-nav">${ic('user')}</span>`, title: what === 'Assignee' ? 'Not assigned' : 'No reviewer', meta: what });
   };
   // A cancelled or discarded task's share is dropped by the hub: the row goes (its attachments, if any, still show above).
@@ -10209,8 +10757,13 @@ VIEWS.task = async (arg) => {
   // From feedback: the reports this task fixes (the operator's screen shows every one, hidden ones too).
   const FBK = fbk?.reports || [];
   const fromFb = FBK.length ? sec(`From feedback · ${FBK.length}`, FBK.map((x) => row({ title: x.title, meta: [fbStatusName(x.status), x.closed_by_task ? 'closed by this work' : '', x.hidden ? 'hidden' : ''].filter(Boolean).join(' · '), lead: `<span class="pl-lead">${ic('wish')}</span>`, chev: true, attrs: { 'data-fb': x.id } })).join('')) : '';
-  const people = sec('People', relay + person(k.assignee, 'Assignee') + revRow
-    + `<div class="tk-kv">${canRev ? kv('Review', `<span class="tk-rev">${noRev ? 'None' : 'Required'}${reviewBtn(t.id, k, noRev ? 'required' : 'none')}</span>`) : ''}${kv(k.status === 'backlog' || gone ? 'Proposed' : 'Opened', esc(dt(k.created_at)))}${k.created_by_label ? kv('Created by', esc(k.created_by_label)) : ''}${tagsKv}${k.review_rounds ? kv('Review rounds', String(k.review_rounds)) : ''}${refs || pend ? kv('Requirement', refChips(k, t, { open: true }) + (pend ? `<span class="meta tk-pend">${esc(pend === 1 ? `${k.pending_refs[0]} is waiting for the operator to apply the plan.` : `${plural(pend, 'item')} are waiting for the operator to apply the plan.`)}</span>` : '')) : ''}${end ? kv('Closed', esc(dt(end))) + kv('Took', esc(dHM(end - (start || k.created_at)))) : ''}${share}</div>`);
+  // Past work recorded as done: nobody worked it as a task or reviewed it; say who recorded it.
+  const rec = k.recorded, recRow = rec ? row({ as: 'div', cls: 'tk-relay', lead: `<span class="av lg">${ic('check')}</span>`, title: cap(rec.label), meta: `Recorded ${dt(rec.at)} · never counts toward a requirement or as evidence` }) : '';
+  // The fix link, both ways: the done task this one fixes, and the tasks that fix this one.
+  const tkLink = (x) => `<a href="#" data-task="${esc(teamId)}|${esc(x.id)}">${esc(x.title)}</a> <span class="faint">· ${esc(tkStatus(x.status))}</span>`;
+  const fixKv = (k.fixes ? kv('Fixes', tkLink(k.fixes)) : '') + ((k.fixed_by || []).length ? kv('Fixed by', k.fixed_by.map(tkLink).join('<br>')) : '');
+  const people = sec('People', relay + (rec ? recRow : person(k.assignee, 'Assignee') + revRow)
+    + `<div class="tk-kv">${canRev ? kv('Review', `<span class="tk-rev">${noRev ? 'None' : 'Required'}${reviewBtn(t.id, k, noRev ? 'required' : 'none')}</span>`) : ''}${kv(k.status === 'backlog' || gone ? 'Proposed' : 'Opened', esc(dt(k.created_at)))}${k.created_by_label ? kv('Created by', esc(k.created_by_label)) : ''}${tagsKv}${k.review_rounds ? kv('Review rounds', String(k.review_rounds)) : ''}${refs || pend ? kv('Requirement', refChips(k, t, { open: true }) + (pend ? `<span class="meta tk-pend">${esc(pend === 1 ? `${k.pending_refs[0]} is waiting for the operator to apply the plan.` : `${plural(pend, 'item')} are waiting for the operator to apply the plan.`)}</span>` : '')) : ''}${end ? kv('Closed', esc(dt(end))) + kv('Took', esc(dHM(end - (start || k.created_at)))) : ''}${fixKv}${share}</div>`);
   // Review rounds: each submission with the reviewer's verdict under it. The newest round comes first; every comment appears once.
   const rounds = []; let cur = null;
   for (const e of events) {
@@ -10285,7 +10838,7 @@ VIEWS.task = async (arg) => {
     // Main (in short, progress, rounds) | people | files and timeline: one column on phones and tablets, main | people from
     // 1180 px with files and timeline under main, three columns from 1600 px.
     b: `<div class="tk">${k.dismissed_at ? vnote(`Hidden from the board ${esc(ago(k.dismissed_at))} ago. The task and this report are kept.`) : ''}${blHead}`
-      + `<div class="tk-grid"><div class="tk-main">${inShort}${taBrief}<section class="sec tk-lc">${lifecycle(k, t, events)}</section>${thread}</div>`
+      + `<div class="tk-grid"><div class="tk-main">${inShort}${taBrief}<section class="sec tk-lc">${lifecycle(k, t, events)}${delivLine(k, t.id)}</section>${thread}</div>`
       + `<aside class="tk-side">${people}${fromFb}</aside><div class="tk-aux">${fileCard}${timeline}</div></div></div>`,
   };
 };
@@ -10379,7 +10932,6 @@ VIEWS.tbuild = async () => {
       </div>
       <div class="tb-col">
         ${sec('How it works', `<div class="tw">
-          ${twRow('Mode', 'Polling agents loop on work_next. On-demand agents work when woken and never poll.', `<div class="seg" id="bMode"><button data-mode="poll" class="on">${ic('rot')}Polling</button><button data-mode="on_demand">${ic('bolt')}On demand</button></div>`)}
           ${twRow('Messaging', 'Members may message each other and the team room.', switchBtn('Messaging', true, 'id="bMsg"'))}
           ${twRow('Approval before done', 'Finished tasks wait for you.', switchBtn('Approval before done', false, 'id="bCp"'))}
           ${twRow('Close on approval', 'An approving review closes the task in one call.', switchBtn('Close on approval', false, 'id="bClose"'))}
@@ -10392,7 +10944,6 @@ VIEWS.tbuild = async () => {
       draw();
       const tog = (b) => (b.onclick = () => flipSwitch(b));
       ['#bMsg', '#bCp', '#bClose', '#bCoord'].forEach((id) => tog($(id)));
-      $$('#bMode button').forEach((b) => (b.onclick = () => $$('#bMode button').forEach((x) => x.classList.toggle('on', x === b))));
       $('#bQ').oninput = () => { B.q = $('#bQ').value.trim().toLowerCase(); draw(); };
       $('#bM').onchange = (e) => {
         const member = e.target.closest('.bm'); if (!member) return;
@@ -10419,8 +10970,8 @@ VIEWS.tbuild = async () => {
         if (!members.some((m) => m.role === 'coordinator')) return toast('A team needs a coordinator', true);
         const limits = {}; $$('[data-lim]').forEach((i) => { if (+i.value > 0) limits[i.dataset.lim] = Math.floor(+i.value); });
         const r = await post('/teams', { name, goal, members, grant_messaging: $('#bMsg').classList.contains('on'), ...(Object.keys(limits).length ? { limits } : {}), ...($('#bCp').classList.contains('on') ? { checkpoints: ['done'] } : {}) });
-        const mode = $('#bMode button.on')?.dataset.mode || 'poll', close = $('#bClose').classList.contains('on'), coord = $('#bCoord').classList.contains('on');
-        if (mode !== 'poll' || close || coord) await api('/teams/' + r.team.id, 'PATCH', { delivery_mode: mode, close_on_approve: close, coordinator_reviews: coord });
+        const close = $('#bClose').classList.contains('on'), coord = $('#bCoord').classList.contains('on');
+        if (close || coord) await api('/teams/' + r.team.id, 'PATCH', { close_on_approve: close, coordinator_reviews: coord });
         await refresh(); openD('team', r.team.id, false, true);
       });
     },
@@ -10561,15 +11112,27 @@ const RS_TABLE = {
   agents: ['Agents', 'sessions'], credentials: ['Keys', 'keys'], session_tokens: ['Logins', 'sessions'], agent_links: ['Agent links', 'sessions'], agent_notices: ['Notices to agents', 'sessions'],
   access_requests: ['Access requests', 'req'], temporary_grants: ['Temporary grants', 'req'], permission_policies: ['Key permissions', 'keys'], permission_rules: ['Permission rules', 'keys'], policy_versions: ['Permission history', 'keys'],
   machines: ['PCs', 'pcs'], machine_folders: ['Approved PC folders', 'pcs'], bridge_keys: ['Bridge pairings', 'pcs'], setup_keys: ['PC setup codes', 'pcs'],
-  hw_machines: ['Machines offered for compute', 'hardware'], hw_machine_teams: ['Teams a machine serves', 'hardware'], hw_queue: ['Machine waiting lists', 'hardware'], hw_flags: ['Machine holder flags', 'hardware'],
+  hw_machines: ['Machines offered for compute', 'hardware'], hw_machine_teams: ['Teams a machine serves', 'hardware'], hw_queue: ['Machine waiting lists', 'hardware'], hw_flags: ['Machine holder flags', 'hardware'], hw_holds: ['Machine hold history', 'hardware'], hw_samples: ['Machine use samples', 'hardware'], hw_hold_use: ['Machine use per hold', 'hardware'], hw_use_days: ['Machine use per day', 'hardware'],
   shares: ['Shares', 'shares'], share_versions: ['Share versions', 'shares'], share_recipients: ['Share recipients', 'shares'], share_feedback: ['Share feedback', 'shares'], share_promotions: ['Share promotions', 'shares'], data_channels: ['Transfer channels', 'shares'],
   files: ['Vault file index', 'vault'], file_revisions: ['File revisions', 'log', 'files'], file_conflicts: ['File conflicts', 'vault', 'conf'], write_intents: ['Pending writes'],
   system_settings: ['Settings (vault state or lockdown switches)', 'lock'],
   feedback_reports: ['Agent feedback reports', 'feedback'], feedback_entries: ['Feedback entries'], feedback_links: ['Feedback links'], feedback_calls: ['Feedback evidence'], feedback_history: ['Feedback history'], feedback_requests: ['Feedback retries'], feedback_hints: ['Feedback hints'],
 };
-/* Hardware (#hardware, docs/hardware.md): machines offered for compute, who holds each, who waits, and flags for holders that lost
-   their task or access. Register machine / Edit open one sheet: Machine, Access, Availability, Limits, Teams, then Preview. */
+/* Hardware (#hardware, #hwm/<pc id>; docs/hardware.md, docs/dashboard-ux.md Security → Hardware): the machines offered for
+   compute, their flags and the analysis of who held what; a machine page with its list, week grid, allowances, Pause and
+   What ran. Add machine / Edit open one sheet: Machine, Access, Opening hours, Limits, Teams with daily hours, then Preview.
+   The period and the toolbar's filters (search, machine, team, agent chips) stay while moving between the two pages. */
 const HW_DAYS = [['mon', 'Mon'], ['tue', 'Tue'], ['wed', 'Wed'], ['thu', 'Thu'], ['fri', 'Fri'], ['sat', 'Sat'], ['sun', 'Sun']];
+const HW_PERIODS = [['24h', '24 hours'], ['7d', '7 days'], ['30d', '30 days']];
+const HW_F = { p: '7d', q: '', machine: '', team: '', agent: '' };
+// Team colours in the bars: classes .hw-s0–.hw-s4 on the existing series tokens, in order; a sixth team and beyond share .hw-s5.
+const hwSeries = (i) => `hw-s${Math.min(i, 5)}`;
+const HW_FLAG = { lost: 'Lost task', window: 'Past window', allowance: 'Past allowance', limit: 'Over limit' };
+const hwLoad = (extra = {}) => {
+  const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+  const f = { period: HW_F.p, tz, q: HW_F.q, machine: HW_F.machine, team: HW_F.team, agent: HW_F.agent, ...extra };
+  return api('/hardware?' + new URLSearchParams(Object.entries(f).filter(([, v]) => v)).toString());
+};
 const hwWindows = (W) => {
   if (!W.length) return 'Any time';
   return W.map((w) => {
@@ -10579,11 +11142,16 @@ const hwWindows = (W) => {
   }).join('; ');
 };
 const hwLimits = (m) => [m.memory_gb != null ? `${m.memory_gb} GB memory` : '', m.cpus != null ? plural(m.cpus, 'CPU') : '', m.gpu ? `GPU ${m.gpu}` : ''].filter(Boolean).join(' · ') || 'None declared';
-const hwWhen = (a) => (a.any ? pill('Any time', 'ok') : a.now ? pill(`Scheduled now · until ${a.until}`, 'ok') : pill(`Outside scheduled hours${a.next ? ` · opens ${a.next}` : ''}`, 'idle'));
+/* The window state in words: "In window · until 22:00", "Closed · opens Mon 08:00", "Any time" or "Paused", with its tone. */
+const hwState = (m) => (m.paused ? ['Paused', 'warn'] : m.availability.any ? ['Any time', 'ok'] : m.availability.now ? [`In window · until ${m.availability.until}`, 'ok'] : [`Closed${m.availability.next ? ` · opens ${m.availability.next}` : ''}`, 'idle']);
+const hwH = (ms) => `${Math.round((ms || 0) / 360000) / 10} h`;
+const hwDur = (ms) => { const m = Math.round((ms || 0) / 60000); return m < 1 ? 'under a minute' : m < 60 ? `${m} min` : `${Math.floor(m / 60)} h${m % 60 ? ` ${m % 60} min` : ''}`; };
 const hwTask = (e) => (e.team_id && e.task_id ? `<a href="#" data-task="${esc(e.team_id)}|${esc(e.task_id)}">${esc(e.task_title || 'Task')}</a>` : esc(e.task_title || 'A task'));
 const hwWho = (e) => `<a href="#" data-ses="${esc(e.agent_id)}">${esc(e.label)}</a>`;
 const hwRm = (e) => `<button type="button" class="btn ghost sm" data-hw-rm="${esc(e.seq)}" aria-label="Remove ${esc(e.label)} from the list">Remove</button>`;
-function hwCard(m) {
+
+/* Holder and Waiting, as before: the entries with their agent, team, task, times and Remove. */
+function hwList(m) {
   const h = m.holder;
   const holder = h ? `<div class="hw-ent hw-hold">
       <div class="hw-ent-h"><span>${hwWho(h)}<span class="meta"> · ${esc(h.team_name)}</span></span>${hwRm(h)}</div>
@@ -10591,38 +11159,185 @@ function hwCard(m) {
       ${h.report ? `<p class="hw-rep">“${esc(h.report)}” <span class="meta">${esc(ago(h.reported_at))} ago</span></p>` : '<p class="meta">No report yet.</p>'}</div>` : `<p class="meta hw-none">Nobody holds it.</p>`;
   const waiting = m.waiting.map((e, i) => `<div class="hw-ent"><div class="hw-ent-h"><span><b class="hw-pos">${i + 1}</b>${hwWho(e)}<span class="meta"> · ${esc(e.team_name)}</span></span>${hwRm(e)}</div>
       <div class="meta">Task ${hwTask(e)} · joined ${esc(ago(e.joined_at))} ago${e.estimate_minutes ? ` · about ${plural(e.estimate_minutes, 'minute')}` : ''}</div></div>`).join('');
-  return `<section class="pcard hw-card" aria-label="${esc(m.name)}">
-    <div class="kd-h"><h3>${ic('pc')}${esc(m.name)}</h3><span class="hw-hd">${hwWhen(m.availability)}<button type="button" class="btn sm" data-hw-edit="${esc(m.id)}">${ic('edit')}Edit</button></span></div>
-    ${kv('Access', `<span class="mono">${esc(m.access)}</span>`)}
-    ${kv('Availability', `${esc(hwWindows(m.windows))}<span class="kv-sub"> · ${esc(m.timezone)}</span>`)}
-    ${kv('Limits', `${esc(hwLimits(m))}<span class="kv-sub"> · declared</span>`)}
-    ${m.notes ? kv('Notes', esc(m.notes)) : ''}
-    ${kv('Teams', m.teams.length ? esc(m.teams.map((t) => t.name).join(', ')) : '<span class="warn-t">None: no agent can join</span>')}
-    ${overline('Holder')}${holder}
-    ${overline('Waiting', m.waiting.length)}${waiting || '<p class="meta hw-none">Nobody is waiting.</p>'}
+  return `${overline('Holder')}${holder}${overline('Waiting', m.waiting.length)}${waiting || '<p class="meta hw-none">Nobody is waiting.</p>'}`;
+}
+/* Measured use (docs/hardware.md#measuring): the whole machine's figures from its connector, never proof of what an agent ran. */
+const hwPct = (x) => `${Math.round(x)} %`;
+const hwGb = (x) => `${Math.round(x * 10) / 10} GB`;
+const hwMeter = (pct, label, cls = '') => `<span class="hw-meter${cls}" role="img" aria-label="${esc(label)}"><i style="width:${Math.max(0, Math.min(100, pct)).toFixed(1)}%"></i></span>`;
+const hwGpuAvg = (gpus) => (gpus?.length ? gpus.reduce((a, g) => a + g.util_pct, 0) / gpus.length : null);
+/* Why a machine shows no live figures: no connector, measuring not turned on, or no sample in the last 3 minutes. */
+const hwUnmeasured = (ms) => (!ms.connector ? 'No connector on it' : ms.opt_in !== true ? 'Its user has not turned measuring on' : 'No figures in the last 3 minutes');
+/* The Machines card: three small bars (CPU, memory, GPU) or Not measured. */
+const hwMini = (m) => {
+  const L = m.measure?.live;
+  if (!L) return `<span class="meta hw-unm" title="${esc(hwUnmeasured(m.measure || {}))}">Not measured</span>`;
+  const mem = L.mem_total_gb ? (L.mem_used_gb / L.mem_total_gb) * 100 : 0, gpu = hwGpuAvg(L.gpus);
+  const bar = (l, pct, aria) => `<span class="hw-mi"><span class="hw-ml">${l}</span>${hwMeter(pct, aria, ' sm')}</span>`;
+  return `<span class="hw-mini">${bar('CPU', L.cpu_pct, `CPU ${hwPct(L.cpu_pct)}`)}${bar('Mem', mem, `Memory ${hwGb(L.mem_used_gb)} of ${hwGb(L.mem_total_gb)}`)}${gpu == null ? '' : bar('GPU', gpu, `GPU ${hwPct(gpu)}`)}</span>`;
+};
+/* The machine page: the live figures as labelled bars, with what they are and are not. */
+function hwUse(m) {
+  const ms = m.measure || {}, L = ms.live;
+  const shared = ms.shared_with_people ? '<p class="meta hw-note">People use this machine too, so these figures include their own use.</p>' : '';
+  if (!L) return `${kv('Now', `Not measured · ${esc(hwUnmeasured(ms))}`)}${ms.last_at ? `<p class="meta hw-note">Last figures ${esc(ago(ms.last_at))} ago.</p>` : ''}${shared}`;
+  const line = (label, pct, value) => `<div class="hw-ub"><span class="hw-ul">${esc(label)}</span>${hwMeter(pct, `${label} ${value}`)}<span class="meta">${esc(value)}</span></div>`;
+  return `<div class="hw-use">${line('CPU', L.cpu_pct, `${hwPct(L.cpu_pct)}${L.cpu_count ? ` of ${plural(L.cpu_count, 'CPU')}` : ''}`)}
+      ${line('Memory', L.mem_total_gb ? (L.mem_used_gb / L.mem_total_gb) * 100 : 0, `${hwGb(L.mem_used_gb)} of ${hwGb(L.mem_total_gb)}`)}
+      ${(L.gpus || []).map((g, i) => line(L.gpus.length > 1 ? `GPU ${i + 1}` : 'GPU', g.util_pct, `${hwPct(g.util_pct)} · ${hwGb(g.mem_used_gb)} of ${hwGb(g.mem_total_gb)}`)).join('')}</div>
+    <p class="meta hw-note">The whole machine's figures ${esc(ago(L.at))} ago, not proof of what the holder ran.</p>${shared}`;
+}
+/* A hold's or a period's figures in one line: CPU and GPU average and peak, memory average and peak. */
+const hwUseLine = (u) => [`CPU ${hwPct(u.cpu_avg)} average, ${hwPct(u.cpu_peak)} peak`, `memory ${hwGb(u.mem_avg_gb)} average, ${hwGb(u.mem_peak_gb)} peak`,
+  u.gpu_avg == null ? '' : `GPU ${hwPct(u.gpu_avg)} average, ${hwPct(u.gpu_peak)} peak`].filter(Boolean).join(' · ');
+/* One labelled block of the analysis's Machine use: the period's figures, wrapping on a phone. */
+const hwUx = (label, u, none) => `<div class="hw-ux"><span class="hw-uxl">${esc(label)}</span><span class="meta hw-note">${esc(u ? hwUseLine(u) : none)}</span></div>`;
+
+/* One row per machine: its window state, the holder with task and estimate, the waiting count, the live bars; the row opens the machine. */
+const hwRow = (m) => {
+  const [st, tone] = hwState(m), h = m.holder;
+  return row({ lead: ic('pc'), title: m.name, href: `#hwm/${encodeURIComponent(m.id)}`, chev: true, cls: 'hw-row',
+    meta: raw(`${h ? `${esc(h.label)} · ${esc(h.task_title || 'a task')}${h.estimate_until ? ` · until ${esc(dt(h.estimate_until))}` : ''}` : 'Free'} · ${esc(m.waiting.length)} waiting`),
+    trail: `${hwMini(m)}${pill(st, tone)}` });
+};
+const hwFlag = (f, m) => {
+  const who = `<a href="#" data-ses="${esc(f.agent_id)}">${esc(f.label)}</a>`;
+  const what = f.kind === 'lost' ? `${who} was holding ${esc(m.name)} when it lost its ${f.reason === 'task' ? 'task' : 'access'}.`
+    : f.kind === 'window' ? `${who} is still holding ${esc(m.name)} after its window ended.`
+      : f.kind === 'allowance' ? `${who} is still holding ${esc(m.name)} past ${esc(f.team_name || 'its team')}'s daily allowance.`
+        : f.detail === 'memory' && f.mem_peak != null && m.memory_gb != null ? `${who}'s hold on ${esc(m.name)}: the machine used ${esc(hwGb(f.mem_peak))} during this hold, over the ${esc(hwGb(m.memory_gb))} limit.`
+          : f.detail === 'cpus' && f.cpus_peak != null && m.cpus != null ? `${who}'s hold on ${esc(m.name)}: the machine used ${esc(Math.round(f.cpus_peak * 10) / 10)} CPUs during this hold, over the ${esc(plural(m.cpus, 'CPU'))} limit.`
+            : `${who} went over a declared limit on ${esc(m.name)}.`;
+  return row({ lead: ic('warn'), cls: 'hw-flag', title: raw(what),
+    meta: raw(`${f.kind === 'lost' ? 'It may still be using the machine.' : 'The hold was not removed.'}${f.task_id ? ` Task ${hwTask({ team_id: f.team_id, task_id: f.task_id, task_title: f.task_title })}.` : ''} ${esc(ago(f.created_at))} ago`),
+    trail: `<button type="button" class="btn sm" data-hw-clear="${esc(f.id)}">${ic('check')}Clear</button>` });
+};
+
+/* The shared list toolbar (the Blueprint lists' search and chips): a search, then chips for each machine, team and agent with
+   holds in the period, each with its count; active filters sit on a Where you are line with ✕ and Clear. */
+function hwToolbar(H, onMachine) {
+  const dims = [...(onMachine ? [] : [['machine', 'Machine']]), ['team', 'Team'], ['agent', 'Agent']];
+  const chips = dims.map(([d, l]) => {
+    const vals = (H.facets[d] || []).filter((v) => v.n || HW_F[d] === v.id);
+    return vals.length ? `<div class="hw-chips" role="group" aria-label="${esc(l)}"><span class="vlabel">${esc(l)}</span>${vals.map((v) => `<button type="button" class="bp-chip${HW_F[d] === v.id ? ' on' : ''}" data-hwf="${esc(d)}:${esc(v.id)}" aria-pressed="${HW_F[d] === v.id}" aria-label="${esc(l)} ${esc(v.name)}, ${esc(plural(v.n, 'hold'))}">${esc(v.name)} <span class="hw-n">${esc(v.n)}</span></button>`).join('')}</div>` : '';
+  }).join('');
+  const on = dims.filter(([d]) => HW_F[d]).map(([d, l]) => { const v = (H.facets[d] || []).find((x) => x.id === HW_F[d]); return `<button type="button" class="bp-chip on" data-hwf="${esc(d)}:" aria-label="Remove the filter ${esc(l)}: ${esc(v?.name || HW_F[d])}">${esc(l)}: ${esc(v?.name || HW_F[d])}${ic('x')}</button>`; });
+  if (HW_F.q) on.unshift(`<button type="button" class="bp-chip on" data-hwf="q:" aria-label="Remove the search">“${esc(HW_F.q)}”${ic('x')}</button>`);
+  return `<div class="hw-tools">
+      <label class="hw-search"><span class="sr">Search what ran</span><input class="inp" type="search" id="hwQ" value="${esc(HW_F.q)}" placeholder="Search agents, teams, tasks and reports" autocomplete="off"></label>
+      ${chips}
+      ${on.length ? `<div class="hw-where"><span class="bp-show" aria-live="polite">Showing <b>${esc(H.counts.shown)}</b> of ${esc(plural(H.counts.holds, 'hold'))}</span>${on.join('')}<button type="button" class="btn ghost sm" data-hwf="clear">Clear</button></div>` : ''}
+    </div>`;
+}
+
+/* The analysis for the period: hours held per day as bars stacked by team, the share of open time held, the median and
+   longest wait, holds with a flag, and the top tasks by hours held. Every figure is the hub's. */
+function hwAnalysis(A, label) {
+  const idx = new Map(A.teams.map((t, i) => [t.id, i]));
+  const max = Math.max(1, ...A.days.map((d) => Object.values(d.teams).reduce((a, b) => a + b, 0)));
+  const bars = A.days.map((d) => {
+    const tot = Object.values(d.teams).reduce((a, b) => a + b, 0);
+    const seg = A.teams.filter((t) => d.teams[t.id]).map((t) => `<span class="hw-seg ${hwSeries(idx.get(t.id))}" style="height:${(d.teams[t.id] / max * 100).toFixed(1)}%"></span>`).join('');
+    return `<div class="hw-day" title="${esc(d.label)}: ${esc(hwH(tot))}"><div class="hw-bar">${seg}</div><span class="hw-dl">${esc(d.label)}</span></div>`;
+  }).join('');
+  const stat = (v, l) => `<div class="hw-stat"><span class="hw-sv">${esc(v)}</span><span class="meta">${esc(l)}</span></div>`;
+  const w = A.waits;
+  return `<section class="pcard hw-ana" aria-label="${esc(label)}">
+    ${overline(label)}
+    <div class="hw-stats">${stat(hwH(A.held_ms), 'held')}${stat(A.share == null ? '—' : `${Math.round(A.share * 100)} %`, 'of open time held')}${stat(w.median_ms == null ? '—' : hwDur(w.median_ms), 'median wait')}${stat(w.longest_ms == null ? '—' : hwDur(w.longest_ms), 'longest wait')}${stat(String(A.flagged), A.flagged === 1 ? 'hold with a flag' : 'holds with a flag')}</div>
+    ${A.held_ms ? `<div class="hw-bars" role="img" aria-label="Hours held per day: ${esc(A.days.map((d) => `${d.label} ${hwH(Object.values(d.teams).reduce((a, b) => a + b, 0))}`).join(', '))}">${bars}</div>
+      <div class="hw-legend">${A.teams.map((t, i) => `<span><i class="${hwSeries(i)}"></i>${esc(t.name)} · ${esc(hwH(t.ms))}</span>`).join('')}</div>` : '<p class="meta hw-none">Nothing was held in this period.</p>'}
+    ${A.use && (A.use.held || A.use.idle) ? `${overline('Machine use')}${hwUx('While held', A.use.held, 'No figures while held.')}${hwUx('Use with no holder', A.use.idle, 'No figures while nobody held it.')}
+      <p class="meta hw-note">The whole machine's figures, where its user turned measuring on. Top tasks are ranked by hours held only.</p>` : ''}
+    ${A.top_tasks.length ? overline('Top tasks', A.top_tasks.length) + A.top_tasks.map((t) => row({ title: raw(hwTask(t)), meta: t.team_name, trail: `<span class="meta">${esc(hwH(t.ms))}</span>`, one: false })).join('') : ''}
   </section>`;
 }
-const hwFlag = (f, m) => row({ lead: ic('warn'), cls: 'hw-flag', title: raw(`<a href="#" data-ses="${esc(f.agent_id)}">${esc(f.label)}</a> was holding ${esc(m.name)} when it lost its ${f.reason === 'task' ? 'task' : 'access'}.`),
-  meta: raw(`It may still be using the machine.${f.task_id ? ` Task ${hwTask({ team_id: f.team_id, task_id: f.task_id, task_title: f.task_title })}.` : ''} ${esc(ago(f.created_at))} ago`),
-  trail: `<button type="button" class="btn sm" data-hw-clear="${esc(f.id)}">${ic('check')}Clear</button>` });
 
-/* The registration sheet: a PC (or a new one by name), access, timezone and windows, limits, teams; Preview shows what hw_list will say. */
+/* The week grid: 7 rows of 24 hour cells in the machine's timezone, open hours light and hours held in the last 7 days dark.
+   Dragging across cells opens (from a closed cell) or closes (from an open one) those hours and saves them as hour windows. */
+const hwMin = (s) => Number(s.slice(0, 2)) * 60 + Number(s.slice(3));
+function hwOpenGrid(W) {
+  const G = HW_DAYS.map(() => Array(24).fill(!W.length));
+  for (const w of W) {
+    const f = hwMin(w.from), t = hwMin(w.to);
+    HW_DAYS.forEach(([d], i) => {
+      if (!w.days.includes(d)) return;
+      const mark = (day, a, b) => { for (let h = 0; h < 24; h++) if (Math.min(b, h * 60 + 60) > Math.max(a, h * 60)) G[(day + 7) % 7][h] = true; };
+      if (f < t) mark(i, f, t); else { mark(i, f, 1440); mark(i + 1, 0, t); }
+    });
+  }
+  return G;
+}
+function hwGridWindows(G) {
+  const by = new Map();
+  G.forEach((hours, i) => {
+    for (let h = 0; h < 24;) {
+      if (!hours[h]) { h++; continue; }
+      let e = h; while (e < 24 && hours[e]) e++;
+      const k = `${String(h).padStart(2, '0')}:00-${e === 24 ? '24:00' : String(e).padStart(2, '0') + ':00'}`;
+      by.set(k, [...(by.get(k) || []), HW_DAYS[i][0]]); h = e;
+    }
+  });
+  return [...by].map(([k, days]) => ({ days, from: k.slice(0, 5), to: k.slice(6) }));
+}
+function hwGrid(m) {
+  const G = hwOpenGrid(m.windows);
+  const head = `<span></span>${Array.from({ length: 24 }, (_, h) => `<span class="hw-gh">${h % 6 ? '' : String(h).padStart(2, '0')}</span>`).join('')}`;
+  const rows = HW_DAYS.map(([, l], d) => `<span class="hw-gd">${l}</span>${G[d].map((open, h) => `<span class="hw-c${open ? ' open' : ''}${m.week[d][h] ? ' held' : ''}" data-d="${d}" data-h="${h}" title="${l} ${String(h).padStart(2, '0')}:00${open ? ', open' : ', closed'}${m.week[d][h] ? `, held ${m.week[d][h]} min` : ''}"></span>`).join('')}`).join('');
+  return `<div class="hw-wk" id="hwWk" role="img" aria-label="Week grid of open hours and hours held in the last 7 days, ${esc(m.timezone)}. Edit the hours in the list of windows below.">${head}${rows}</div>
+    <div class="hw-key"><span><i class="open"></i>Open</span><span><i class="held"></i>Held in the last 7 days</span><span class="meta">Drag across hours to open or close them · ${esc(m.timezone)}</span></div>`;
+}
+function hwGridDrag(m, save) {
+  const wk = $('#hwWk'); if (!wk) return;
+  let from = null, mode = false;
+  const G0 = hwOpenGrid(m.windows), cell = (e) => e.target.closest('.hw-c');
+  const box = (a, b) => [[Math.min(a.d, b.d), Math.max(a.d, b.d)], [Math.min(a.h, b.h), Math.max(a.h, b.h)]];
+  const paint = (b) => $$('.hw-c', wk).forEach((c) => { const d = +c.dataset.d, h = +c.dataset.h, [[d0, d1], [h0, h1]] = b; const inBox = d >= d0 && d <= d1 && h >= h0 && h <= h1; c.classList.toggle('open', inBox ? mode : G0[d][h]); c.classList.toggle('pick', inBox); });
+  wk.onpointerdown = (e) => { const c = cell(e); if (!c) return; e.preventDefault(); from = { d: +c.dataset.d, h: +c.dataset.h }; mode = !G0[from.d][from.h]; wk.setPointerCapture?.(e.pointerId); paint(box(from, from)); };
+  wk.onpointermove = (e) => { if (!from) return; const t = document.elementFromPoint(e.clientX, e.clientY)?.closest?.('.hw-c'); if (t && wk.contains(t)) paint(box(from, { d: +t.dataset.d, h: +t.dataset.h })); };
+  wk.onpointerup = (e) => {
+    if (!from) return;
+    const t = document.elementFromPoint(e.clientX, e.clientY)?.closest?.('.hw-c'), to = t && wk.contains(t) ? { d: +t.dataset.d, h: +t.dataset.h } : from;
+    const [[d0, d1], [h0, h1]] = box(from, to), G = G0.map((r) => [...r]);
+    for (let d = d0; d <= d1; d++) for (let h = h0; h <= h1; h++) G[d][h] = mode;
+    from = null;
+    const W = G.every((r) => r.every(Boolean)) ? [] : hwGridWindows(G);
+    if (!W.length && !G.every((r) => r.every(Boolean))) { paint([[0, -1], [0, -1]]); return toast('Leave at least one open hour, or remove every window in the list for Any time.'); }
+    if (W.length > 14) { paint([[0, -1], [0, -1]]); return toast('That makes more than 14 windows. Edit the hours in the list instead.'); }
+    save(W);
+  };
+}
+/* The registration body for a machine as it is, with its hours replaced: what the grid saves. */
+const hwBody = (m, windows) => ({ access: m.access, timezone: m.timezone, windows, memory_gb: m.memory_gb, cpus: m.cpus, gpu: m.gpu, notes: m.notes, shared_with_people: !!m.shared_with_people,
+  teams: m.teams.map((t) => t.id), allowances: Object.fromEntries(m.teams.map((t) => [t.id, t.daily_hours])) });
+
+/* Allowances: one row per team with today's use out of its daily hours. */
+const hwAllow = (m) => m.allowances.map((a) => row({ title: a.team_name,
+  meta: a.daily_hours == null ? `No daily limit · ${hwH(a.used_ms)} today` : `${hwH(a.used_ms)} of ${a.daily_hours} h today${a.left_ms === 0 ? ' · none left' : ''}`,
+  trail: a.daily_hours == null ? '' : `<span class="hw-meter" role="img" aria-label="${esc(Math.round(a.used_ms / (a.daily_hours * 36000)))} percent used"><i style="width:${Math.min(100, a.used_ms / (a.daily_hours * 3600000) * 100).toFixed(1)}%"></i></span>` })).join('') || '<p class="meta hw-none">No team may use it yet.</p>';
+/* What ran: one row per hold in the period, newest first. */
+const hwRan = (h) => row({ cls: 'hw-ran', title: raw(`${hwWho(h)}<span class="meta"> · ${esc(h.team_name)}</span>`),
+  meta: raw(`Task ${hwTask(h)} · ${esc(dt(h.held_since))} · ${h.ended_at ? esc(hwDur(h.ended_at - h.held_since)) : `running ${esc(hwDur(Date.now() - h.held_since))}`}${h.report ? ` · “${esc(h.report)}”` : ''}${h.use ? `<span class="hw-ru">The machine during this hold: ${esc(hwUseLine(h.use))}</span>` : ''}`),
+  trail: h.flags.map((k) => pill(HW_FLAG[k] || k, k === 'lost' ? 'bad' : 'warn')).join('') });
+
+/* The registration sheet: a PC (or a new one by name), access, timezone and windows, limits, teams with their daily hours;
+   Preview shows what hw_list will say. */
 function hwSheet(H, m, anchor, reload) {
   const tz = m ? m.timezone : Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
   let W = m ? m.windows.map((w) => ({ ...w, days: [...w.days] })) : [];
-  const served = new Set(m ? m.teams.map((t) => t.id) : []);
+  const served = new Map(m ? m.teams.map((t) => [t.id, t.daily_hours]) : []);
   const teams = S.teams.filter((t) => !['done', 'stopped'].includes(t.status) || served.has(t.id));
   const winH = () => W.length ? W.map((w, i) => `<div class="hw-win" data-wi="${i}">
       <div class="seg hw-days" role="group" aria-label="Days of window ${i + 1}">${HW_DAYS.map(([d, l]) => `<button type="button" data-wd="${d}" aria-pressed="${w.days.includes(d)}" class="${w.days.includes(d) ? 'on' : ''}">${l}</button>`).join('')}</div>
-      <span class="hw-times"><input class="inp" type="time" data-wf value="${esc(w.from)}" aria-label="Window ${i + 1} from"><span class="meta">to</span><input class="inp" type="time" data-wt value="${esc(w.to)}" aria-label="Window ${i + 1} to"></span>
+      <span class="hw-times"><input class="inp" type="time" data-wf value="${esc(w.from)}" aria-label="Window ${i + 1} from"><span class="meta">to</span><input class="inp" type="time" data-wt value="${esc(w.to === '24:00' ? '23:59' : w.to)}" aria-label="Window ${i + 1} to"></span>
       <button type="button" class="btn ghost sm" data-wx aria-label="Remove window ${i + 1}">${ic('x')}</button></div>`).join('') : '<p class="meta">No windows: agents may use it any time.</p>';
   const fields = `
     ${overline('Machine')}
-    ${m ? `<p class="hw-m"><b>${esc(m.name)}</b></p>` : `<label class="fld"><span class="vlabel">PC</span><select class="sel" id="hwPc">${H.pcs.map((p) => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('')}<option value="">Add a machine…</option></select></label>
+    ${m ? `<p class="hw-m"><b>${esc(m.name)}</b></p>` : `<label class="fld"><span class="vlabel">PC</span><select class="sel" id="hwPc">${H.pcs.map((p) => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('')}<option value="">Add one by name…</option></select></label>
       <label class="fld" id="hwNewF"${H.pcs.length ? ' hidden' : ''}><span class="vlabel">Machine name</span><input class="inp" id="hwNew" maxlength="100" autocomplete="off" placeholder="gpu-box"><span class="hint">Makes a PC record with no key; agents never log in from it.</span></label>`}
     ${overline('Access')}
     <label class="fld"><span class="vlabel">SSH alias or instructions</span><textarea class="inp" id="hwAcc" rows="2" maxlength="500" data-req>${esc(m?.access || '')}</textarea><span class="hint">Credentials stay on the machine or in the agents' SSH setup; never paste a key here.</span></label>
-    ${overline('Availability')}
+    ${overline('Opening hours')}
     <label class="fld"><span class="vlabel">Timezone</span><input class="inp" id="hwTz" maxlength="64" value="${esc(tz)}" data-req autocomplete="off"></label>
     <div id="hwWins">${winH()}</div>
     <button type="button" class="btn sm" id="hwAddW">${ic('plus')}Add window</button>
@@ -10631,28 +11346,37 @@ function hwSheet(H, m, anchor, reload) {
       <label class="fld"><span class="vlabel">CPUs</span><input class="inp" id="hwCpu" type="number" min="1" step="1" value="${m?.cpus ?? ''}"></label></div>
     <label class="fld"><span class="vlabel">GPU</span><input class="inp" id="hwGpu" maxlength="120" value="${esc(m?.gpu || '')}" autocomplete="off"></label>
     <label class="fld"><span class="vlabel">Notes</span><textarea class="inp" id="hwNotes" rows="2" maxlength="1000">${esc(m?.notes || '')}</textarea></label>
+    <label class="hw-tml"><input type="checkbox" id="hwShared"${m?.shared_with_people ? ' checked' : ''}><span>Shared with people</span></label>
+    <p class="hint">People use this machine too: the measured figures then say they include their own use.</p>
     ${overline('Teams')}
-    <div class="hw-teams" role="group" aria-label="Teams that may use it">${teams.length ? teams.map((t) => `<label class="hw-tm"><input type="checkbox" data-team="${esc(t.id)}"${served.has(t.id) ? ' checked' : ''}><span>${esc(t.name)}</span></label>`).join('') : '<p class="meta">No teams yet.</p>'}</div>
+    <div class="hw-teams" role="group" aria-label="Teams that may use it">${teams.length ? teams.map((t) => `<div class="hw-tm"><label class="hw-tml"><input type="checkbox" data-team="${esc(t.id)}"${served.has(t.id) ? ' checked' : ''}><span>${esc(t.name)}</span></label>
+        <label class="hw-alw"><input class="inp" type="number" min="0.25" max="24" step="0.25" data-allow="${esc(t.id)}" value="${served.get(t.id) ?? ''}" placeholder="No limit" aria-label="Daily hours for ${esc(t.name)}"><span class="meta">h a day</span></label></div>`).join('') : '<p class="meta">No teams yet.</p>'}</div>
+    <p class="hint">Daily hours count the time a team's agents hold the machine, per day in its timezone. Leave empty for no limit.</p>
     ${overline('Preview')}
     <button type="button" class="btn sm" id="hwPrev">${ic('eye')}Preview what agents see</button>
     <pre class="vault-preview hw-pre" id="hwPre" hidden></pre>
+    ${overline('Measure this machine')}
+    <p class="hint">Optional. To see the machine's CPU, memory and GPU use, pair it with the connector: on its PC page, <b>Re-enrol PC</b> gives the prompt that installs and pairs it. Then the machine's user runs <code>conclave hardware on</code> on it. The connector then only measures the machine: it sends numbers once a minute and takes no other order than Update and Disconnect.</p>
+    ${m ? `<p class="meta">${m.measure?.live ? 'Measured now.' : `Not measured: ${esc(hwUnmeasured(m.measure || {}))}.`} <a href="#pc/${esc(encodeURIComponent(m.id))}">Open its PC page</a></p>` : ''}
     ${m ? `<div class="hw-stop"><button type="button" class="btn bad sm" id="hwStop">${ic('stop')}Stop offering compute</button></div>` : ''}`;
   const body = (sh) => {
     const num = (id) => { const v = $('#' + id, sh).value.trim(); return v === '' ? null : Number(v); };
+    const picked = $$('[data-team]', sh).filter((x) => x.checked).map((x) => x.dataset.team);
     return { access: $('#hwAcc', sh).value.trim(), timezone: $('#hwTz', sh).value.trim(), windows: W.map((w) => ({ days: w.days, from: w.from, to: w.to })),
-      memory_gb: num('hwMem'), cpus: num('hwCpu'), gpu: $('#hwGpu', sh).value.trim() || null, notes: $('#hwNotes', sh).value.trim() || null,
-      teams: $$('[data-team]', sh).filter((x) => x.checked).map((x) => x.dataset.team) };
+      memory_gb: num('hwMem'), cpus: num('hwCpu'), gpu: $('#hwGpu', sh).value.trim() || null, notes: $('#hwNotes', sh).value.trim() || null, shared_with_people: $('#hwShared', sh).checked,
+      teams: picked, allowances: Object.fromEntries(picked.map((t) => { const v = $(`[data-allow="${CSS.escape(t)}"]`, sh)?.value.trim(); return [t, v ? Number(v) : null]; })) };
   };
   const winErr = () => (W.some((w) => !w.days.length) ? 'Pick at least one day for each window.' : W.some((w) => !w.from || !w.to || w.from === w.to) ? 'Each window needs a start and an end time that differ.' : '');
-  const sh = fbSheet({ title: m ? `Edit ${m.name}` : 'Register machine', anchor, label: m ? 'Save' : 'Register', fields, onGo: async (sh) => {
+  const sh = fbSheet({ title: m ? `Edit ${m.name}` : 'Add machine', anchor, label: m ? 'Save' : 'Add', fields, onGo: async (sh) => {
     const b = body(sh);
     if (!b.access) return 'Say how agents reach the machine.';
     if (!b.timezone) return 'Give the machine\'s timezone.';
     const we = winErr(); if (we) return we;
+    if (Object.values(b.allowances).some((h) => h != null && !(h >= 0.25 && h <= 24))) return 'Daily hours: between 0.25 and 24, or empty for no limit.';
     let pc = m?.id || $('#hwPc', sh).value;
     if (!pc) { const name = $('#hwNew', sh).value.trim(); if (!name) return ['Name the machine.', 'hwNew']; pc = (await post('/pcs', { name })).pc.id; }
     try { await api(`/hardware/${encodeURIComponent(pc)}`, 'PUT', b); } catch (e) { return e.message; }
-    toast(m ? 'Saved' : 'Machine registered'); reload();
+    toast(m ? 'Saved' : 'Machine added'); reload();
   } });
   const redrawW = () => { $('#hwWins', sh).innerHTML = winH(); };
   $('#hwAddW', sh).onclick = () => { W.push({ days: ['mon', 'tue', 'wed', 'thu', 'fri'], from: '09:00', to: '18:00' }); redrawW(); };
@@ -10674,26 +11398,71 @@ function hwSheet(H, m, anchor, reload) {
   if (stop) stop.onclick = () => run(async () => {
     const n = (m.holder ? 1 : 0) + m.waiting.length;
     if (!confirmOnce(sh, 'hwStop', n ? `Stop and end ${plural(n, 'entry')}?` : 'Stop offering compute?')) return;
-    await api(`/hardware/${encodeURIComponent(m.id)}`, 'DELETE'); closeSheet(); toast('No longer offered for compute'); reload();
+    await api(`/hardware/${encodeURIComponent(m.id)}`, 'DELETE'); closeSheet(); toast('No longer offered for compute'); go('hardware', null);
   });
   return sh;
 }
 
+/* The header both pages share: the counts, the period select and Add machine. */
+const hwHead = (H) => `<span class="hw-sum">${esc(plural(H.counts.machines, 'machine'))} · ${esc(H.counts.in_use)} in use · ${esc(H.counts.waiting)} waiting</span>`;
+const hwPer = (sfx = '') => `<select class="sel sm" id="hwPer${sfx}" aria-label="Period">${HW_PERIODS.map(([v, l]) => `<option value="${v}"${HW_F.p === v ? ' selected' : ''}>${l}</option>`).join('')}</select>`;
+/* Wiring both pages share: period, search, chips, flags and entries. */
+function hwWire(H, reload) {
+  $$('#hwPer,#hwPerM').forEach((per) => (per.onchange = () => { HW_F.p = per.value; reload(); }));
+  const q = $('#hwQ'); if (q) q.onkeydown = (e) => { if (e.key === 'Enter') { HW_F.q = q.value.trim(); reload(); } };
+  if (q) q.onsearch = () => { if (q.value.trim() !== HW_F.q) { HW_F.q = q.value.trim(); reload(); } };
+  $$('[data-hwf]').forEach((b) => (b.onclick = () => {
+    const v = b.dataset.hwf;
+    if (v === 'clear') Object.assign(HW_F, { q: '', machine: '', team: '', agent: '' });
+    else { const d = v.slice(0, v.indexOf(':')), id = v.slice(v.indexOf(':') + 1); HW_F[d] = HW_F[d] === id ? '' : id; }
+    reload();
+  }));
+  $$('#hwReg,#hwRegE,#hwRegM').forEach((b) => (b.onclick = (e) => hwSheet(H, null, e.currentTarget, reload)));
+  $$('[data-hw-edit]').forEach((b) => (b.onclick = (e) => hwSheet(H, H.machines.find((m) => m.id === b.dataset.hwEdit), e.currentTarget, reload)));
+  $$('[data-hw-rm]').forEach((b) => arm(b, () => run(async () => { await post(`/hardware/entries/${b.dataset.hwRm}/remove`); toast('Removed from the list'); reload(); }), 'Yes, remove'));
+  $$('[data-hw-clear]').forEach((b) => (b.onclick = () => run(async () => { await post(`/hardware/flags/${encodeURIComponent(b.dataset.hwClear)}/clear`); reload(); })));
+}
+const HW_ADD = `<button class="btn sm pri" id="hwReg" title="Offer a machine to agents for compute">${ic('plus')}Add machine</button>`;
+
 VIEWS.hardware = async () => {
-  const H = await api('/hardware');
+  const H = await hwLoad();
   const flags = H.machines.flatMap((m) => m.flags.map((f) => hwFlag(f, m)));
   const reload = () => openD('hardware', null, true);
   return {
-    t: `${ic('bolt')}Hardware <span class="n">${H.machines.length}</span>`,
-    a: `<button class="btn sm pri" id="hwReg" title="Offer a machine to agents for compute">${ic('plus')}Register machine</button>`,
-    b: (flags.length ? `<div class="pcard hw-flags">${overline('Needs you', flags.length)}${flags.join('')}</div>` : '')
-      + (H.machines.length ? `<div class="hw-grid">${H.machines.map(hwCard).join('')}</div>` : none('pc', 'No machine is offered for compute yet', false, '<button type="button" class="btn sm pri" id="hwRegE">' + ic('plus') + 'Register machine</button>'))
-      + `<div class="actionbar only-m"><button type="button" class="btn pri" id="hwRegM">${ic('plus')}Register machine</button></div>`,
+    t: `${ic('bolt')}Hardware ${hwHead(H)}`,
+    a: `${hwPer()}${HW_ADD}`,
+    b: `<div class="only-m hw-mper">${hwPer('M')}</div>` + (flags.length ? `<div class="pcard hw-flags">${overline('Needs you', flags.length)}${flags.join('')}</div>` : '')
+      + (H.machines.length ? `<div class="pcard hw-machines">${overline('Machines', H.machines.length)}${H.machines.map(hwRow).join('')}</div>${hwToolbar(H, false)}${hwAnalysis(H.analysis, `Analysis · ${HW_PERIODS.find(([v]) => v === HW_F.p)[1]}${HW_F.machine ? ` · ${H.machines.find((m) => m.id === HW_F.machine)?.name || ''}` : ' · all machines'}`)}`
+        : none('pc', 'No machine is offered for compute yet', false, '<button type="button" class="btn sm pri" id="hwRegE">' + ic('plus') + 'Add machine</button>'))
+      + `<div class="actionbar only-m"><button type="button" class="btn pri" id="hwRegM">${ic('plus')}Add machine</button></div>`,
+    after() { hwWire(H, reload); },
+  };
+};
+
+VIEWS.hwm = async (id) => {
+  const H = await hwLoad({ machine: id }), m = H.machines.find((x) => x.id === id);
+  if (!m) throw new Error('This machine no longer offers compute');
+  const reload = () => openD('hwm', id, true), [st, tone] = hwState(m);
+  const flags = m.flags.map((f) => hwFlag(f, m));
+  return {
+    t: `${ic('pc')}${esc(m.name)} ${pill(st, tone)}`,
+    a: `${hwPer()}<label class="hw-pause"><span>Pause</span>${switchBtn(m.paused ? 'Resume the machine' : 'Pause the machine', m.paused, 'id="hwPause"')}</label><button type="button" class="btn sm" data-hw-edit="${esc(m.id)}">${ic('edit')}Edit</button>`,
+    b: `<div class="only-m hw-mper">${hwPer('M')}</div>` + (flags.length ? `<div class="pcard hw-flags">${overline('Needs you', flags.length)}${flags.join('')}</div>` : '')
+      + `<div class="hw-cols">
+        <section class="pcard hw-card" aria-label="Holder and waiting list">${m.paused ? '<p class="meta hw-none">Paused: nobody new gets the machine; the holder keeps it until it leaves.</p>' : ''}${hwList(m)}</section>
+        <section class="pcard hw-card" aria-label="Allowances and limits">${overline('Allowances', m.allowances.length)}${hwAllow(m)}${overline('Use now')}${hwUse(m)}${overline('Limits')}${kv('Declared', `${esc(hwLimits(m))}`)}${kv('Access', `<span class="mono">${esc(m.access)}</span>`)}${m.notes ? kv('Notes', esc(m.notes)) : ''}</section>
+      </div>
+      <section class="pcard hw-hours" aria-label="Opening hours">${overline('Opening hours')}${hwGrid(m)}
+        <div class="hw-wl">${(m.windows.length ? m.windows : [null]).map((w) => row({ one: true, title: w ? hwWindows([w]) : 'Any time', meta: m.timezone })).join('')}</div>
+        <button type="button" class="btn sm" data-hw-edit="${esc(m.id)}">${ic('edit')}Edit hours</button></section>
+      ${hwToolbar(H, true)}
+      <section class="pcard hw-whatran" aria-label="What ran">${overline('What ran', m.what_ran.length)}${m.what_ran.map(hwRan).join('') || '<p class="meta hw-none">Nothing ran in this period.</p>'}</section>
+      ${hwAnalysis(m.analysis, `Analysis · ${HW_PERIODS.find(([v]) => v === HW_F.p)[1]}`)}
+      <div class="actionbar only-m"><label class="hw-pause"><span>Pause</span>${switchBtn(m.paused ? 'Resume the machine' : 'Pause the machine', m.paused, 'id="hwPauseM"')}</label><button type="button" class="btn" data-hw-edit="${esc(m.id)}">${ic('edit')}Edit</button></div>`,
     after() {
-      $$('#hwReg,#hwRegE,#hwRegM').forEach((b) => (b.onclick = (e) => hwSheet(H, null, e.currentTarget, reload)));
-      $$('[data-hw-edit]').forEach((b) => (b.onclick = (e) => hwSheet(H, H.machines.find((m) => m.id === b.dataset.hwEdit), e.currentTarget, reload)));
-      $$('[data-hw-rm]').forEach((b) => arm(b, () => run(async () => { await post(`/hardware/entries/${b.dataset.hwRm}/remove`); toast('Removed from the list'); reload(); }), 'Yes, remove'));
-      $$('[data-hw-clear]').forEach((b) => (b.onclick = () => run(async () => { await post(`/hardware/flags/${encodeURIComponent(b.dataset.hwClear)}/clear`); reload(); })));
+      hwWire(H, reload);
+      $$('#hwPause,#hwPauseM').forEach((b) => (b.onclick = () => run(async () => { await post(`/hardware/${encodeURIComponent(m.id)}/${m.paused ? 'resume' : 'pause'}`); toast(m.paused ? 'Resumed' : 'Paused: nobody new gets it'); reload(); })));
+      hwGridDrag(m, (W) => run(async () => { await api(`/hardware/${encodeURIComponent(m.id)}`, 'PUT', hwBody(m, W)); toast('Opening hours saved'); reload(); }));
     },
   };
 };
@@ -11043,8 +11812,8 @@ const coAlertTeam = (a, d) => alertTeam(a, d) || S.teams.find((x) => x.id === d.
    POST /needs-you/act, which checks the version and the decider again; an action that needs its own screen opens it.
    A For awareness row can be dismissed by this viewer for its current episode. Shared by both consoles (pfx names the
    click attribute: data-ny here, data-mu-ny in the member console). */
-const NY_KIND = { question: ['Question for you', 'dec'], relayed_answer: ['Relayed answer', 'dec'], access_request: ['Access request', 'key'], checkpoint: ['Waits for your approval', 'check'],
-  unblock: ['Task blocked', 'ban'], proposal: ['Blueprint change', 'graph'], backlog: ['New brief', 'note'], onboarding: ['Team request', 'team'], checkout: ['Checkout step', 'pc'],
+const NY_KIND = { undelivered: ['Not delivered yet', 'clock'], overdue: ['Past its check-in time', 'warn'], question: ['Question for you', 'dec'], relayed_answer: ['Relayed answer', 'dec'], access_request: ['Access request', 'key'], checkpoint: ['Waits for your approval', 'check'],
+  unblock: ['Task blocked', 'ban'], refine_waiting: ['Refining requirements', 'graph'], proposal: ['Blueprint change', 'graph'], backlog: ['New brief', 'note'], onboarding: ['Team request', 'team'], checkout: ['Checkout step', 'pc'],
   directive: ['Directive to review', 'sl'], directive_suggestion: ['Suggestion from an agent', 'sl'], feedback: ['New feedback', 'bug'], vault_conflict: ['Vault conflict', 'note'], unclear: ['Unclear requirement', 'info'],
   team_pause: ['Team paused', 'pause'], setup: ['Team setup', 'team'], team_paused: ['Team paused', 'pause'],
   stalled: ['Member stalled', 'clock'], missed_milestone: ['Milestone missed', 'warn'], claim_not_supported: ['Claim not supported', 'warn'], keys_not_collected: ['Keys not collected', 'key'], key_collection: ['Key not collected', 'key'], rules_applied: ['Applied by rules', 'check'], blocking_work: ['Blocks work', 'warn'] };
@@ -11087,7 +11856,7 @@ function nyBtns(r, open = nyOpenAttr, pfx = 'ny', sm = true, later = true) {
 /* A row set aside with Later (SPEC-ATTENTION-05): when it comes back, and Bring back now. */
 const nyLaterWhen = (l) => (l.changes ? 'until it changes' : `until ${new Date(l.until).toDateString() === new Date().toDateString() ? clock(l.until) : dt(l.until)}`);
 const laterRow = (r, open = nyOpenAttr, pfx = 'ny') => { const o = open(r.open);
-  return row({ as: 'div', lead: nyLead(r), title: mdPlain(r.title || ''), meta: [nyKind(r.kind)[0], `Later, ${nyLaterWhen(r.later)}`, r.reason && mdPlain(r.reason)].filter(Boolean).join(' · '), cls: 'ny-row later', extra: `data-ny-row="${esc(r.id)}"`,
+  return row({ as: 'div', lead: nyLead(r), title: mdPlain(r.title || ''), meta: [nyKind(r.kind)[0], `Later, ${nyLaterWhen(r.later)}`, r.reason && mdPlain(nyOffline(r, r.reason))].filter(Boolean).join(' · '), cls: 'ny-row later', extra: `data-ny-row="${esc(r.id)}"`,
     trail: (o ? `<button type="button" class="btn sm" ${o} aria-label="${esc('Open: ' + r.title)}">Open</button>` : '') + `<button type="button" class="btn sm" data-${pfx}-back="${esc(r.id)}" aria-label="${esc('Bring back now: ' + r.title)}">Bring back now</button>` }); };
 function awBtns(r, open = nyOpenAttr, pfx = 'ny', sm = true) {
   const o = open(r.open), s = sm ? ' sm' : '';
@@ -11098,7 +11867,7 @@ function awBtns(r, open = nyOpenAttr, pfx = 'ny', sm = true) {
 const nyUntil = (r) => (r.until ? `until ${new Date(r.until).toDateString() === new Date().toDateString() ? clock(r.until) : dt(r.until)}` : '');
 /* A row's own text in a few lines: its summary (a task's In short, a question's context, a block's reason) when the hub sends
    one, else its reason; null means it has none, so no line repeats what the buttons say. */
-const nySum = (r) => ('summary' in r ? r.summary : r.reason) || '';
+const nySum = (r) => nyOffline(r, ('summary' in r ? r.summary : r.reason) || '');
 const nyMeta = (r) => [r.back_from_later ? 'Back from Later' : '', nyKind(r.kind)[0], r.by, nyUntil(r), mdPlain(nySum(r)), `${ago(r.at)} ago`].filter(Boolean).join(' · ');
 const nyLead = (r) => `<span class="tm-ico">${ic(nyKind(r.kind)[1])}</span>`;
 const nyRow = (r, open = nyOpenAttr, pfx = 'ny') => row({ as: 'div', lead: nyLead(r), title: mdPlain(r.title || ''), meta: nyMeta(r), trail: nyBtns(r, open, pfx), cls: 'ny-row', extra: `data-ny-row="${esc(r.id)}"` });
@@ -11141,6 +11910,10 @@ function nyBody(r, open, pfx) {
     const send = `<button type="button" class="btn pri" data-${pfx}="${esc(v + '|unblock')}" data-ny-inline="note" data-ny-need="1" data-ny-label="Reply and unblock">Send and unblock</button>`;
     return { sum: mdText('summary' in r ? r.summary || '' : d.reason || ''), ctx: '', reply: nyReplyBox(`Your note to ${d.assignee || 'the assignee'} and the coordinators`, send), meta: [],
       acts: [`<button type="button" class="btn pri" data-${pfx}="${esc(v + '|unblock')}" data-ny-inline="none" data-ny-label="Unblock">Unblock</button>`, nyReplyBtn(), nyOpenBtn(r, open, 'Open task')], more: [] };
+  }
+  if ((r.kind === 'undelivered' || r.kind === 'overdue') && r.open?.kind === 'task') {
+    const re = r.actions.some((a) => a.id === 'reassign') ? `<button type="button" class="btn pri" data-reassign="${esc(r.open.team_id + '|' + r.open.id)}" aria-label="${esc(`Reassign: ${r.title}`)}">Reassign</button>` : '';
+    return { sum: esc(nyOffline(r, r.summary || r.reason || '')), ctx: '', meta: [], acts: [re, nyOpenBtn(r, open, 'Open task', re ? '' : ' pri')].filter(Boolean), more: [] };
   }
   if (r.kind === 'proposal' && d?.kind === 'proposal') {
     const [a1, ...an] = r.actions.filter((a) => !a.input);
@@ -11553,10 +12326,26 @@ function alertInfo(a) {
 const auTime = (t) => `<time class="aud-t" title="${esc(new Date(t).toLocaleString())}">${clock(t)}</time>`;
 const argText = (summary) => { if (!summary) return ''; try { return Object.entries(JSON.parse(summary) || {}).filter(([k, v]) => !NOISE.has(k) && v !== null && v !== '' && typeof v !== 'object').slice(0, 3).map(([k, v]) => `${k.replace(/_/g, ' ')}: ${trunc(idName(v), 40)}`).join(', '); } catch { return trunc(summary, 80); } };
 const segBtns = (items, cur, attr, count) => items.map(([v, l]) => `<button type="button" ${attr}="${esc(v)}" class="${v === cur ? 'on' : ''}">${esc(l)}${count && count(v) ? ` <span class="tabn">${count(v)}</span>` : ''}</button>`).join('');
+/* The Audit tabs' (and Vault Activity's) toolbar, one row (two on a phone): the search box with the active filters as chips, the tab's segment, then
+   Filters (more is its id; "+k" opens it). The filters change the list in place: auBind wires the box to F (F.q is the text,
+   a chip's data-au-rm names the key it clears, the ✕ calls clear) and returns the screen's redraw, which swaps the chips. */
+const auTools = (id, label, F, chips, seg, more) => `<div class="ltb">${chipSearch({ attrs: `id="${id}"`, label, value: F.q, chips, clear: 'data-au-clr', more: `data-cs-filt="${more}"` })}${seg}${filterBtn(more, chips.length)}</div>`;
+function auBind(id, more, F, chips, draw, clear) {
+  const form = $('#' + id), q = $('.csrch-in', form);
+  const redraw = () => { const ch = chips(); csrchSet(form, ch, `data-cs-filt="${more}"`); setFilterCount(more, ch.length); draw(); };
+  const set = (v) => { F.q = v; q.dataset.q = v; redraw(); };
+  onSearch(q, set); q.addEventListener('input', (e) => e.stopPropagation());
+  form.onsubmit = (e) => { e.preventDefault(); set(q.value.trim().toLowerCase()); };
+  form.onclick = (e) => { const rm = e.target.closest('[data-au-rm]');
+    if (rm) { F[rm.dataset.auRm] = ''; redraw(); q.focus(); } else if (e.target.closest('[data-au-clr]')) { clear(); q.value = ''; set(''); q.focus(); } };
+  csrchFit(form);
+  return redraw;
+}
+const auChip = (key, label, what) => ({ label, name: `Remove the ${what} filter ${label}`, attrs: `data-au-rm="${key}"` });
 const AL_STATUS = [['open', 'Open'], ['acknowledged', 'Acknowledged'], ['closed', 'Closed']];
 const AL_SEV = [['critical', 'Critical'], ['warning', 'Warning'], ['info', 'Info']];
 const AL_F = { status: 'open', sev: '', q: '' };
-const alFilters = () => (AL_F.sev ? 1 : 0) + (AL_F.q ? 1 : 0) + (AL_F.status === '' ? 1 : 0);
+const alChips = () => [AL_F.status === '' && auChip('status', 'All states', 'status'), AL_F.sev && auChip('sev', AL_SEV.find(([v]) => v === AL_F.sev)[1], 'severity')].filter(Boolean);
 async function auditAlerts() {
   const all = (await api('/alerts?limit=200')).alerts;
   const shown = () => all.filter((a) => (!AL_F.status || a.status === AL_F.status) && (!AL_F.sev || a.severity === AL_F.sev));
@@ -11578,7 +12367,6 @@ async function auditAlerts() {
     $('#alL').innerHTML = L.length ? L.map(card).join('') : none('bolt', AL_F.status === 'open' ? 'No open alerts' : 'No alerts');
     $('#alBulk').hidden = !L.some((a) => a.status === 'open');
     $$('#alSt button').forEach((x) => x.classList.toggle('on', x.dataset.st === AL_F.status));
-    setFilterCount('alMore', alFilters());
   };
   const bulk = () => run(async () => {
     const ids = shown().filter((a) => a.status === 'open').map((a) => a.id);
@@ -11590,19 +12378,19 @@ async function auditAlerts() {
     t: `${ic('warn')}Alerts`,
     a: `<button type="button" class="btn sm" id="alBulk">${ic('check')}Acknowledge shown</button>`,
     pmenu: [{ label: 'Acknowledge shown', icon: 'check', fn: bulk }],
-    b: vtools(`<div class="seg" id="alSt" role="group" aria-label="Status">${segBtns(AL_STATUS, AL_F.status, 'data-st', (v) => (v === 'open' ? cnt(v) : 0))}</div>${filterBtn('alMore', alFilters())}`) + `<div id="alL" class="al-list"></div>`,
+    b: auTools('alQ', 'Search alerts', AL_F, alChips(), `<div class="seg" id="alSt" role="group" aria-label="Status">${segBtns(AL_STATUS, AL_F.status, 'data-st', (v) => (v === 'open' ? cnt(v) : 0))}</div>`, 'alMore') + `<div id="alL" class="al-list"></div>`,
     after() {
+      // The ✕ keeps the status segment unless the status is All states, which is a chip (the segment has no All).
+      const redraw = auBind('alQ', 'alMore', AL_F, alChips, draw, () => { AL_F.sev = ''; if (!AL_F.status) AL_F.status = 'open'; });
       draw();
-      $('#alSt').onclick = (e) => { const b = e.target.closest('[data-st]'); if (!b) return; AL_F.status = b.dataset.st; draw(); };
+      $('#alSt').onclick = (e) => { const b = e.target.closest('[data-st]'); if (!b) return; AL_F.status = b.dataset.st; redraw(); };
       $('#alMore').onclick = (e) => {
         const sh = openSheet({ title: 'Filter alerts', anchor: e.currentTarget, html: `<div class="sheet-form">
           ${selField('alStF', 'Status', [['', 'All states'], ...AL_STATUS], AL_F.status)}${selField('alSevF', 'Severity', [['', 'Any severity'], ...AL_SEV], AL_F.sev)}
-          <label class="fld"><span class="vlabel">Search</span><div class="srch">${ic('search')}<input class="inp" id="alQ" type="search" placeholder="Search alerts" aria-label="Search alerts" value="${esc(AL_F.q)}"></div></label>
-          <div class="sheet-acts"><button type="button" class="btn lg" id="alClear">Clear</button><button type="button" class="btn pri lg" data-sheet-close>Done</button></div></div>` });
-        $('#alStF', sh).onchange = () => { AL_F.status = $('#alStF', sh).value; draw(); };
-        $('#alSevF', sh).onchange = () => { AL_F.sev = $('#alSevF', sh).value; draw(); };
-        onSearch($('#alQ', sh), (q) => { AL_F.q = q; draw(); });
-        $('#alClear', sh).onclick = () => { AL_F.status = 'open'; AL_F.sev = AL_F.q = ''; $('#alStF', sh).value = 'open'; $('#alSevF', sh).value = ''; $('#alQ', sh).value = ''; draw(); };
+          <div class="sheet-acts"><button type="button" class="btn lg" id="alClear">Clear filters</button><button type="button" class="btn pri lg" data-sheet-close>Done</button></div></div>` });
+        $('#alStF', sh).onchange = () => { AL_F.status = $('#alStF', sh).value; redraw(); };
+        $('#alSevF', sh).onchange = () => { AL_F.sev = $('#alSevF', sh).value; redraw(); };
+        $('#alClear', sh).onclick = () => { AL_F.status = 'open'; AL_F.sev = ''; $('#alStF', sh).value = 'open'; $('#alSevF', sh).value = ''; redraw(); };
       };
       $('#alBulk').onclick = bulk;
     },
@@ -11612,39 +12400,41 @@ const CALL_R = [['', 'All'], ['ok', 'OK'], ['denied', 'Denied'], ['error', 'Erro
 async function auditCalls(pre, r0) {
   // A key opens with that key's own calls (up to 1000), not just the hub-wide recent 200.
   const all = (await api(pre && /^crd_/.test(pre) ? `/invocations?credential=${encodeURIComponent(pre)}&limit=2000` : '/invocations?limit=200')).invocations;
-  const F = { r: CALL_R.some(([v]) => v === r0) ? r0 : '', who: pre || '', q: '' };
+  const F = { r: CALL_R.some(([v]) => v === r0) ? r0 : '', who: pre || '', tool: '', q: '' };
   const agentOf = (i) => i.agent_id || keyAgentOf(i.credential_id);
   const whoName = (i) => (agentOf(i) ? agLabel(agentOf(i)) : K(i.app_credential_id || i.credential_id) ? keyName(K(i.app_credential_id || i.credential_id)) : '—');
   const match = (i) => (!F.r || (F.r === 'error' ? !['ok', 'denied'].includes(i.result) : i.result === F.r))
     && (!F.who || (F.who.startsWith('agent:') ? agentOf(i) === F.who.slice(6) : i.credential_id === F.who || i.app_credential_id === F.who))
+    && (!F.tool || i.tool === F.tool)
     && (!F.q || [i.tool, i.args_summary, i.error_code, whoName(i)].some((x) => String(x || '').toLowerCase().includes(F.q)));
   const agents = [...new Set(all.map(agentOf).filter(Boolean))].map((id) => [id, agLabel(id)]).sort((a, b) => a[1].localeCompare(b[1]));
+  const tools = [...new Set(all.map((i) => i.tool).filter(Boolean))].sort();
+  const whoLabel = (w) => (w.startsWith('agent:') ? agLabel(w.slice(6)) : 'Key: ' + subjName(w));
+  const chips = () => [F.who && auChip('who', whoLabel(F.who), 'agent or key'), F.tool && auChip('tool', F.tool, 'tool')].filter(Boolean);
   // time · agent · tool; the result shows only when it is not ok; the duration ends the row.
   const rw = (i) => { const ag = agentOf(i), a = argText(i.args_summary);
     return row({ cls: 'aud', attrs: ag ? { 'data-ses': ag } : {}, lead: auTime(i.created_at), title: whoName(i), metaId: true, meta: raw(`<span title="${esc(i.args_summary || '')}">${esc(i.tool)}${a ? ` · ${esc(a)}` : ''}</span>`),
       trail: `${i.now_allowed ? `<span class="pill ok" title="${esc(`${i.denied_action || 'This action'} on ${i.denied_path || 'this path'} is allowed now${i.access_changed_at ? `: access changed ${dt(i.access_changed_at)}` : ''}. The call itself stays denied in the record.`)}">Allowed now</span>` : ''}${i.result === 'ok' ? '' : pill(i.result + (i.error_code && i.result !== 'denied' ? ' · ' + i.error_code : ''), i.result === 'denied' ? 'bad' : 'warn')}<span class="aud-d">${esc(i.duration_ms)} ms</span>` }); };
-  const nF = () => (F.who ? 1 : 0) + (F.q ? 1 : 0);
   const draw = () => {
     const L = all.filter(match);
     $('#clB').innerHTML = L.length ? byDay(L, (i) => i.created_at, rw) : none('bolt', 'No calls');
     $$('#clR button').forEach((x) => x.classList.toggle('on', x.dataset.r === F.r));
-    setFilterCount('clMore', nF());
   };
   return {
     t: `${ic('bolt')}Calls`,
-    b: vtools(`<div class="seg" id="clR" role="group" aria-label="Result">${segBtns(CALL_R, F.r, 'data-r')}</div>${filterBtn('clMore', nF())}`) + `<div class="pcard" id="clB"></div>`,
+    b: auTools('clQ', 'Search calls', F, chips(), `<div class="seg" id="clR" role="group" aria-label="Result">${segBtns(CALL_R, F.r, 'data-r')}</div>`, 'clMore') + `<div class="pcard" id="clB"></div>`,
     after() {
+      const redraw = auBind('clQ', 'clMore', F, chips, draw, () => { F.who = F.tool = ''; });
       draw();
       $('#clR').onclick = (e) => { const b = e.target.closest('[data-r]'); if (!b) return; F.r = b.dataset.r; draw(); };
       $('#clMore').onclick = (e) => {
         const who = [['', 'Everyone'], ...agents.map(([id, l]) => ['agent:' + id, l]), ...(F.who && !F.who.startsWith('agent:') ? [[F.who, 'Key: ' + subjName(F.who)]] : [])];
         const sh = openSheet({ title: 'Filter calls', anchor: e.currentTarget, html: `<div class="sheet-form">
-          ${selField('clW', 'Agent or key', who, F.who)}
-          <label class="fld"><span class="vlabel">Search</span><div class="srch">${ic('search')}<input class="inp" id="clQ" type="search" placeholder="Tool, argument, error" aria-label="Search calls" value="${esc(F.q)}"></div></label>
-          <div class="sheet-acts"><button type="button" class="btn lg" id="clClear">Clear</button><button type="button" class="btn pri lg" data-sheet-close>Done</button></div></div>` });
-        $('#clW', sh).onchange = () => { F.who = $('#clW', sh).value; draw(); };
-        onSearch($('#clQ', sh), (q) => { F.q = q; draw(); });
-        $('#clClear', sh).onclick = () => { F.who = F.q = ''; $('#clW', sh).value = ''; $('#clQ', sh).value = ''; draw(); };
+          ${selField('clW', 'Agent or key', who, F.who)}${selField('clT', 'Tool', [['', 'Any tool'], ...tools.map((t) => [t, t])], F.tool)}
+          <div class="sheet-acts"><button type="button" class="btn lg" id="clClear">Clear filters</button><button type="button" class="btn pri lg" data-sheet-close>Done</button></div></div>` });
+        $('#clW', sh).onchange = () => { F.who = $('#clW', sh).value; redraw(); };
+        $('#clT', sh).onchange = () => { F.tool = $('#clT', sh).value; redraw(); };
+        $('#clClear', sh).onclick = () => { F.who = F.tool = ''; $('#clW', sh).value = ''; $('#clT', sh).value = ''; redraw(); };
       };
     },
   };
@@ -11729,31 +12519,31 @@ async function auditFiles(pre) {
     return row({ as: 'div', cls: 'aud', lead: auTime(r.created_at), title: raw(r.op === 'delete' ? `<span class="fw-gone">${esc(r.path.split('/').pop())}</span>` : vaultFileLink(r.path)),
       meta: raw(`<span class="ve-a ${tone}">${esc(label)}</span> · ${whoH(r)} · <span title="${esc(dir)}">${esc(midTrunc(dir, 40))}</span>`),
       trail: `${canDiff ? `<button type="button" class="btn sm" data-df="${esc(r.file_id + '|' + r.parent_revision + '|' + r.revision)}">Diff</button>` : ''}<span class="aud-d">${esc(kb(r.size))}</span>` }); };
-  const nF = () => (F.who ? 1 : 0) + (F.q ? 1 : 0) + (F.op && !['update|patch', 'delete'].includes(F.op) ? 1 : 0);
+  const whoL = (w) => (w.startsWith('agent:') ? agLabel(w.slice(6)) : w === 'admin' ? 'Admin' : 'Outside the hub');
+  const chips = () => [F.op && !['update|patch', 'delete'].includes(F.op) && auChip('op', FW_R.find(([v]) => v === F.op)?.[1] || F.op, 'change'), F.who && auChip('who', whoL(F.who), 'who')].filter(Boolean);
   const draw = () => {
     const L = all.filter(match), at = (r) => r.created_at;
     const items = groupRuns(L, ext, at);
     $('#fwB').innerHTML = L.length ? byDay(items, (it) => (it.group ? at(it.group[0]) : at(it)), (it) => (it.group ? groupBlock(it.group, at, rw) : rw(it))) : none('file', 'No file changes');
     $$('#fwR button').forEach((x) => x.classList.toggle('on', x.dataset.op === F.op));
-    setFilterCount('fwMore', nF());
   };
   const seg = [['', 'All'], ['update|patch', 'Edited'], ['delete', 'Deleted']];
   return {
     t: `${ic('file')}Files`,
-    b: vtools(`<div class="seg" id="fwR" role="group" aria-label="Change">${segBtns(seg, F.op, 'data-op')}</div>${filterBtn('fwMore', nF())}`) + `<div class="pcard" id="fwB"></div>`,
+    b: auTools('fwQ', 'Search file changes', F, chips(), `<div class="seg" id="fwR" role="group" aria-label="Change">${segBtns(seg, F.op, 'data-op')}</div>`, 'fwMore') + `<div class="pcard" id="fwB"></div>`,
     after() {
+      // The ✕ keeps a change kind the segment shows; one only Filters offers is a chip and goes.
+      const redraw = auBind('fwQ', 'fwMore', F, chips, draw, () => { F.who = ''; if (chips().some((c) => c.attrs === 'data-au-rm="op"')) F.op = ''; });
       draw();
-      $('#fwR').onclick = (e) => { const b = e.target.closest('[data-op]'); if (!b) return; F.op = b.dataset.op; draw(); };
+      $('#fwR').onclick = (e) => { const b = e.target.closest('[data-op]'); if (!b) return; F.op = b.dataset.op; redraw(); };
       $('#fwMore').onclick = (e) => {
         const who = [['', 'Everyone'], ...agents.map(([id, l]) => ['agent:' + id, l]), ['admin', 'Admin'], ['ext', 'Outside the hub']];
         const sh = openSheet({ title: 'Filter file changes', anchor: e.currentTarget, html: `<div class="sheet-form">
           ${selField('fwOp', 'Change', FW_R, F.op)}${selField('fwW', 'Who', who, F.who)}
-          <label class="fld"><span class="vlabel">Search</span><div class="srch">${ic('search')}<input class="inp" id="fwQ" type="search" placeholder="File or folder" aria-label="Search file changes" value="${esc(F.q)}"></div></label>
-          <div class="sheet-acts"><button type="button" class="btn lg" id="fwClear">Clear</button><button type="button" class="btn pri lg" data-sheet-close>Done</button></div></div>` });
-        $('#fwOp', sh).onchange = () => { F.op = $('#fwOp', sh).value; draw(); };
-        $('#fwW', sh).onchange = () => { F.who = $('#fwW', sh).value; draw(); };
-        onSearch($('#fwQ', sh), (q) => { F.q = q; draw(); });
-        $('#fwClear', sh).onclick = () => { F.op = F.who = F.q = ''; $$('select,input', sh).forEach((x) => (x.value = '')); draw(); };
+          <div class="sheet-acts"><button type="button" class="btn lg" id="fwClear">Clear filters</button><button type="button" class="btn pri lg" data-sheet-close>Done</button></div></div>` });
+        $('#fwOp', sh).onchange = () => { F.op = $('#fwOp', sh).value; redraw(); };
+        $('#fwW', sh).onchange = () => { F.who = $('#fwW', sh).value; redraw(); };
+        $('#fwClear', sh).onclick = () => { F.op = F.who = ''; $$('select', sh).forEach((x) => (x.value = '')); redraw(); };
       };
     },
   };
@@ -11808,11 +12598,10 @@ async function auditEvents(pre) {
   const day0 = (v, end) => (v ? Date.parse(v + 'T00:00:00') + (end ? 864e5 - 1 : 0) : 0);
   const match = (e) => (!F.who || e.actor_kind === F.who) && (!F.cat || (F.cat === '@member' ? e.actor_role === 'member' : F.cat.split('|').includes(cats(e)))) && (!F.from || e.created_at >= day0(F.from)) && (!F.to || e.created_at <= day0(F.to, 1))
     && (!F.q || [e.action, e.target_id, e.actor_id, e.details, actor(e), sentence(e), auditTarget(e, details(e)).replace(/<[^>]+>/g, '')].some((x) => String(x || '').toLowerCase().includes(F.q)));
-  const nF = () => [F.cat, F.q, F.from, F.to].filter(Boolean).length;
+  const chips = () => [F.cat && auChip('cat', AUD_CAT.find(([v]) => v === F.cat)?.[1] || F.cat, 'category'), F.from && auChip('from', 'From ' + F.from, 'date'), F.to && auChip('to', 'To ' + F.to, 'date')].filter(Boolean);
   const draw = () => {
     const L = d.events.filter(match); $('#auB').innerHTML = L.length ? byDay(L, (e) => e.created_at, rw) : none('log', 'No events'); tipIcons($('#auB'));
     $$('#auW button').forEach((x) => x.classList.toggle('on', x.dataset.w === F.who));
-    setFilterCount('auMore', nF());
   };
   const ms = (v, end) => (v ? Date.parse(v + 'T00:00:00Z') + (end ? 864e5 - 1 : 0) : 0);
   const exp = (fmt) => { const f = ms(F.from), t = ms(F.to, 1), u = '/api/audit/export?format=' + fmt + (f ? '&from=' + f : '') + (t ? '&to=' + t : ''); download(u); };
@@ -11820,21 +12609,20 @@ async function auditEvents(pre) {
     t: `${ic('log')}Audit`,
     a: `<button type="button" class="btn sm" data-ax="json">${ic('dl')}JSON</button><button type="button" class="btn sm" data-ax="csv">${ic('dl')}CSV</button>`,
     pmenu: [{ label: 'Export JSON', icon: 'dl', fn: () => exp('json') }, { label: 'Export CSV', icon: 'dl', fn: () => exp('csv') }],
-    b: vtools(`<div class="seg" id="auW" role="group" aria-label="Actor">${segBtns([['', 'Everyone'], ['admin', 'Admins'], ['agent', 'Agents'], ['system', 'System']], '', 'data-w')}</div>${filterBtn('auMore', nF())}`) + `<div id="auB" class="pcard aud-list"></div>`,
+    b: auTools('auQ', 'Search audit', F, chips(), `<div class="seg" id="auW" role="group" aria-label="Actor">${segBtns([['', 'Everyone'], ['admin', 'Admins'], ['agent', 'Agents'], ['system', 'System']], '', 'data-w')}</div>`, 'auMore') + `<div id="auB" class="pcard aud-list"></div>`,
     after() {
+      const redraw = auBind('auQ', 'auMore', F, chips, draw, () => { F.cat = F.from = F.to = ''; });
       draw();
       $('#auW').onclick = (e) => { const b = e.target.closest('[data-w]'); if (!b) return; F.who = b.dataset.w; draw(); };
       $('#auMore').onclick = (e) => {
         const sh = openSheet({ title: 'Filter audit', anchor: e.currentTarget, html: `<div class="sheet-form">
           ${selField('auC', 'Category', AUD_CAT, F.cat)}
           <div class="dates"><label class="fld"><span class="vlabel">From</span><input class="inp" type="date" id="aF" aria-label="From" value="${esc(F.from)}"></label><label class="fld"><span class="vlabel">To</span><input class="inp" type="date" id="aT" aria-label="To" value="${esc(F.to)}"></label></div>
-          <label class="fld"><span class="vlabel">Search</span><div class="srch">${ic('search')}<input class="inp" id="auQ" type="search" placeholder="Search" aria-label="Search audit" value="${esc(F.q)}"></div></label>
-          <div class="sheet-acts"><button type="button" class="btn lg" id="auClear">Clear</button><button type="button" class="btn pri lg" data-sheet-close>Done</button></div></div>` });
-        $('#auC', sh).onchange = () => { F.cat = $('#auC', sh).value; draw(); };
-        $('#aF', sh).onchange = () => { F.from = $('#aF', sh).value; draw(); };
-        $('#aT', sh).onchange = () => { F.to = $('#aT', sh).value; draw(); };
-        onSearch($('#auQ', sh), (q) => { F.q = q; draw(); });
-        $('#auClear', sh).onclick = () => { F.cat = F.q = F.from = F.to = ''; $$('select,input', sh).forEach((x) => (x.value = '')); draw(); };
+          <div class="sheet-acts"><button type="button" class="btn lg" id="auClear">Clear filters</button><button type="button" class="btn pri lg" data-sheet-close>Done</button></div></div>` });
+        $('#auC', sh).onchange = () => { F.cat = $('#auC', sh).value; redraw(); };
+        $('#aF', sh).onchange = () => { F.from = $('#aF', sh).value; redraw(); };
+        $('#aT', sh).onchange = () => { F.to = $('#aT', sh).value; redraw(); };
+        $('#auClear', sh).onclick = () => { F.cat = F.from = F.to = ''; $$('select,input', sh).forEach((x) => (x.value = '')); redraw(); };
       };
       $$('[data-ax]').forEach((b) => (b.onclick = () => exp(b.dataset.ax)));
     },
@@ -11879,8 +12667,8 @@ VIEWS.lock = async () => {
   const al = S.me.vault_alias, active = lockItems();
   const switchRow = (scope, id, on, icn, name, meta, extra = '') => row({ as: 'div', extra, one: !meta, cls: 'lk-row', lead: ic(on ? 'lock' : icn), title: name, meta,
     trail: switchBtn((on ? 'Unlock ' : 'Lock ') + name, on, `data-lk="${scope}|${esc(id)}|${on ? 0 : 1}"`) });
-  // Every entity is a one-switch row; locked ones sort first.
-  const list = (title, scope, items, ids) => `<div class="pcard lk-list">${overline(title, ids.length ? `${items.length} · ${ids.length} locked` : items.length)}${items.length
+  // Every entity is a one-switch row; locked ones sort first. The overline: "Agents · 2 of 8 · 1 locked" (the search updates the count).
+  const list = (title, scope, items, ids) => `<div class="pcard lk-list">${listOverline([title, items.length ? lovN(items.length, items.length) : '0', ids.length ? `${ids.length} locked` : ''])}${items.length
     ? items.slice().sort((a, b) => ids.includes(b[0]) - ids.includes(a[0]) || a[1].localeCompare(b[1])).map(([id, name, sub]) => switchRow(scope, id, ids.includes(id), LKI[scope], name, sub, `data-lk-name="${esc(name.toLowerCase())}"`)).join('')
     : none(LKI[scope], 'None')}</div>`;
   const live = new Set(S.ses.filter((s) => s.live).map((s) => s.agent.id));
@@ -11898,15 +12686,15 @@ VIEWS.lock = async () => {
       vtools(`<div class="srch">${ic('search')}<input class="inp" id="lkQ" type="search" placeholder="Find agent, PC or team" aria-label="Filter" value="${esc(LK_Q)}"></div>`) +
       list('Agents', 'agent', agents, l.agents) + list('PCs', 'pc', pcs, l.pcs) + list('Teams', 'team', teams, l.teams) + '<div id="lkNone" hidden></div>',
     after() {
-      // A search hides the rows that do not match, then each list with no match left; the counts say "2 of 8" while it filters,
+      // A search hides the rows that do not match, then each list with no match left; each list's overline says "2 of 8",
       // and a search that matches nothing says so with Clear search.
       const apply = () => {
         $$('.lk-row[data-lk-name]').forEach((c) => (c.hidden = !!LK_Q && !c.dataset.lkName.includes(LK_Q)));
         let shown = 0;
         $$('.lk-list').forEach((card) => {
-          const rows = $$('.lk-row[data-lk-name]', card), n = rows.filter((c) => !c.hidden).length, cnt = $('.overline > span:last-child', card);
+          const rows = $$('.lk-row[data-lk-name]', card), n = rows.filter((c) => !c.hidden).length, cnt = $('.lov-n', card);
           shown += n; card.hidden = !!LK_Q && rows.length > 0 && !n;
-          if (cnt && rows.length) { cnt.dataset.all ??= cnt.textContent; cnt.textContent = LK_Q ? `${n} of ${rows.length}` : cnt.dataset.all; }
+          if (cnt) cnt.innerHTML = `<b>${n}</b> of ${rows.length}`;
         });
         const nn = $('#lkNone'); nn.hidden = !LK_Q || shown > 0;
         nn.innerHTML = nn.hidden ? '' : `<div class="pcard">${noneQ('search', 'No agent, PC or team matches', 'lkQ')}</div>`;
@@ -12028,8 +12816,10 @@ function vaultEvents(activity) {
 const VA_KINDS = [['', 'All'], ['change', 'Changes'], ['read', 'Reads'], ['outside', 'Outside the hub'], ['denied', 'Denied']];
 const VA_F = { kind: '', q: '' };
 const vnote = (html) => `<p class="vnote">${ic('note')}<span>${html}</span></p>`;
-const vaFilters = () => (VA_F.kind && !['change', 'read'].includes(VA_F.kind) ? 1 : 0) + (VA_F.q ? 1 : 0);
-/* Activity: one filter row (segment + Filters button). Consecutive outside-the-hub changes collapse into one group row. */
+/* A kind the segment does not offer (Outside the hub, Denied) is a chip; All, Changes and Reads are the segment. */
+const vaChips = () => (VA_F.kind && !['change', 'read'].includes(VA_F.kind) ? [auChip('kind', VA_KINDS.find(([v]) => v === VA_F.kind)[1], 'kind')] : []);
+/* Activity: one toolbar row (the search box with the chips, the segment, Filters). Consecutive outside-the-hub changes
+   collapse into one group row. */
 function vaultTimeline(events, state, canRestore = false) {
   // Restore (docs/vault.md): a removal that is still the latest change, and, in a file's History, an earlier version.
   const latest = new Map();
@@ -12043,7 +12833,7 @@ function vaultTimeline(events, state, canRestore = false) {
   };
   const n = (k) => events.filter((e) => !k || e.kind === k).length;
   const seg = [['', 'All'], ['change', 'Changes'], ['read', 'Reads']];
-  const tools = vtools(`<div class="seg" id="vaK" role="group" aria-label="Kind">${seg.map(([k, l]) => `<button type="button" data-va="${k}" class="${VA_F.kind === k ? 'on' : ''}"${k && !n(k) ? ' disabled' : ''}>${l} <span class="tabn">${n(k)}</span></button>`).join('')}</div>${filterBtn('vaMore', vaFilters())}`);
+  const tools = auTools('vaQ', 'Search activity', VA_F, vaChips(), `<div class="seg" id="vaK" role="group" aria-label="Kind">${seg.map(([k, l]) => `<button type="button" data-va="${k}" class="${VA_F.kind === k ? 'on' : ''}"${k && !n(k) ? ' disabled' : ''}>${l} <span class="tabn">${n(k)}</span></button>`).join('')}</div>`, 'vaFilt');
   const rw = (e) => {
     const name = e.path.split('/').pop(), dir = e.path.split('/').slice(0, -1).join('/');
     const who = e.agentId && AG(e.agentId) ? `<a href="#" data-ses="${esc(e.agentId)}">${esc(e.agent)}</a>` : esc(e.agent);
@@ -12067,16 +12857,13 @@ function vaultTimelineFilter() {
   for (const h of $$('h5.day', L)) { let x = h.nextElementSibling, any = false; while (x && !x.matches('h5.day')) { if (!x.hidden) any = true; x = x.nextElementSibling; } h.hidden = !any; }
   $('#vaNone').hidden = shown > 0 || !$$('.vault-event', L).length;
   $$('#vaK button').forEach((x) => x.classList.toggle('on', x.dataset.va === VA_F.kind));
-  setFilterCount('vaMore', vaFilters());
 }
-function openVaultFilters(btn) {
+function openVaultFilters(btn, redraw) {
   const sh = openSheet({ title: 'Filter activity', anchor: btn, html: `<div class="sheet-form">
     ${selField('vaKind', 'Show', VA_KINDS, VA_F.kind)}
-    <label class="fld"><span class="vlabel">Search</span><div class="srch">${ic('search')}<input class="inp" id="vaQ" type="search" placeholder="File, folder or agent" aria-label="Search activity" value="${esc(VA_F.q)}"></div></label>
-    <div class="sheet-acts"><button type="button" class="btn lg" id="vaClear">Clear</button><button type="button" class="btn pri lg" data-sheet-close>Done</button></div></div>` });
-  $('#vaKind', sh).onchange = () => { VA_F.kind = $('#vaKind', sh).value; vaultTimelineFilter(); };
-  onSearch($('#vaQ', sh), (q) => { VA_F.q = q; vaultTimelineFilter(); });
-  $('#vaClear', sh).onclick = () => { VA_F.kind = VA_F.q = ''; $('#vaKind', sh).value = ''; $('#vaQ', sh).value = ''; vaultTimelineFilter(); };
+    <div class="sheet-acts"><button type="button" class="btn lg" id="vaClear">Clear filters</button><button type="button" class="btn pri lg" data-sheet-close>Done</button></div></div>` });
+  $('#vaKind', sh).onchange = () => { VA_F.kind = $('#vaKind', sh).value; redraw(); };
+  $('#vaClear', sh).onclick = () => { VA_F.kind = ''; $('#vaKind', sh).value = ''; redraw(); };
 }
 /* Access: a row per agent (and per active session key), Read / Edit pills, chevron to the key's access editor. */
 function vaultAccess(entry, state, people) {
@@ -12323,8 +13110,10 @@ VIEWS.vault = async arg => {
       }
       const vk = $('#vaK');
       if (vk) {
-        vk.onclick = (e) => { const b = e.target.closest('[data-va]'); if (!b) return; VA_F.kind = b.dataset.va; vaultTimelineFilter(); };
-        $('#vaMore').onclick = (e) => openVaultFilters(e.currentTarget);
+        // The ✕ keeps Changes or Reads (the segment); a kind only Filters offers is a chip and goes.
+        const redraw = auBind('vaQ', 'vaFilt', VA_F, vaChips, vaultTimelineFilter, () => { if (vaChips().length) VA_F.kind = ''; });
+        vk.onclick = (e) => { const b = e.target.closest('[data-va]'); if (!b) return; VA_F.kind = b.dataset.va; redraw(); };
+        $('#vaFilt').onclick = (e) => openVaultFilters(e.currentTarget, redraw);
         vaultTimelineFilter();
       }
       const mdSw = $('#mdMode');
@@ -12749,16 +13538,29 @@ function fbRow(r, bucket) {
     meta: [r.tool || r.area, r.assignee ? `→ ${r.assignee.label} · ${fbReadText(r.assignee.read_at, true)}` : '', fbTaskMeta(r.linked_tasks), r.error_code, plural(r.backers, 'agent', 'agents'), sum && 'est. ' + sum, ago(r.last_seen_at)].filter(Boolean).join(' · '),
     trail: (r.reopen_count && r.status === 'new' ? pill('Reopened', 'warn') : '') + fbTaskPill(r) + (r.severity === 'blocking' ? pill('Blocking', 'bad') : ''), chev: true, attrs: { 'data-fb': r.id } });
 }
-/* The list: rows in impact order, or under an overline per tool or area when grouped. */
-function fbList(reports, bucket) {
-  if (!reports.length) return FB_NARROW.some((k) => FB_F[k]) ? none('sl', 'No report matches these filters', false, emptyAct('Clear filters', 'data-fbclr')) : none('wish', FB_EMPTY[bucket]);
-  if (!FB_F.group) return reports.map((r) => fbRow(r, bucket)).join('');
+/* The list: its overline ("12 of 40 · Not grouped ▾ · Most impact first ▾"), then rows in the chosen order, or under an
+   overline per tool or area when grouped. */
+const FB_GROUPS = [['', 'Not grouped'], ['tool', 'Grouped by tool or area']], FB_SORTS = [['impact', 'Most impact first'], ['recent', 'Last seen first']];
+function fbList(reports, bucket, total) {
+  const ov = listOverline([lovN(reports.length, total, 'fbShown'), { name: 'Group by', attrs: 'id="fbG"', options: FB_GROUPS, value: FB_F.group ? 'tool' : '' }, { name: 'Sort', attrs: 'id="fbS"', options: FB_SORTS, value: FB_F.sort }]);
+  if (!reports.length) return FB_NARROW.some((k) => FB_F[k]) ? ov + none('sl', 'No report matches these filters', false, emptyAct('Clear search and filters', 'data-fbclr')) : none('wish', FB_EMPTY[bucket]);
+  if (!FB_F.group) return ov + reports.map((r) => fbRow(r, bucket)).join('');
   const by = new Map();
   for (const r of reports) { const k = r.tool || r.area; by.set(k, [...(by.get(k) || []), r]); }
-  return [...by].map(([k, g]) => overline(k, g.length) + g.map((r) => fbRow(r, bucket)).join('')).join('');
+  return ov + [...by].map(([k, g]) => overline(k, g.length) + g.map((r) => fbRow(r, bucket)).join('')).join('');
 }
+/* The active filters as chips in the search box (a default is never a chip): kind, tool or area, team, agent, assignee, linked. */
+const fbChips = () => {
+  const rm = (k) => `data-fb-rm="${k}"`, ag = (id) => S.agents.find((a) => a.id === id)?.label || id;
+  return [FB_F.kind && { label: FB_KIND[FB_F.kind]?.[0] || FB_F.kind, name: `Remove the kind filter ${FB_KIND[FB_F.kind]?.[0] || FB_F.kind}`, attrs: rm('kind') },
+    FB_F.tool && { label: FB_F.tool, name: `Remove the tool filter ${FB_F.tool}`, attrs: rm('tool') },
+    FB_F.team && { label: S.teams.find((t) => t.id === FB_F.team)?.name || FB_F.team, name: `Remove team ${S.teams.find((t) => t.id === FB_F.team)?.name || FB_F.team}`, attrs: rm('team') },
+    FB_F.agent && { label: `From ${ag(FB_F.agent)}`, name: `Remove the agent filter ${ag(FB_F.agent)}`, attrs: rm('agent') },
+    FB_F.assignee && { label: `Assigned to ${ag(FB_F.assignee)}`, name: `Remove the assignee filter ${ag(FB_F.assignee)}`, attrs: rm('assignee') },
+    FB_F.linked && { label: FB_F.linked === 'linked' ? 'Linked' : 'Not linked', name: `Remove the linked tasks filter ${FB_F.linked === 'linked' ? 'Linked' : 'Not linked'}`, attrs: rm('linked') }].filter(Boolean);
+};
+const FB_MORE = 'data-cs-filt="fbMore"';
 const fbQuery = (bucket) => { const q = new URLSearchParams({ bucket, sort: FB_F.sort }); for (const k of FB_NARROW) if (FB_F[k]) q.set(k, FB_F[k]); return q; };
-const fbFilterN = () => FB_NARROW.filter((k) => FB_F[k]).length + (FB_F.sort !== 'impact' ? 1 : 0) + (FB_F.group ? 1 : 0);
 /* Copy a report, or the filtered list, as Markdown or JSON, ready to paste into an issue tracker. The hub audits every export. */
 async function fbExport(params, format) {
   const q = new URLSearchParams({ ...params, format });
@@ -12781,6 +13583,7 @@ function openFbSettings(btn, set) {
     run(async () => { await api('/feedback/settings', 'PUT', { [b.dataset.fbs]: on }); toast('Saved'); set[b.dataset.fbs] = on; refresh(); });
   });
 }
+/* Filters: every picker; the search is in the toolbar, Group by and Sort in the list overline. */
 function openFbFilters(btn, tools, draw) {
   const sh = openSheet({ title: 'Filter reports', anchor: btn, html: `<div class="sheet-form">
     ${selField('fbK', 'Kind', [['', 'Any kind'], ...Object.entries(FB_KIND).map(([v, [l]]) => [v, l])], FB_F.kind)}
@@ -12789,14 +13592,9 @@ function openFbFilters(btn, tools, draw) {
     ${selField('fbA', 'Agent', [['', 'Any agent'], ...S.agents.map((a) => [a.id, a.label])], FB_F.agent)}
     ${selField('fbAs', 'Assigned to', [['', 'Anyone or nobody'], ...S.agents.map((a) => [a.id, a.label])], FB_F.assignee)}
     ${selField('fbLk', 'Linked tasks', [['', 'All'], ['linked', 'Linked'], ['not_linked', 'Not linked']], FB_F.linked)}
-    ${selField('fbS', 'Sort by', [['impact', 'Impact'], ['recent', 'Last seen']], FB_F.sort)}
-    <label class="fld"><span class="vlabel">Search</span><div class="srch">${ic('search')}<input class="inp" id="fbQ" type="search" placeholder="Title, tool, error code" aria-label="Search reports" value="${esc(FB_F.q)}"></div></label>
-    ${row({ one: true, as: 'div', title: 'Group by tool or area', trail: switchBtn('Group by tool or area', FB_F.group, 'id="fbG"') })}
-    <div class="sheet-acts"><button type="button" class="btn lg" id="fbClear">Clear</button><button type="button" class="btn pri lg" data-sheet-close>Done</button></div></div>` });
-  [['#fbK', 'kind'], ['#fbT', 'tool'], ['#fbTm', 'team'], ['#fbA', 'agent'], ['#fbAs', 'assignee'], ['#fbLk', 'linked'], ['#fbS', 'sort']].forEach(([s, k]) => ($(s, sh).onchange = () => { FB_F[k] = $(s, sh).value; draw(); }));
-  onSearch($('#fbQ', sh), (q) => { FB_F.q = q; draw(); });
-  $('#fbG', sh).onclick = (e) => { FB_F.group = flipSwitch(e.currentTarget); draw(); };
-  $('#fbClear', sh).onclick = () => { Object.assign(FB_F, { kind: '', tool: '', team: '', agent: '', assignee: '', linked: '', q: '', sort: 'impact', group: false }); closeSheet(); draw(); };
+    <div class="sheet-acts"><button type="button" class="btn lg" id="fbClear">Clear filters</button><button type="button" class="btn pri lg" data-sheet-close>Done</button></div></div>` });
+  [['#fbK', 'kind'], ['#fbT', 'tool'], ['#fbTm', 'team'], ['#fbA', 'agent'], ['#fbAs', 'assignee'], ['#fbLk', 'linked']].forEach(([s, k]) => ($(s, sh).onchange = () => { FB_F[k] = $(s, sh).value; draw(); }));
+  $('#fbClear', sh).onclick = () => { Object.assign(FB_F, { kind: '', tool: '', team: '', agent: '', assignee: '', linked: '' }); closeSheet(); draw(); };
 }
 VIEWS.feedback = async (arg) => {
   const bucket = ['new', 'open', 'closed'].includes(arg) ? arg : 'new';
@@ -12805,18 +13603,29 @@ VIEWS.feedback = async (arg) => {
   S.fbc = { ...(S.fbc || {}), ...d.counts };
   const seg = [['new', 'New'], ['open', 'Open'], ['closed', 'Closed']];
   const exportParams = () => Object.fromEntries(fbQuery(bucket));
+  const ch = fbChips();
   return {
     t: `${ic('wish')}Feedback <span class="n">${d.counts.new + d.counts.open}</span>`,
     a: `<button type="button" class="btn sm" id="fbEx">${ic('dl')}Export</button><button type="button" class="btn sm" id="fbSet">${ic('shield')}Settings</button>`,
     pmenu: [...fbExportItems(exportParams()), { label: 'Feedback settings', icon: 'shield', fn: () => openFbSettings(null, set) }],
     b: (set.enabled ? '' : vnote('Feedback is turned off. Agents cannot file or read reports until you turn it on in Settings.'))
-      + vtools(`<div class="seg eq fb-seg" role="group" aria-label="Show">${seg.map(([k, l]) => `<button type="button" data-fbb="${k}" class="${k === bucket ? 'on' : ''}" aria-pressed="${k === bucket}">${l}${d.counts[k] ? `<span class="tabn">${d.counts[k]}</span>` : ''}</button>`).join('')}</div>${filterBtn('fbMore', fbFilterN())}`)
-      + `<div class="pcard" id="fbL">${fbList(d.reports, bucket)}</div>`,
+      // One toolbar row: the search box with the active filters as chips, New · Open · Closed, then Filters.
+      + `<div class="ltb">${chipSearch({ attrs: 'id="fbQ"', label: 'Search reports', value: FB_F.q, chips: ch, clear: 'data-fb-clr', more: FB_MORE })}<div class="seg eq fb-seg" role="group" aria-label="Show">${seg.map(([k, l]) => `<button type="button" data-fbb="${k}" class="${k === bucket ? 'on' : ''}" aria-pressed="${k === bucket}">${l}${d.counts[k] ? `<span class="tabn">${d.counts[k]}</span>` : ''}</button>`).join('')}</div>${filterBtn('fbMore', ch.length)}</div>`
+      + `<div class="pcard" id="fbL">${fbList(d.reports, bucket, d.counts[bucket])}</div>`,
     after() {
-      const L = $('#fbL');
-      const draw = async () => { setFilterCount('fbMore', fbFilterN()); const r = await api('/feedback?' + fbQuery(bucket)); if (L.isConnected) L.innerHTML = fbList(r.reports, bucket); };
+      const L = $('#fbL'), form = $('#fbQ'), q = $('.csrch-in', form);
+      // Filters change the list in place: the box keeps the text and the focus, and its chips are swapped (csrchSet).
+      const draw = async (focus) => { const ch = fbChips(); csrchSet(form, ch, FB_MORE); setFilterCount('fbMore', ch.length);
+        const r = await api('/feedback?' + fbQuery(bucket)); if (!L.isConnected) return; L.innerHTML = fbList(r.reports, bucket, r.counts[bucket]); if (focus) $(focus)?.focus(); };
+      const clear = () => { for (const k of FB_NARROW) FB_F[k] = ''; q.value = ''; q.dataset.q = ''; run(draw); q.focus(); };
+      onSearch(q, (v) => { FB_F.q = v; q.dataset.q = v; run(draw); }); q.addEventListener('input', (e) => e.stopPropagation());
+      form.onsubmit = (e) => { e.preventDefault(); FB_F.q = q.value.trim().toLowerCase(); q.dataset.q = FB_F.q; run(draw); };
+      form.onclick = (e) => { const rm = e.target.closest('[data-fb-rm]'); if (rm) { FB_F[rm.dataset.fbRm] = ''; run(draw); q.focus(); } else if (e.target.closest('[data-fb-clr]')) clear(); };
+      csrchFit(form);
       $('#fbMore').onclick = (e) => openFbFilters(e.currentTarget, d.tools, () => run(draw));
-      L.onclick = (e) => { if (!e.target.closest('[data-fbclr]')) return; for (const k of FB_NARROW) FB_F[k] = ''; run(draw); $('#fbMore').focus(); };
+      L.onclick = (e) => { if (e.target.closest('[data-fbclr]')) clear(); };
+      // Group by and Sort live in the list overline, which the list redraws: the focus stays on the select.
+      L.onchange = (e) => { e.stopPropagation(); if (e.target.id === 'fbG') { FB_F.group = !!e.target.value; run(() => draw('#fbG')); } if (e.target.id === 'fbS') { FB_F.sort = e.target.value; run(() => draw('#fbS')); } };
       $('#fbEx').onclick = (e) => openMenu(fbExportItems(exportParams()), e.currentTarget);
       $('#fbSet').onclick = (e) => openFbSettings(e.currentTarget, set);
     },
@@ -13165,7 +13974,7 @@ document.addEventListener('click', (e) => {
   const bpv = t.closest('[data-bpv]'); if (bpv) { const fk = bpv.dataset.bpFk, xc = bpv.closest('.bp-xcard');
     if (fk === 'xswap' && xc) { const [r, c] = xc.dataset.bpX.split('*'); BP_XU = { x: `${c}*${r}`, w: innerWidth }; }
     const p = openD('blueprint', bpv.dataset.bpv, DR.type === 'blueprint' && String(DR.arg).split('|')[0] === bpv.dataset.bpv.split('|')[0]);
-    if (fk) Promise.resolve(p).then(() => ($$('[data-bp-fk]', $('#dB')).find((el) => el.dataset.bpFk === fk && el.offsetParent) || $('#dB .bp-where button, #dB .bp-show'))?.focus({ preventScroll: !!(xc || fk.startsWith('xo:')) }));
+    if (fk) Promise.resolve(p).then(() => ((fk === 'q' && $('#dB .csrch-in')) || $$('[data-bp-fk]', $('#dB')).find((el) => el.dataset.bpFk === fk && el.offsetParent) || $('#dB .bp-show'))?.focus({ preventScroll: !!(xc || fk.startsWith('xo:')) }));
     return; }
   const obs = t.closest('[data-ob-src]'); if (obs) { obSourceSheet(obs); return; }
   const obd = t.closest('[data-ob-setup]'); if (obd) { obSetupSheet(obd); return; }

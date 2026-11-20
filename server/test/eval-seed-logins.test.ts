@@ -14,7 +14,7 @@ const run = () => import(pathToFileURL(join(repo, 'eval', 'run.mjs')).href) as P
 const users = [
   { username: 'lena', password: 'pw-lena-test' },
   { username: 'omar', setup_url: 'http://127.0.0.1:8099/#setup/tok-test' },
-  { username: 'mira', note: 'existed; password unchanged' },
+  { username: 'nadia', note: 'existed; password unchanged' },
 ];
 
 describe('the seed writes test logins to a file', () => {
@@ -26,7 +26,7 @@ describe('the seed writes test logins to a file', () => {
       expect(file).toBe(join(dir, LOGINS_FILE));
       const text = readFileSync(file, 'utf8');
       expect(text.split('\n')[0]).toMatch(/^# .*Never print/);
-      expect(text).not.toContain('mira');
+      expect(text).not.toContain('nadia');
       expect(readLogins(dir)).toEqual({ lena: 'pw-lena-test', 'omar.setup_url': 'http://127.0.0.1:8099/#setup/tok-test' });
       if (process.platform !== 'win32') expect(statSync(file).mode & 0o777).toBe(0o600);
     } finally { rmSync(dir, { recursive: true, force: true }); }

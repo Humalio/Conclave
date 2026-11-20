@@ -6,8 +6,8 @@ import { describe, it, expect } from 'vitest';
 import { checkoutStep, names, type CheckoutStepIn } from '../src/checkout/step.js';
 
 const L: Record<string, string> = { a1: 'Echo Coordinator', a2: 'Echo Developer 1', a3: 'Echo Developer 2', a4: 'Echo Reviewer' };
-const step = (status: CheckoutStepIn['status'], handouts: CheckoutStepIn['handouts'], approvePc: CheckoutStepIn['approvePc'] = null) =>
-  checkoutStep({ status, handouts, approvePc, label: (id) => L[id] ?? id });
+const step = (status: CheckoutStepIn['status'], handouts: CheckoutStepIn['handouts']) =>
+  checkoutStep({ status, handouts, label: (id) => L[id] ?? id });
 const h = (agent_id: string, status: string, waiting = 0) => ({ agent_id, status, waiting });
 
 describe('checkoutStep', () => {
@@ -31,7 +31,6 @@ describe('checkoutStep', () => {
   it('ready, rendered and restoring: one action for the operator, or who resumes next', () => {
     expect(step('ready', [h('a1', 'written'), h('a2', 'written')])).toMatchObject({ n: 2, action: 'Choose the target and keys', next: null, text: 'Step 2 of 5. All 2 handouts are written, and the team stays paused until you choose where it moves.' });
     expect(step('rendered', [h('a1', 'written')])).toMatchObject({ n: 3, action: 'Run the restore prompt', next: 'Then each member resumes on the target.' });
-    expect(step('rendered', [h('a1', 'written')], { name: 'Studio PC' })).toMatchObject({ action: 'Approve the new PC', text: 'Step 3 of 5. The new PC Studio PC has enrolled and waits for your approval before its keys are released.' });
     expect(step('restoring', [h('a1', 'consumed'), h('a4', 'written')])).toMatchObject({ n: 4, action: null, text: 'Step 4 of 5. The members are resuming on the target: 1 of 2 resumed.', next: 'Next: Echo Reviewer resumes on the target.' });
   });
   it('restored, cancelled and expired: nothing left to do', () => {

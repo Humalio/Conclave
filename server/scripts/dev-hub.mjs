@@ -34,7 +34,8 @@ if (!existsSync(envFile)) {
 }
 const secrets = Object.fromEntries(readFileSync(envFile, 'utf8').split(/\r?\n/).filter((l) => l.includes('=')).map((l) => [l.slice(0, l.indexOf('=')), l.slice(l.indexOf('=') + 1)]));
 
-// Only what the hub needs to run, so ALLOWED_ORIGINS and the like from this shell never reach it. DEMO_MODE is the one setting passed on, to try Replay here.
+// Only what the hub needs to run, so ALLOWED_ORIGINS and the like from this shell never reach it. DEMO_MODE (to try Replay here) is the
+// only setting passed on.
 const env = {
   ...cleanEnv(), ...(process.env.DEMO_MODE ? { DEMO_MODE: process.env.DEMO_MODE } : {}), NODE_ENV: 'development', HOST, PORT: String(PORT), PUBLIC_URL: `http://${HOST}:${PORT}`, TRUST_PROXY: 'false', LOG_LEVEL: 'warn',
   DATA_DIR: dataDir, VAULT_DIR: vaultDir, GRAPH_DEBOUNCE_MS: '1000', VAULT_SCAN_SECONDS: '5', ADMIN_USERNAME: secrets.ADMIN_USERNAME, ADMIN_PASSWORD: secrets.ADMIN_PASSWORD, KEY_PEPPER: secrets.KEY_PEPPER,

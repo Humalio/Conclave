@@ -33,7 +33,7 @@ const BASELINE_FILE = '0100_v1_baseline.sql';
 const UNCHANGED = 'Nothing was changed. See docs/getting-started.md, "Upgrading to 1.0".';
 
 /**
- * The (version, checksum) of the 56 migrations of 0.x (0c507c8), as a 0.x hub at migration 69 records them. A database
+ * The (version, checksum) of the 56 migrations of 0.x (the last 0.x version), as a 0.x hub at migration 69 records them. A database
  * with exactly these rows and the baseline's schema is adopted: 100 is recorded as applied without running it.
  * Printed by scripts/v1-baseline.mjs --legacy.
  */
@@ -132,8 +132,9 @@ export function migrate(db: Db, dir: string = migrationsDir()): void {
       recognise(db, read(BASELINE_FILE));
       applied = recorded();
     } else {
-      throw new Error(`the database is at migration ${Math.max(...applied.keys())} of 0.x: upgrade to 0.x (0c507c8) first, `
-        + `then to 1.0. ${UNCHANGED}`);
+      throw new Error(`the database is at migration ${Math.max(...applied.keys())} of 0.x, which `
+        + `is too old to move to 1.0 directly: upgrade it to the last 0.x release (migration 69) first, then to 1.0. `
+        + `That older release is not part of the public repository, so this upgrade path is not supported from it. ${UNCHANGED}`);
     }
   }
   const pending: { version: number; f: string; sql: string; checksum: string }[] = [];

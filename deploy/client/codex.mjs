@@ -2,8 +2,8 @@
 /**
  * Codex preparation for the restore client (docs/checkout.md §6 steps 5, 6, 7 and 9, §9 F4): the `.codex/config.toml`
  * writers, the AGENTS.override.md overlay, the permission mapping, the start line and the doctor's bridge handshake.
- * Everything here is unverified until the F4 spike (R5): no Codex CLI has read these files yet. The hub refuses
- * `provider: codex` at render (`codex_unverified`) until then. Node 18 or later, no dependencies.
+ * The connector's own Codex restore replaced these writers (docs/checkout.md §6 step 5, verified in the second Codex move
+ * trial, §9 F4); they stay until `conclave check` shows no folder uses the bridge. Node 18 or later, no dependencies.
  *
  * Variants (`--codex-config=project|global`):
  *   project (primary): <folder>/.codex/config.toml names the stdio bridge with the folder and --keys-file as arguments,

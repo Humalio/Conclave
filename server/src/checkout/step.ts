@@ -9,8 +9,6 @@ export interface CheckoutStepIn {
   status: CheckoutStatus;
   /** Each member's handout: its agent and status, and how many leftovers wait for the operator (merged handouts only). */
   handouts: { agent_id: string; status: string; waiting?: number }[];
-  /** A new PC that enrolled and waits for the operator's approval (rendered checkouts only). */
-  approvePc?: { name: string | null } | null;
   /** An agent's label, never its id when a label is known. */
   label: (agentId: string) => string;
 }
@@ -45,7 +43,6 @@ export function checkoutStep(c: CheckoutStepIn): CheckoutStep {
     }
     case 'ready': return out(`All ${plural(m, 'handout')} are written, and the team stays paused until you choose where it moves.`, 'Choose the target and keys', null);
     case 'rendered':
-      if (c.approvePc) return out(`The new PC${c.approvePc.name ? ` ${c.approvePc.name}` : ''} has enrolled and waits for your approval before its keys are released.`, 'Approve the new PC', 'Then each member resumes on the target.');
       return out('The restore prompt is made and waits to be run on the target PC.', 'Run the restore prompt', 'Then each member resumes on the target.');
     case 'restoring': {
       const todo = H.filter((h) => h.status !== 'consumed').map((h) => c.label(h.agent_id));

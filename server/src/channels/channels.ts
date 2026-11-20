@@ -26,7 +26,7 @@ import { newId } from '../util/ids.js';
 import { authorize, ownerAllows } from '../policy/engine.js';
 import type { OwnerScope } from '../policy/ownerScope.js';
 import { VirtualStream, frameHeader, FRAME_END, parseFramedFile } from '../util/frames.js';
-import { isPathAllowed, osKind, joinFor } from '../util/paths.js';
+import { isPathAllowed, osKind, joinFor, refusedLocalName } from '../util/paths.js';
 
 export const INLINE_CHUNK = 64 * 1024;
 export const WINDOW = 4;
@@ -58,7 +58,23 @@ export interface OpenSpec {
   /** Inline download: the hub already has the bytes. */
   preload?: Buffer;
 }
-export interface Job { id: string; kind: 'send' | 'receive'; channel_id: string; framing: 'raw' | 'tar'; target: string; local_path?: string; local_paths?: string[]; save_to?: string }
+/** agent: the sender's label on a send job; the connector reads files only from that agent's own folder (docs/transfers.md). */
+export interface Job { id: string; kind: 'send' | 'receive'; channel_id: string; framing: 'raw' | 'tar'; target: string; local_path?: string; local_paths?: string[]; save_to?: string; agent?: string }
+/**
+ * Files a task gets from its agent's PC (docs/transfers.md, "Task files from the PC"): a bridge channel opened with
+ * `task_attach`, its target `<task id>#<brief|submission>`. TaskAttachments answers both checks (set in app.ts).
+ */
+export interface TaskAttachHook {
+  /** Why the upload may not go on (each chunk, and again as it lands), or null. */
+  refusal(c: Uploader & { target: string }): { reason: string; message: string } | null;
+  /** The files, complete and scanned: write the set's next version. Throws a KeyError when a check or limit refuses them. */
+  commit(c: ChannelRow, files: { path: string; bytes: Buffer }[]): Promise<{ task_id: string; role: string; share_id: string; version: number; files: number; total_bytes: number }>;
+  /** The most one upload may carry, and one file. */
+  maxBytes: number; fileMax: number;
+}
+/** Where files given by local path may come from, for a refusal's message. */
+export const LOCAL_FROM = 'Files may come only from inside your own folder on this PC (the folder the connector registered for you), not from .git, .codex, your role file or the connector\'s folders. Small files can also be attached inline.';
+const NO_PC = 'Local files go through the Conclave connector on your PC (or a paired bridge), and this session has neither. Use the connector, or attach the files inline (small files, base64).';
 
 interface Relay {
   queue: { seq: number; buf: Buffer }[]; nextSeq: number; hash: Hash; sent: number; finalSent: boolean; acc: Buffer[]; tail: string;
@@ -113,7 +129,8 @@ export class Channels {
   }
   view(c: ChannelRow) {
     return {
-      channel_id: c.id, status: c.status, mode: c.mode, direction: c.direction, from: c.from_agent_id, to: c.target_kind === 'agent' ? c.to_agent_id : `${c.target_kind}:${c.target}`,
+      channel_id: c.id, status: c.status, mode: c.mode, direction: c.direction, from: c.from_agent_id,
+      to: c.target_kind === 'agent' ? c.to_agent_id : c.opened_with === 'task_attach' ? `task:${c.target.replace('#', ' (')} files)` : `${c.target_kind}:${c.target}`,
       purpose: c.purpose, size: c.size, bytes_moved: c.bytes_moved, sha256: c.sha256 ?? c.sender_sha, failure_reason: c.failure_reason,
       result: c.result ? JSON.parse(c.result) as unknown : null, save_to: c.to_local_path, expires_at: c.expires_at, created_at: c.created_at, finished_at: c.finished_at,
     };
@@ -197,17 +214,32 @@ export class Channels {
     const cur = this.bridges.get(machineId) ?? { home: null, os: null };
     this.bridges.set(machineId, { home: info.home ?? cur.home, os: info.os ?? cur.os });
   }
-  /** Resolve "~", then require the path to lie inside the PC's approved folders. */
-  resolveLocal(machineId: string | null, p: string, what: string): string {
-    if (!machineId) throw err('bridge_required', 'This session did not log in through an app key of a PC, so there is no bridge for it.');
+  /** Is this PC's connector enrolled and not held (set in app.ts)? Its service then carries the PC's transfers. */
+  connectorPc: (machineId: string) => boolean = () => false;
+  /** Task files from the PC (set in app.ts). */
+  taskAttach: TaskAttachHook | null = null;
+  /**
+   * Resolve "~", then check the path. A paired bridge, or the connector for a save to the PC (receive), needs it inside the
+   * PC's approved folders. The connector's send reads only from the calling agent's own folder, which the hub never
+   * knows: here the name is checked (refusedLocalName), and the connector checks the real path against that folder.
+   */
+  resolveLocal(machineId: string | null, p: string, what: string, dir: 'send' | 'receive' = 'receive'): string {
+    if (!machineId) throw err('bridge_required', NO_PC);
     const info = this.setup.bridgeInfo(machineId);
-    if (!info.paired || info.key_status !== 'active') throw err('bridge_required', 'This PC has no active bridge. Pair its bridge first, or use inline mode for small data.');
+    const bridge = info.paired && info.key_status === 'active';
+    const connector = !bridge && this.connectorPc(machineId);
+    if (!bridge && !connector) throw err('bridge_required', NO_PC);
     const b = this.bridges.get(machineId);
     const os = osKind(b?.os ?? info.os);
     let path = p;
     if (path === '~' || path.startsWith('~/') || path.startsWith('~\\')) {
       if (!b?.home) throw err('bridge_offline', 'The bridge of this PC has not reported its home folder yet. Wait for it to connect and retry.');
       path = joinFor(os, b.home, path.slice(1));
+    }
+    if (connector && dir === 'send') {
+      const why = refusedLocalName(path, os);
+      if (why) throw err('denied', `${what} ${why} ${LOCAL_FROM}`);
+      return path;
     }
     if (!isPathAllowed(path, this.setup.approvedFolders(machineId), os)) throw err('denied', `${what} is outside the folders approved for this PC.`);
     return path;
@@ -221,7 +253,8 @@ export class Channels {
     this.db.prepare("INSERT INTO usage_counters(scope,metric,window_start,count) VALUES (?,'channel_bytes',?,?) ON CONFLICT(scope,metric,window_start) DO UPDATE SET count=count+excluded.count").run(`key:${credId}`, Math.floor(Date.now() / 3600_000) * 3600_000, bytes);
   }
   /** The most a channel may stage: what its destination can commit (a vault file, a share version), else the channel cap. */
-  private stageMax(targetKind: 'agent' | 'vault' | 'share'): number {
+  private stageMax(targetKind: 'agent' | 'vault' | 'share', openedWith?: string | null): number {
+    if (openedWith === 'task_attach') return Math.min(this.cfg.bridgeMax, (this.taskAttach?.maxBytes ?? 0) + 64 * 1024);
     return Math.min(this.cfg.bridgeMax, targetKind === 'vault' ? MAX_BLOB : targetKind === 'share' ? this.shares.maxShareBytes : Infinity);
   }
   open(o: OpenSpec): ChannelRow {
@@ -232,7 +265,7 @@ export class Channels {
     if (o.mode === 'inline') {
       if (o.size === undefined || !o.sha256) throw err('invalid_argument', 'Inline mode needs size and sha256 (or give local_path for bridge mode).');
       if (o.size > this.cfg.inlineMax) throw err('too_large', `Inline channels carry at most ${this.cfg.inlineMax} bytes; use local_path (bridge mode) for more.`);
-    } else if (o.size !== undefined && o.size > this.stageMax(o.targetKind)) throw err('too_large', `This channel can carry at most ${this.stageMax(o.targetKind)} bytes to its destination.`);
+    } else if (o.size !== undefined && o.size > this.stageMax(o.targetKind, o.openedWith)) throw err('too_large', `This channel can carry at most ${this.stageMax(o.targetKind, o.openedWith)} bytes to its destination.`);
     if (this.usedThisHour(o.from.credId) + (o.size ?? 0) > this.cfg.bytesPerHour) throw err('rate_limited', 'This key has used its hourly channel byte quota.');
     const id = newId.channel(), now = Date.now();
     const status = o.targetKind === 'agent' ? 'offered' : 'open';
@@ -257,7 +290,7 @@ export class Channels {
     if (c.to_agent_id !== agentId || c.status !== 'offered') throw err(c.status === 'expired' ? 'expired' : 'invalid_state', c.status === 'expired' ? 'This channel offer expired.' : 'This channel is not waiting for you to accept it.');
     let to: string | null = null;
     if (c.mode === 'bridge') {
-      to = this.resolveLocal(machineId, saveTo ?? `~/AgentHub/inbox/${id}`, 'save_to');
+      to = this.resolveLocal(machineId, saveTo ?? `~/AgentHub/inbox/${id}`, 'save_to', 'receive');
     }
     const now = Date.now();
     this.db.prepare("UPDATE data_channels SET status='open', to_credential_id=?, to_machine_id=?, to_local_path=?, started_at=?, expires_at=? WHERE id=?").run(credId, machineId, to, now, now + 24 * 3600_000, id);
@@ -358,6 +391,7 @@ export class Channels {
    */
   private uploadRefusal(c: ChannelRow): string | null {
     if (c.direction !== 'send' || c.target_kind === 'agent') return null;
+    if (c.opened_with === 'task_attach') return this.taskRefusal(c)?.reason ?? null;
     if (c.target_kind === 'share') return this.shareSaveRefusal(c, this.shares.share(c.target))?.reason ?? null;
     if (this.lockdown?.blocks('file_update', c.from_agent_id, c.from_machine_id)) return 'lockdown';
     return this.saveRefusal(c, (c.base_revision ?? 'absent') === 'absent' ? 'fs.create' : 'fs.update', `path:${this.vault.normalise(c.target).path}`);
@@ -509,6 +543,12 @@ export class Channels {
     const why = this.saveRefusal(c, 'share.upload', `share:${sh.id}`);
     return why ? { reason: why, message: why === 'paused' ? PAUSED : DENIED } : null;
   }
+  /** A task upload's check: the hub has no task attachments at all, or TaskAttachHook.refusal. */
+  private taskRefusal(c: ChannelRow): { reason: string; message: string } | null {
+    if (!this.taskAttach) return { reason: 'denied', message: 'This hub does not take task attachments.' };
+    if (!this.credActive(c.from_credential_id) || (c.from_app_credential_id !== null && !this.credActive(c.from_app_credential_id))) return { reason: 'denied', message: DENIED };
+    return this.taskAttach.refusal(c);
+  }
   /**
    * share_upload with inline files, just before its version is published (after the blobs are staged): the same check as
    * a channel save into the share, for the calling session's key and app key. Returns the reason and message, or null.
@@ -525,7 +565,8 @@ export class Channels {
     for (const c of rows) {
       if (c.direction === 'send' && c.from_machine_id === machineId && !c.sender_done) {
         const paths = c.from_local_path?.startsWith('[') ? JSON.parse(c.from_local_path) as string[] : null;
-        jobs.push({ id: `${c.id}:send`, kind: 'send', channel_id: c.id, framing: c.framing, target: c.target_kind, ...(paths ? { local_paths: paths } : { local_path: c.from_local_path! }) });
+        const agent = (this.db.prepare('SELECT label FROM agents WHERE id=?').get(c.from_agent_id) as { label: string | null } | undefined)?.label ?? undefined;
+        jobs.push({ id: `${c.id}:send`, kind: 'send', channel_id: c.id, framing: c.framing, target: c.target_kind, ...(paths ? { local_paths: paths } : { local_path: c.from_local_path! }), ...(agent ? { agent } : {}) });
       }
       const recvMachine = c.direction === 'download' ? c.from_machine_id : c.to_machine_id;
       // Verification and publication are separate. A bridge may restart between them.
@@ -562,7 +603,7 @@ export class Channels {
       if (refused) { this.fail(id, refused); return { status: 410, body: { error: 'gone', status: 'failed', failure_reason: refused } }; }
       this.touch(id);
       // Refuse bytes the destination could never commit, instead of staging up to the channel cap first.
-      const max = this.stageMax(c.target_kind);
+      const max = this.stageMax(c.target_kind, c.opened_with);
       if (offset + body.length > max) { this.fail(id, 'too_large'); return { status: 413, body: { error: 'too_large' } }; }
       if (total !== null) {
         if (total > max) { this.fail(id, 'too_large'); return { status: 413, body: { error: 'too_large' } }; }
@@ -753,6 +794,7 @@ export class Channels {
         void res;
         return;
       }
+      if (c.opened_with === 'task_attach') { await this.commitTaskFiles(c, part, st.size, senderSha); return; }
       // share: a framed stream of files
       const sh = this.shares.share(c.target);
       const refused = this.shareSaveRefusal(c, sh);
@@ -789,6 +831,37 @@ export class Channels {
       this.end(c.id, 'done', null, { share_id: sh!.id, version: v.version, files: v.files, size: st.size, sha256: senderSha });
     } catch (e) {
       this.fail(c.id, e instanceof KeyError ? e.code : 'commit_failed', { message: e instanceof Error ? e.message : String(e) });
+    }
+  }
+  /**
+   * Task files from the PC: read each framed file (one file at most the attachment limit), scan text with the leak guard,
+   * check the task again and write the set's next version (TaskAttachHook.commit, which applies the inline limits and
+   * audits it). Any refusal fails the channel with its reason and message; nothing is written.
+   */
+  private async commitTaskFiles(c: ChannelRow, part: string, size: number, senderSha: string): Promise<void> {
+    const hook = this.taskAttach;
+    const refused = this.taskRefusal(c);
+    if (!hook || refused) { this.fail(c.id, refused?.reason ?? 'denied', { message: refused?.message ?? DENIED }); return; }
+    const files: { path: string; bytes: Buffer }[] = [];
+    let stop: { reason: string; message: string } | null = null;
+    await parseFramedFile(part, async (path, n, fh, start) => {
+      if (stop) return;
+      if (n > hook.fileMax) { stop = { reason: 'too_large', message: `"${path}" is ${n} bytes; one attachment is at most ${hook.fileMax} bytes.` }; return; }
+      const bytes = Buffer.alloc(n);
+      if (n) await fh.read(bytes, 0, n, start);
+      if (n <= SCAN_LIMIT && isText(bytes) && this.leak(c, bytes.toString('utf8'), `file:${path}`)) { stop = { reason: 'leak_guard', message: '' }; return; }
+      files.push({ path, bytes });
+    });
+    if (stop) { const s = stop as { reason: string; message: string }; if (s.reason !== 'leak_guard') this.fail(c.id, s.reason, { message: s.message }); return; }
+    if (this.get(c.id)?.status !== 'open') return;
+    const late = this.taskRefusal(c);
+    if (late) { this.fail(c.id, late.reason, { message: late.message }); return; }
+    try {
+      const v = await hook.commit(c, files);
+      this.end(c.id, 'done', null, { ...v, size, sha256: senderSha });
+    } catch (e) {
+      if (e instanceof KeyError) { this.fail(c.id, e.code, { message: e.message }); return; }
+      throw e;
     }
   }
 }

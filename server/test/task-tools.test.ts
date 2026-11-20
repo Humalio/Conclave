@@ -41,15 +41,14 @@ const mk = (label: string) => {
   const k = app.keys.createSessionKey({ agentId: agent.id, label: `${label} key` }, sys);
   return { id: agent.id, login: () => loginWith(k.secret) };
 };
-/** A running team: coordinator, two workers and a reviewer, logged in. */
-async function team(onDemand = false) {
+/** A running team: coordinator, two workers and a reviewer, logged in (one delivery model: every team is woken). */
+async function team() {
   const [c, w1, w2, r, r2] = ['coord', 'w1', 'w2', 'rev', 'rev2'].map(mk) as ReturnType<typeof mk>[];
   const res = await api('POST', '/teams', { name: `tt${++n}`, goal: 'ship it',
     members: [{ agent_id: c!.id, role: 'coordinator' }, { agent_id: w1!.id, role: 'worker' }, { agent_id: w2!.id, role: 'worker' }, { agent_id: r!.id, role: 'reviewer' }, { agent_id: r2!.id, role: 'reviewer' }] });
   expect(res.status).toBe(201);
   const tid = res.body.team.id as string;
   expect((await api('POST', `/teams/${tid}/start`)).status).toBe(200);
-  if (onDemand) expect((await api('PATCH', `/teams/${tid}`, { delivery_mode: 'on_demand' })).body.team.delivery_mode).toBe('on_demand');
   const [C, W1, W2, R] = await Promise.all([c!, w1!, w2!, r!].map((x) => x.login()));
   return { tid, c: c!, w1: w1!, w2: w2!, r: r!, r2: r2!, C: C!, W1: W1!, W2: W2!, R: R! };
 }
@@ -143,7 +142,7 @@ describe('notices on answers', () => {
 
 describe('task_progress until', () => {
   it('may lie up to 14 days ahead; later is cut to 14 days, the past is refused', async () => {
-    const X = await team(true);
+    const X = await team();
     const t = await started(X);
     const ten = Date.now() + 10 * DAY;
     expect((await X.W1('task_progress', { task_id: t.id, note: 'long run', until: ten })).structuredContent.task).toMatchObject({ progress_until: ten, lease_expires_at: ten });
@@ -157,7 +156,7 @@ describe('task_progress until', () => {
   });
 
   it('flags a task overdue only once its check-in time has really passed, and never a queued one', async () => {
-    const X = await team(true);
+    const X = await team();
     const t = await started(X);
     // A second task assigned to the same worker waits queued: task_progress until on it sets no deadline (§8.2).
     const q = await mkTask(X);
@@ -304,8 +303,8 @@ describe('the reviewer hears about a submission', () => {
   const notices = (id: string) => app.db.prepare("SELECT body FROM agent_notices WHERE agent_id=? AND kind='review_requested'").all(id) as { body: string }[];
   const items = (id: string, task: string) => (app.db.prepare("SELECT COUNT(*) n FROM work_items WHERE agent_id=? AND kind='review_requested' AND ref_id=? AND acked_at IS NULL").get(id, task) as { n: number }).n;
   const reviewTurns = (task: string) => app.db.prepare("SELECT holder_agent_id, seen_at FROM task_turns WHERE task_id=? AND phase='review' AND closed_at IS NULL").all(task).map((x) => ({ ...x }));
-  it('an on-demand reviewer gets a review_requested notice on the first submit', async () => {
-    const X = await team(true);
+  it('a reviewer gets a review_requested notice on the first submit', async () => {
+    const X = await team();
     const t = await started(X);
     expect(code(await X.W1('task_submit', { task_id: t.id, summary: 'done' }))).toBe('ok');
     const n = notices(X.r.id);
@@ -316,15 +315,6 @@ describe('the reviewer hears about a submission', () => {
     expect(items(X.r.id, t.id)).toBe(1);
     expect(reviewTurns(t.id)).toEqual([{ holder_agent_id: X.r.id, seen_at: null }]);
   });
-  it('a polling reviewer gets the work item only, no extra notice', async () => {
-    const X = await team();
-    const t = await started(X);
-    expect(code(await X.W1('task_submit', { task_id: t.id, summary: 'done' }))).toBe('ok');
-    expect(notices(X.r.id)).toHaveLength(0);
-    // 8.A9 (turn side): the work item only, and the review turn is recorded as for an on-demand reviewer.
-    expect(items(X.r.id, t.id)).toBe(1);
-    expect(reviewTurns(t.id)).toEqual([{ holder_agent_id: X.r.id, seen_at: null }]);
-  });
 });
 
 describe('hand-off results (§8.4, TASKFLOW-5)', () => {
@@ -332,48 +322,40 @@ describe('hand-off results (§8.4, TASKFLOW-5)', () => {
   const itemCount = (id: string, kind: string, task: string) => (app.db.prepare('SELECT COUNT(*) n FROM work_items WHERE agent_id=? AND kind=? AND ref_id=? AND acked_at IS NULL').get(id, kind, task) as { n: number }).n;
   const label = (id: string) => app.keys.agent(id)!.label;
 
-  it('8.A5: an on-demand submit names the reviewer, the wake text and the wake line, never task content', async () => {
-    const X = await team(true);
+  it('8.A5: a submit names the reviewer, the wake text and the wake line, never task content', async () => {
+    const X = await team();
     const t = await started(X, { title: 'SECRET-TITLE' });
     const r = await X.W1('task_submit', { task_id: t.id, summary: 'SECRET-SUMMARY' });
     expect(r.structuredContent.handoff).toEqual({ to: X.r.id, to_label: label(X.r.id), phase: 'review', on_demand: true, seen: false, wake_text: `review ${t.id}` });
     const line = r.content[0]!.text.split('\n').find((l) => l.includes('only sees this when woken'))!;
-    expect(line).toBe(`${label(X.r.id)} (on demand) only sees this when woken. Tell its session: review ${t.id}`);
+    expect(line).toBe(`${label(X.r.id)} only sees this when woken. Tell its session: review ${t.id}`);
     expect(line).not.toContain('SECRET');
     expect(noticeCount(X.r.id, 'review_requested', t.id)).toBe(1);
     expect(itemCount(X.r.id, 'review_requested', t.id)).toBe(1);
     expect(app.db.prepare("SELECT COUNT(*) n FROM task_turns WHERE task_id=? AND phase='review' AND closed_at IS NULL AND seen_at IS NULL").get(t.id)).toMatchObject({ n: 1 });
   });
 
-  it('8.A9: a polling reviewer gets on_demand false and no wake text', async () => {
+  it('8.A9: no team gets on_demand false or a hand-off without wake text any more', async () => {
     const X = await team();
     const t = await started(X);
     const r = await X.W1('task_submit', { task_id: t.id, summary: 'done' });
-    expect(r.structuredContent.handoff).toEqual({ to: X.r.id, to_label: label(X.r.id), phase: 'review', on_demand: false, seen: false });
-    expect(r.content[0]!.text).not.toContain('only sees this when woken');
-    expect(r.content[0]!.text).toContain(`Hand-off: ${label(X.r.id)} has it now (review)`);
-    expect(noticeCount(X.r.id, 'review_requested', t.id)).toBe(0);
+    expect(r.structuredContent.handoff).toMatchObject({ to: X.r.id, phase: 'review', on_demand: true, wake_text: `review ${t.id}` });
+    expect(r.content[0]!.text).toContain(`${label(X.r.id)} only sees this when woken`);
+    expect(noticeCount(X.r.id, 'review_requested', t.id)).toBe(1);
   });
 
-  it('8.A10: an on-demand assignment sends a task_assigned notice and a work item, and the hand-off is queued', async () => {
-    const X = await team(true);
+  it('8.A10: a assignment sends a task_assigned notice and a work item, and the hand-off is queued', async () => {
+    const X = await team();
     const t = await mkTask(X);
     const r = await X.C('task_assign', { task_id: t.id, agent_id: X.w1.id });
     expect(r.structuredContent.handoff).toEqual({ to: X.w1.id, to_label: label(X.w1.id), phase: 'queued', on_demand: true, seen: false, wake_text: `start ${t.id}` });
     expect(r.content[0]!.text).toContain(`Tell its session: start ${t.id}`);
     expect(noticeCount(X.w1.id, 'task_assigned', t.id)).toBe(1);
     expect(itemCount(X.w1.id, 'task_assigned', t.id)).toBe(1);
-    // On a polling team: the work item only, no notice, no wake text.
-    const Y = await team();
-    const u = await mkTask(Y);
-    const p = await Y.C('task_assign', { task_id: u.id, agent_id: Y.w1.id });
-    expect(p.structuredContent.handoff).toEqual({ to: Y.w1.id, to_label: label(Y.w1.id), phase: 'queued', on_demand: false, seen: false });
-    expect(noticeCount(Y.w1.id, 'task_assigned', u.id)).toBe(0);
-    expect(itemCount(Y.w1.id, 'task_assigned', u.id)).toBe(1);
   });
 
   it('task_review request_changes, task_unblock and a task_update reviewer change hand off; approve and plain edits do not', async () => {
-    const X = await team(true);
+    const X = await team();
     const t = await started(X);
     const v = (await X.W1('task_submit', { task_id: t.id, summary: 'first' })).structuredContent.task.version;
     // A new reviewer while in review: the hand-off goes to them.
@@ -481,10 +463,8 @@ describe('the shipped hand-off playbook line (§8.4, D-21)', () => {
       expect(ends((app.db.prepare('SELECT playbook FROM team_role_defaults WHERE role=?').get(role) as { playbook: string }).playbook)).toBe(true);
     }
     expect(ON_DEMAND_PLAYBOOKS.reviewer).not.toContain(HANDOFF_LINE);
-    // A new team's copies, in either mode.
-    for (const onDemand of [false, true]) {
-      const X = await team(onDemand);
-      for (const role of ['coordinator', 'worker']) expect(ends(app.teams.playbook(X.tid, role))).toBe(true);
-    }
+    // A new team's copies.
+    const X = await team();
+    for (const role of ['coordinator', 'worker']) expect(ends(app.teams.playbook(X.tid, role))).toBe(true);
   });
 });

@@ -45,11 +45,13 @@ describe('console: saved Blueprint views', () => {
     expect(lib.bpVHere([view, { ...view, id: 'bv_2', section: 4 }, { ...view, id: 'bv_3', project_id: 'prj_other' }], 'prj_abc', '2').map((v) => v.id)).toEqual([view.id]);
   });
 
-  it('draw Views beside Save view, read and write the hub, and never the browser', () => {
+  it('draw Views with Save view as its first row (only while the view differs from the default), read and write the hub, and never the browser', () => {
     expect(js).toContain('BP_VIEW.save = bpViewSave;');
     // Views sits in the toolbar row, so it opens from the unfiltered summary too, not only from a filtered list.
     expect(js).toContain('id="bpViews" aria-haspopup="dialog">Views</button>');
-    expect(js).toContain("if (vw) vw.onclick = () => bpViewsSheet({ pid, section: tab, anchor: vw });");
+    expect(js).toContain("if (vw) vw.onclick = () => bpViewsSheet({ pid, section: tab, anchor: vw, save });");
+    expect(js).toContain("title: 'Save view', attrs: { 'data-bpv-save': '1'");
+    expect(js).not.toContain('id="bpSave"');
     const block = js.slice(js.indexOf('const BP_V_MAX'), js.indexOf('BP_VIEW.save = bpViewSave;'));
     expect(block).toContain("api('/blueprint/views')");
     expect(block).toContain("'PUT', { views:");

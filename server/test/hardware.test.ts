@@ -287,7 +287,7 @@ describe('scheduled windows', () => {
   const at = Date.UTC(2026, 10, 18, 23, 30);
   it('a window past midnight is open late on its day and early the next', () => {
     const c = { timezone: 'UTC', windows: [{ days: ['wed' as const], from: '22:00', to: '06:00' }] };
-    expect(availability(c, at)).toEqual({ any: false, now: true, until: '06:00', next: 'Wed 22:00' });
+    expect(availability(c, at)).toEqual({ any: false, now: true, until: '06:00', next: 'Wed 22:00', ends_at: Date.UTC(2026, 10, 19, 6, 0), next_at: Date.UTC(2026, 10, 25, 22, 0) });
     expect(availability(c, at + 5 * 3600_000)).toMatchObject({ now: true, until: '06:00' }); // Thursday 04:30
     expect(availability(c, at + 7 * 3600_000)).toMatchObject({ now: false, until: null, next: 'Wed 22:00' }); // Thursday 06:30
   });

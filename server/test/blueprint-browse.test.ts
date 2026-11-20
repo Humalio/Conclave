@@ -65,11 +65,11 @@ beforeAll(async () => {
     { op: 'upsert', kind: 'risk', key: 'RK-02', title: 'Closed risk', status: 'closed' },
     { op: 'upsert', kind: 'milestone', key: 'M1', title: 'First cut', status: 'planned', team_id: T }]);
 
-  const c = await post('/users', { username: 'mira' });
-  const first = await adminLogin(base, 'mira', c.body.password);
+  const c = await post('/users', { username: 'nadia' });
+  const first = await adminLogin(base, 'nadia', c.body.password);
   expect((await call(first, 'POST', '/me/password', { current: c.body.password, new: PW })).status).toBe(200);
   expect((await call(admin, 'PUT', `/users/${c.body.user.id}/grants`, { grants: [{ project_id: P, components: ['blueprint'], vault_folders: [], may_export: false }] })).status).toBe(200);
-  member = await adminLogin(base, 'mira', PW);
+  member = await adminLogin(base, 'nadia', PW);
 });
 afterAll(async () => { await app?.close(); });
 
