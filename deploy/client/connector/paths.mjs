@@ -54,16 +54,32 @@ export function readJson(path, fallback = undefined) {
  * Writes a file through a temporary file in the same folder and a rename, so a reader never sees half a file. The
  * temporary file is flushed to disk before the rename, and on macOS and Linux the folder is flushed after it, so a power
  * loss leaves the old file or the new one, never an empty one.
+ * On Windows the rename is tried again (RENAME_TRIES in all, about a second) while it fails with EPERM, EBUSY or EACCES:
+ * an antivirus scan or the search indexer can hold the new file for a moment, which once made `migrate --apply` roll back.
+ * `o` is for tests only: { win, rename, sleep }.
  */
-export function atomicWrite(path, text, secret = false) {
+export function atomicWrite(path, text, secret = false, o = {}) {
   const dir = join(path, '..');
   mkdirSync(dir, { recursive: true, ...(secret && !WIN ? { mode: 0o700 } : {}) });
   const tmp = `${path}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
   const fd = openSync(tmp, 'w', secret ? 0o600 : 0o644);
   try { writeSync(fd, typeof text === 'string' ? Buffer.from(text, 'utf8') : text); fsyncSync(fd); } finally { closeSync(fd); }
   if (secret && !WIN) chmodSync(tmp, 0o600);
-  try { renameSync(tmp, path); } catch (e) { rmSync(tmp, { force: true }); throw e; }
+  try { renameRetrying(tmp, path, o); } catch (e) { rmSync(tmp, { force: true }); throw e; }
   if (!WIN) { try { const d = openSync(dir, 'r'); try { fsyncSync(d); } finally { closeSync(d); } } catch { /* a folder that cannot be flushed: the rename still happened */ } }
+}
+
+/** How many times atomicWrite tries the rename on Windows, and the pauses between tries (50 + 100 + 200 + 400 ms). */
+export const RENAME_TRIES = 5;
+const RENAME_BUSY = new Set(['EPERM', 'EBUSY', 'EACCES']);
+
+function renameRetrying(from, to, { win = WIN, rename = renameSync, sleep = sleepSync } = {}) {
+  for (let i = 1; ; i++) {
+    try { rename(from, to); return; } catch (e) {
+      if (!win || i >= RENAME_TRIES || !RENAME_BUSY.has(e.code)) throw e;
+      sleep(50 * 2 ** (i - 1));
+    }
+  }
 }
 
 /** True if a process with this id is alive (signal 0 only checks; EPERM means it exists under another user). */

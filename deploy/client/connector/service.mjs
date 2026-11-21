@@ -4,6 +4,7 @@
  *
  * - Windows: a scheduled task with an At log on trigger for the current user, made with Register-ScheduledTask. It
  *   starts `conhost.exe --headless`, so no window opens. `schtasks /sc onlogon` is refused without admin (proof 8).
+ *   The trigger repeats every minute while the user is logged on, which starts a service that died again.
  * - macOS: a LaunchAgent in ~/Library/LaunchAgents, loaded into the user's GUI session.
  * - Linux: a systemd user unit; where the user has no systemd session, an XDG autostart file.
  *
@@ -24,6 +25,9 @@ const CONHOST = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'conho
 const psq = (s) => `'${String(s).replace(/'/g, "''")}'`;
 const xml = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 const sysq = (s) => `"${String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/%/g, '%%')}"`;
+// A path setting such as WorkingDirectory= takes the rest of the line as it is: no quotes (systemd refuses a quoted one as
+// not absolute), only `%` doubled so it is not read as a specifier. Spaces need nothing.
+const syspath = (s) => String(s).replace(/%/g, '%%');
 const deskq = (s) => `"${String(s).replace(/[\\"`$]/g, (c) => `\\${c}`)}"`;
 
 /** Where the entry lives on each platform (`target` is what the manifest records), and its name. */
@@ -50,8 +54,10 @@ export function serviceSpec(home, { platform = process.platform, node = process.
       "$ErrorActionPreference = 'Stop'",
       `$a = New-ScheduledTaskAction -Execute ${psq(CONHOST)} -Argument ${psq(args)} -WorkingDirectory ${psq(home)}`,
       `$t = New-ScheduledTaskTrigger -AtLogOn -User ${me}`,
+      // The logon trigger repeats every REVIVE_INTERVAL_MIN for as long as the user is logged on (no duration: no end).
+      `$t.Repetition = (New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes ${REVIVE_INTERVAL_MIN})).Repetition`,
       `$p = New-ScheduledTaskPrincipal -UserId ${me} -LogonType Interactive -RunLevel Limited`,
-      // Task Scheduler starts the service again when it dies (a crash, or a process ended from Task Manager): every minute, up to RESTART_COUNT times.
+      // Restart-on-failure covers a start that fails; a service that dies later comes back through the repeating trigger above.
       `$s = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount ${RESTART_COUNT} -RestartInterval (New-TimeSpan -Minutes ${RESTART_INTERVAL_MIN})`,
       `Register-ScheduledTask -TaskName ${psq(place.name)} -TaskPath '\\' -Action $a -Trigger $t -Principal $p -Settings $s -Description 'Conclave connector: checks in with the hub, runs transfers and approved updates.' -Force | Out-Null`,
       `Start-ScheduledTask -TaskName ${psq(place.name)} -TaskPath '\\'`,
@@ -88,7 +94,7 @@ Description=Conclave connector (checks in with the hub, runs transfers and appro
 
 [Service]
 ExecStart=${sysq(node)} ${sysq(launcher)} service run
-WorkingDirectory=${sysq(home)}
+WorkingDirectory=${syspath(home)}
 Restart=on-failure
 RestartSec=10
 
@@ -114,8 +120,16 @@ export const execDefault = (cmd, args) => { const r = spawnSync(cmd, args, { enc
 /** True if this Linux user has a systemd user session. */
 export const hasSystemd = (exec = execDefault) => exec('systemctl', ['--user', 'show-environment']).status === 0;
 
-/** How often, and how many times, Task Scheduler starts a Windows service again after it died (the shortest interval it allows is a minute). */
+/** How often, and how many times, Task Scheduler starts a Windows service again after it failed (the shortest interval it allows is a minute). */
 export const RESTART_COUNT = 999, RESTART_INTERVAL_MIN = 1;
+/**
+ * How often the logon trigger fires again while the user stays logged on. This is what brings back a service that
+ * died: Task Scheduler's restart-on-failure does not fire for it, because `conhost.exe --headless` ends with 0 when node
+ * is killed, and a repetition does not depend on any exit code. While the service runs, the repeat is a no-op
+ * (`-MultipleInstances IgnoreNew`, and the supervisor's own lock stops a second one at once). After `service remove`
+ * the task is gone; after a logoff an interactive task does not run.
+ */
+export const REVIVE_INTERVAL_MIN = 1;
 
 /** The supervisor's lock (its process id and start time), so a second one stops and `remove` can stop the one running. */
 export const servicePidPath = (home) => join(home, 'run', 'service.json');

@@ -27,9 +27,9 @@ import { usageOptIn, setUsageOptIn, recordUsageEvent, sessionsPath } from './con
 import { markRunning, runningAgents } from './connector/run.mjs';
 import { runWorker, runSupervisor, NO_HUBS, LOCKED } from './connector/worker.mjs';
 import { runningAs, processesPath, takeProcessLock, lockHolder } from './connector/processes.mjs';
-import { workerLockPath, servicePidPath, RESTART_COUNT, RESTART_INTERVAL_MIN } from './connector/service.mjs';
+import { workerLockPath, servicePidPath, RESTART_COUNT, RESTART_INTERVAL_MIN, REVIVE_INTERVAL_MIN } from './connector/service.mjs';
 import { markUp } from './connector/builds.mjs';
-import { writeState, readState, withLock, bakPath } from './connector/paths.mjs';
+import { writeState, readState, withLock, bakPath, atomicWrite, RENAME_TRIES } from './connector/paths.mjs';
 import { manifestPath } from './connector/manifest.mjs';
 import { pathToFileURL } from 'node:url';
 import { readdirSync } from 'node:fs';
@@ -286,6 +286,28 @@ describe('the launcher goes back after a new build fails to start', () => {
 
 describe('crash safety: one worker, restarts, kept updates, state files', () => {
   const BUILDS = pathToFileURL(join(HERE, 'connector', 'builds.mjs')).href;
+
+  test('Windows: a state file write tries the rename again while antivirus or the indexer holds the new file', async () => {
+    const { renameSync } = await import('node:fs');
+    const busy = (code) => Object.assign(new Error(`${code}: operation not permitted, rename`), { code });
+    const dir = mk(), p = join(dir, 'state.json');
+    // One failed rename (as on the PC where migrate --apply rolled back), then it goes through.
+    let calls = 0; const waits = [];
+    atomicWrite(p, '{"a":1}', false, { win: true, sleep: (ms) => waits.push(ms), rename: (a, b) => { if (++calls === 1) throw busy('EPERM'); renameSync(a, b); } });
+    assert.equal(readFileSync(p, 'utf8'), '{"a":1}'); assert.equal(calls, 2); assert.deepEqual(waits, [50]);
+    // EBUSY and EACCES count too; still held after every try: it gives up after RENAME_TRIES (about a second), and leaves no temporary file.
+    for (const code of ['EBUSY', 'EACCES']) {
+      calls = 0; waits.length = 0;
+      assert.throws(() => atomicWrite(p, '{"a":2}', false, { win: true, sleep: (ms) => waits.push(ms), rename: () => { calls++; throw busy(code); } }), { code });
+      assert.equal(calls, RENAME_TRIES); assert.deepEqual(waits, [50, 100, 200, 400]);
+    }
+    assert.deepEqual(readdirSync(dir), ['state.json']); assert.equal(readFileSync(p, 'utf8'), '{"a":1}');
+    // Another error, or another platform: no retry.
+    calls = 0;
+    assert.throws(() => atomicWrite(p, 'x', false, { win: true, sleep: () => {}, rename: () => { calls++; throw busy('ENOENT'); } }), { code: 'ENOENT' }); assert.equal(calls, 1);
+    calls = 0;
+    assert.throws(() => atomicWrite(p, 'x', false, { win: false, sleep: () => {}, rename: () => { calls++; throw busy('EPERM'); } }), { code: 'EPERM' }); assert.equal(calls, 1);
+  });
   const stub = (v, body) => [{ path: 'deploy/client/conclave.mjs', data: Buffer.from(body) }];
   const launch = (home) => spawnSync(process.execPath, [launcherPath(home), 'service', 'worker'], { encoding: 'utf8' });
   const installed = () => { const h = mk(); writeFileSync(manifestPath(h), '{}\n'); return h; };
@@ -338,10 +360,32 @@ describe('crash safety: one worker, restarts, kept updates, state files', () => 
     assert.deepEqual(ended, [4242]); assert.equal(existsSync(workerLockPath(home)), false);
   });
 
-  test('Windows: Task Scheduler restarts the service when it dies, every minute', () => {
+  test('Windows: Task Scheduler restarts a start that fails, every minute', () => {
     const s = serviceSpec(mk(), { platform: 'win32', node: 'C:\\node.exe' });
     assert.match(s.install[0][2], new RegExp('-RestartCount ' + RESTART_COUNT + ' -RestartInterval \\(New-TimeSpan -Minutes ' + RESTART_INTERVAL_MIN + '\\)'));
     assert.ok(RESTART_INTERVAL_MIN <= 1 && RESTART_COUNT >= 100);
+  });
+
+  test('Windows: a service that died comes back through a logon trigger that repeats every minute, with no end', () => {
+    const script = serviceSpec(mk(), { platform: 'win32', node: 'C:\\node.exe' }).install[0][2];
+    // conhost --headless ends with 0 when node is killed, so restart-on-failure never fires for it: the repeat does.
+    assert.match(script, new RegExp('\\$t = New-ScheduledTaskTrigger -AtLogOn -User [^;]+; \\$t\\.Repetition = \\(New-ScheduledTaskTrigger -Once -At \\(Get-Date\\) -RepetitionInterval \\(New-TimeSpan -Minutes ' + REVIVE_INTERVAL_MIN + '\\)\\)\\.Repetition;'));
+    assert.doesNotMatch(script, /RepetitionDuration/); // no duration: it repeats for the whole logon
+    assert.ok(REVIVE_INTERVAL_MIN <= 1);
+    // The repeat never starts a second service: a running instance makes Task Scheduler ignore the new one.
+    assert.match(script, /-MultipleInstances IgnoreNew/);
+    // The repeating trigger is the one the task is registered with.
+    assert.ok(script.indexOf('$t.Repetition') < script.indexOf('Register-ScheduledTask'));
+    assert.match(script, /Register-ScheduledTask [^;]*-Trigger \$t /);
+  });
+
+  test('Windows: service remove unregisters the task before it stops the service, so nothing starts it again', () => {
+    const home = mk(), calls = [];
+    mkdirSync(join(home, 'run'), { recursive: true });
+    writeFileSync(workerLockPath(home), JSON.stringify({ pid: 4242, started_ms: 5000, what: 'worker' }));
+    removeService(home, { platform: 'win32', exec: (cmd, args) => { calls.push(['exec', Buffer.from(args.at(-1), 'base64').toString('utf16le')]); return { status: 0, stdout: '', stderr: '' }; }, killTree: () => calls.push(['kill']), lockDeps: { alive: () => true, startTime: () => 5000 } });
+    assert.deepEqual(calls.map((c) => c[0]), ['exec', 'kill']);
+    assert.match(calls[0][1], /Stop-ScheduledTask[^;]*; Unregister-ScheduledTask/);
   });
 
   test('a worker that is killed is started again by the supervisor after a short pause', async () => {
@@ -489,6 +533,10 @@ describe('the logon service is installed and removed as the user', () => {
     const u = serviceSpec('/home/dev user/.config/conclave', { platform: 'linux', node: '/usr/bin/node', userHome, systemd: true });
     assert.match(u.file, /ExecStart="\/usr\/bin\/node" "\/home\/dev user\/\.config\/conclave\/conclave\.mjs" service run/);
     assert.match(u.file, /WantedBy=default\.target/);
+    // systemd refuses a quoted WorkingDirectory as not absolute ("Unit configuration has fatal error"): the path stands bare, space and all.
+    assert.match(u.file, /^WorkingDirectory=\/home\/dev user\/\.config\/conclave$/m);
+    assert.doesNotMatch(u.file, /WorkingDirectory="/);
+    assert.match(serviceSpec('/home/a%b/.config/conclave', { platform: 'linux', node: '/usr/bin/node', userHome, systemd: true }).file, /^WorkingDirectory=\/home\/a%%b\/\.config\/conclave$/m);
     assert.deepEqual(u.install.at(-1).slice(0, 2), ['systemctl', ['--user', 'enable', '--now', u.place.name]]);
     const x = serviceSpec('/home/dev user/.config/conclave', { platform: 'linux', node: '/usr/bin/node', userHome, systemd: false });
     assert.equal(x.place.target, join(userHome, '.config', 'autostart', x.place.name));

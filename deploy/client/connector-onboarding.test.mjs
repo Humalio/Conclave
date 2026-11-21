@@ -237,6 +237,20 @@ describe('the local screen', () => {
     assert.ok(!after.includes(CODE), 'the code is never shown back');
   });
 
+  test('takes a form with Origin null only when the browser marks it same-origin, and sends a same-origin referrer policy', async () => {
+    const http = await import('node:http');
+    const post = (headers) => new Promise((ok, no) => { const r = http.request({ host: '127.0.0.1', port: s.port, path: '/pair', method: 'POST', headers: { host: `127.0.0.1:${s.port}`, cookie: s.cookie, 'content-type': 'application/x-www-form-urlencoded', ...headers } }, (x) => { x.resume(); ok(x.statusCode); }); r.on('error', no); r.end(`origin=https%3A%2F%2Fh&check=x&code=${CODE}`); });
+    // A page under no-referrer posts with Origin: null; Allow, Pair and every other button were refused.
+    assert.equal(await post({ origin: 'null', 'sec-fetch-site': 'same-origin' }), 303);
+    assert.equal(await post({ origin: 'null' }), 403);
+    assert.equal(await post({ origin: 'null', 'sec-fetch-site': 'cross-site' }), 403);
+    assert.equal(await post({ 'sec-fetch-site': 'same-origin' }), 403, 'no Origin at all is still refused');
+    // Host and cookie still decide first.
+    assert.equal(await post({ origin: 'null', 'sec-fetch-site': 'same-origin', host: 'evil.test' }), 421);
+    assert.equal(await post({ origin: 'null', 'sec-fetch-site': 'same-origin', cookie: 'conclave_screen=nope' }), 403);
+    assert.equal((await get('/', { cookie: s.cookie })).headers.get('referrer-policy'), 'same-origin');
+  });
+
   test('stops on its own when idle', async () => {
     const quiet = await startScreen(tmp('idle'), { idleMs: 50 });
     await quiet.closed;

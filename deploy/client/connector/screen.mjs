@@ -32,6 +32,13 @@ import { isHardened } from './isolation.mjs';
 
 export const IDLE_MS = 60 * 60_000;
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+/** True if a POST came from this screen: its Origin is one of the screen's own addresses, or it is `null` and the browser
+ * says the request is same-origin (`Sec-Fetch-Site`, which a page cannot set). Host and the session cookie are checked apart. */
+export const sentFromScreen = (headers, hosts) => {
+  const origin = String(headers.origin ?? '');
+  if (hosts.map((h) => `http://${h}`).includes(origin)) return true;
+  return origin === 'null' && String(headers['sec-fetch-site'] ?? '') === 'same-origin';
+};
 const same = (a, b) => { const x = Buffer.from(String(a)), y = Buffer.from(String(b)); return x.length === y.length && timingSafeEqual(x, y); };
 
 const CSS = `:root{--bg:#f7f7f5;--panel:#fff;--text:#1d1d1b;--muted:#6b6b66;--line:#e3e2dd;--accent:#3b5bdb;--ok:#2b8a3e;--warn:#b35c00;--bad:#c92a2a}
@@ -182,7 +189,7 @@ export function startScreen(home, { port = 0, idleMs = IDLE_MS, claudeJson, win 
   const close = () => { clearTimeout(idle); server.close(() => resolveClosed()); server.closeAllConnections?.(); };
   const addr = () => server.address().port;
   const hosts = () => [`127.0.0.1:${addr()}`, `localhost:${addr()}`];
-  const send = (res, status, html, extra = {}) => { res.writeHead(status, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'x-frame-options': 'DENY', 'referrer-policy': 'no-referrer',
+  const send = (res, status, html, extra = {}) => { res.writeHead(status, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'x-frame-options': 'DENY', 'referrer-policy': 'same-origin',
     'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'", ...extra }); res.end(html); };
   const back = (res, msg) => { flash = msg ?? null; res.writeHead(303, { location: '/', 'cache-control': 'no-store' }); res.end(); };
   const body = (req) => new Promise((ok, no) => { let s = ''; req.setEncoding('utf8'); req.on('data', (c) => { s += c; if (s.length > 16_384) { req.destroy(); no(new Error('too large')); } }); req.on('end', () => ok(new URLSearchParams(s))); req.on('error', no); });
@@ -200,7 +207,9 @@ export function startScreen(home, { port = 0, idleMs = IDLE_MS, claudeJson, win 
       return res.end();
     }
     if (!cookie || !same(cookie, session)) return send(res, 403, page('Refused', '<p>Open this screen from the link <code>conclave setup</code> gives you.</p>'));
-    if (req.method === 'POST' && !hosts().map((h) => `http://${h}`).includes(String(req.headers.origin ?? ''))) return send(res, 403, page('Refused', '<p>This form must be sent from this screen.</p>'));
+    // A form is taken only from this screen: its own Origin, or (a page still open under the old no-referrer policy sends
+    // `Origin: null`) a null Origin that the browser itself marks as same-origin. A missing Origin is refused.
+    if (req.method === 'POST' && !sentFromScreen(req.headers, hosts())) return send(res, 403, page('Refused', '<p>This form must be sent from this screen.</p>'));
     touch();
     if (req.method === 'GET' && u.pathname === '/') {
       const msg = flash; flash = null;

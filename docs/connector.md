@@ -662,7 +662,14 @@ in the manifest as kind `service_entry`, at the one place its platform allows, s
   that runs ("the connector service is already running (process 1234, started …)"). A lock whose process is gone, or
   whose id now belongs to a process started at another time, is taken over. `conclave service remove` (and uninstall)
   ends the supervisor and then the worker its lock names, and only that very process.
-- **Restart.** On Windows the scheduled task restarts the service when it dies: every minute, up to 999 times. On every
+- **Restart.** On Windows the scheduled task's logon trigger repeats every minute while the user is logged on, so a
+  service that died (a crash, or its processes ended from Task Manager) starts again within about a minute. While the
+  service runs, the repeat does nothing: the task ignores a new instance, and the supervisor's lock stops a second one.
+  Task Scheduler's own restart-on-failure (every minute, up to 999 times) is still set, but it covers only a start
+  that fails: the window-hiding `conhost.exe --headless` ends with 0 when node is killed, so Windows saw no failure
+  and connector 0.9.4 did not come back. `conclave service remove` unregisters the task before it stops the service,
+  so nothing comes back after it; after a logoff the task does not run. A PC that installed the service with 0.9.4
+  or earlier keeps the old task until `conclave service install` is run once more, which replaces it in place. On every
   platform the supervisor restarts a worker that stops, after a pause that grows from 2 seconds to a minute while it
   keeps failing; an error in one round (a start that fails, a state file that is locked) never ends the supervisor.
 - **State files.** The key file, the folder registry, `preferences.json`, `processes.json` and `app/builds.json` are
