@@ -7,7 +7,7 @@ import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import https from 'node:https';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, renameSync, symlinkSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
@@ -17,7 +17,7 @@ import { putHub, caFingerprint, readKeyFile, agentKey } from './connector/keyfil
 import { connect } from './connector/hubclient.mjs';
 import { repairFolder } from './connector/register.mjs';
 import { codexPermission, codexToml } from './connector/entries.mjs';
-import { addDestination, listDestinations, reportDestinations, resolveDestination, removeDestination } from './connector/destinations.mjs';
+import { addDestination, destinationChanged, listDestinations, reportDestinations, resolveDestination, removeDestination } from './connector/destinations.mjs';
 import { pendingList, approvePickup } from './connector/approvals.mjs';
 import { verifyHandouts, repoPlan, prepareRepo, scanFolder, startLine, resumeMsg, writeAgentFiles, codexRoleBlock, beginRestore, runRestore as runRestoreRaw, activeRestores, restorePath } from './connector/restore.mjs';
 import { OVERRIDE_MARKER, overrideState } from './connector/role.mjs';
@@ -192,6 +192,36 @@ describe('destinations', () => {
     assert.equal(resolveDestination(home, 'dst_unknown000'), null);
     assert.equal(removeDestination(home, a.destination.id), true);
     assert.equal(resolveDestination(home, a.destination.id), null);
+  });
+});
+
+describe('a destination whose folder was swapped after the approval', () => {
+  test('is no longer reported or restored into, and is approved again by the user', () => {
+    const home = mk(), parent = mk('cn-dsw-'), dest = join(parent, 'work');
+    mkdirSync(dest);
+    const a = addDestination(home, dest, 'Work');
+    assert.equal(typeof a.destination.identity, 'string'); // the filesystem identity is recorded with the approval
+    assert.equal(destinationChanged(resolveDestination(home, a.destination.id)), false);
+    // Replaced at the same path: the folder is removed and another made (or a link put there): another folder, same path.
+    renameSync(dest, join(parent, 'old'));
+    mkdirSync(join(parent, 'elsewhere'));
+    try { symlinkSync(join(parent, 'elsewhere'), dest, 'junction'); } catch { mkdirSync(dest); }
+    assert.equal(destinationChanged(resolveDestination(home, a.destination.id)), true);
+    assert.deepEqual(reportDestinations(home), []); // the hub is not told it is approved
+    // The user approves it again: the same id (the hub's order still names it) and the new folder's identity.
+    const again = addDestination(home, dest, 'Work');
+    assert.ok(again.ok);
+    assert.ok(again.reapproved || again.destination.id !== a.destination.id);
+    assert.equal(reportDestinations(home).length >= 1, true);
+  });
+  test('an approval made before identities were recorded is not blocked', () => {
+    const home = mk(), dest = mk('cn-dold-');
+    const a = addDestination(home, dest, 'Old');
+    const file = join(home, 'destinations.json'), j = JSON.parse(readFileSync(file, 'utf8'));
+    delete j.destinations[0].identity;
+    writeFileSync(file, JSON.stringify(j));
+    assert.equal(destinationChanged(resolveDestination(home, a.destination.id)), false);
+    assert.equal(reportDestinations(home).length, 1);
   });
 });
 

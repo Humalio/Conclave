@@ -72,12 +72,12 @@ test("the connector's own folder is never sent or written: keys, the key store's
   await requirePath(path.join(home, '.config', 'other', 'x.json'), allowed);
 });
 
-test('a received file may not replace git hooks or settings, agent settings, MCP or Codex settings, or an instructions override', () => {
+test('a received file may not replace git hooks or settings, agent settings, MCP or Codex settings, an instructions override, or a role file (CLAUDE.md, AGENTS.md)', () => {
   for (const p of ['.git/hooks/pre-commit', 'repo/.git/hooks/post-checkout', '.git/config', '.GIT/Config', '.claude/settings.json', '.claude/settings.local.json',
-    '.mcp.json', 'sub/.mcp.json', '.codex/config.toml', 'AGENTS.override.md', 'a/agents.override.md', 'GIT~1/hooks/pre-commit', '.git/config.']) {
+    '.mcp.json', 'sub/.mcp.json', '.codex/config.toml', 'AGENTS.override.md', 'a/agents.override.md', 'GIT~1/hooks/pre-commit', '.git/config.', 'CLAUDE.md', 'AGENTS.md', 'sub/claude.md', 'a/Agents.MD']) {
     assert.ok(protectedFileReason(p), p);
   }
-  for (const p of ['notes.md', '.git-notes/config', 'hooks/pre-commit', '.claude/commands/x.md', 'AGENTS.md', 'config.toml', 'mcp.json']) {
+  for (const p of ['notes.md', '.git-notes/config', 'hooks/pre-commit', '.claude/commands/x.md', 'config.toml', 'mcp.json']) {
     assert.equal(protectedFileReason(p), null, p);
   }
 });

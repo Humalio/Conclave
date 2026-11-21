@@ -19,7 +19,7 @@ function ctxWith(home, claudeJson, folder) { return { ...folderCtx(home, claudeJ
  * Binds the folder, writes the connector's MCP entry and its approval, grants folder trust (the user approved this
  * folder at setup) and records each change. `hubId` and `caSha256` must name a section that exists in the key file.
  */
-export function registerFolder(home, folderArg, { hubId, caSha256, agent, claudeJson, node, connector, win, held = false, provider = null, team = null }) {
+export function registerFolder(home, folderArg, { hubId, caSha256, agent, agentId = null, claudeJson, node, connector, win, held = false, provider = null, team = null }) {
   const folder = canonicalFolder(folderArg);
   if (!folder) throw new Error('the folder does not exist');
   const kf = readKeyFile(home);
@@ -34,7 +34,7 @@ export function registerFolder(home, folderArg, { hubId, caSha256, agent, claude
   try { e3 = writeHookEntries(folder, { node: nodePath(node), connector: connectorPath(home, connector) }); } catch { e3 = null; }
   const target = (f) => join(folder, f);
   // The registry and the manifest are written after the files they describe: the settings hash is of the finished folder.
-  const binding = bindFolder(home, folder, { hubId, caSha256, agent, held, provider, team, origin: found.section.origin });
+  const binding = bindFolder(home, folder, { hubId, caSha256, agent, agentId, held, provider, team, origin: found.section.origin });
   record(home, { kind: 'mcp_entry', target: target('.mcp.json'), folder, pointer: `mcpServers.${SERVER_NAME}`, before: e1.before, installed: e1.installed }, cx);
   record(home, { kind: 'mcp_approval', target: target('.claude/settings.json'), folder, pointer: 'enabledMcpjsonServers', before: e2.before, installed: true }, cx);
   if (e3) record(home, { kind: 'hook', target: target('.claude/settings.json'), folder, pointer: 'hooks', before: e3.before, installed: e3.installed }, cx);

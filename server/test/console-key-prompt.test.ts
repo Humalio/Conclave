@@ -121,37 +121,29 @@ describe('console: where the guard applies', () => {
   it('no prompt or key screen offers a download', () => {
     // Add PC's one exception: the link to the connector installer on GitHub Releases (docs/connector.md, "Add PC"). It
     // carries no key: it is only the configured release URL, never a Blob or a data URL.
-    const rel = /\$\{made\.download_url \? `<div class="jn-dl">[^\n]*?<\/div>` : ''\}/;
-    expect(fn('joinSheet')).toMatch(rel);
-    const line = fn('joinSheet').match(rel)![0];
-    expect(line).toContain('<a href="${esc(made.download_url)}" target="_blank" rel="noopener noreferrer">');
-    expect(line).not.toMatch(/Blob\(|data:|createObjectURL|code|prompt/);
+    // The link and the installer's name live in jnInstallH, Add PC's first step; the sheet itself offers no download.
+    const inst = js.slice(js.indexOf('const jnInstallH = '), js.indexOf('const OB_NO_PROMPT'));
+    expect(fn('joinSheet')).toContain('${jnInstallH(made)}');
+    expect(inst).toContain('<a href="${esc(made.download_url)}" target="_blank" rel="noopener noreferrer">');
+    expect(inst).not.toMatch(/Blob\(|data:|createObjectURL|made\.code|made\.pairing|connector_prompt/);
     for (const f of ['secretView', 'obPromptSheet', 'joinSheet', 'keyPromptNote']) {
-      expect(fn(f).replace(rel, ''), f).not.toMatch(/download|Download|Blob\(/);
+      expect(fn(f), f).not.toMatch(/download|Download|Blob\(/);
     }
   });
 });
 
 describe('console: the key prompt and Make a new prompt', () => {
-  it('a session key shows its prompt, with the pickup note or the raw-key warning, and no key field when it travels by pickup', () => {
+  it('a session key with no connector PC shows its prompt with the raw-key warning; the pickup-code note is gone', () => {
     const src = fn('keyPromptNote') + fn('secretView');
     const ctx: Record<string, unknown> = { esc: (s: string) => s, dt: () => '25 Nov 2026' };
     vm.createContext(ctx);
-    const pc0 = js.indexOf('const promptClient = '), pc1 = js.indexOf('\n', pc0);
-    vm.runInContext(`${js.slice(pc0, pc1)}\n${fn('keyPromptNote')}\nthis.note = keyPromptNote;`, ctx);
+    vm.runInContext(`${fn('keyPromptNote')}\nthis.note = keyPromptNote;`, ctx);
     const note = ctx.note as (p: unknown) => string;
-    // The paste instruction names the client the hub resolved, the same one the prompt's restart step names.
-    expect(note({ mode: 'pickup', pc: 'pc1', session_var: 'A_SESSION_KEY', expires_at: 1, client: 'codex' })).toContain('Paste this prompt into Codex on <b>pc1</b>');
-    expect(note({ mode: 'pickup', pc: 'pc1', session_var: 'A_SESSION_KEY', expires_at: 1, client: 'claude_code' })).toContain('Paste this prompt into Claude Code on <b>pc1</b>');
-    expect(note({ mode: 'pickup', pc: 'pc1', session_var: 'A_SESSION_KEY', expires_at: 1, client: 'unknown' })).toContain("into the agent's client (Claude Code or Codex) on");
-    expect(note({ mode: 'pickup', pc: 'pc1', session_var: 'A_SESSION_KEY', expires_at: 1, client: 'unknown', note: 'The PC pc1 has no active app key: issue or reactivate one before running the command there.' })).toContain('<b>The PC pc1 has no active app key');
-    expect(note({ mode: 'pickup', pc: 'office-pc', session_var: 'ROWAN_SESSION_KEY', expires_at: 1 })).toContain('single-use pickup code, not the key');
-    const n = note({ mode: 'pickup', pc: 'office-pc', session_var: 'ROWAN_SESSION_KEY', expires_at: 1 });
-    expect(n).toContain('Conclave connector on that PC stores the key');
-    expect(n).not.toMatch(/keys\.env|ROWAN_SESSION_KEY/);
-    expect(readFileSync(join(__dirname, '../public/app.js'), 'utf8')).not.toMatch(/reconnect agent-hub|goes into keys\.env/);
-    expect(() => execFileSync(process.execPath, ['--check', join(__dirname, '../public/app.js')], { stdio: 'pipe' }), 'public/app.js must parse (node --check)').not.toThrow();
     expect(note({ mode: 'secret' })).toContain('Do not paste it into a chat with a person or another agent.');
+    // A key whose PC runs the connector reaches it by key handover (docs/onboarding.md#key-handover-a-rotated-key-or-a-recruit-reaches-a-connector-pc).
+    expect(js).not.toContain('single-use pickup code');
+    expect(js).not.toMatch(/reconnect agent-hub|goes into keys\.env/);
+    expect(() => execFileSync(process.execPath, ['--check', join(__dirname, '../public/app.js')], { stdio: 'pipe' }), 'public/app.js must parse (node --check)').not.toThrow();
     expect(src).toContain("if (p) b += vnote(keyPromptNote(p)) + sec('Key prompt', codeBox(p.text, true)");
     expect(src).toContain("else b += sec('Key',");
   });

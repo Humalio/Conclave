@@ -166,9 +166,9 @@ describe('Move team with no one at the keyboard', () => {
     await cn('POST', '/check-in', p.key, { ...report, destinations: [{ id: 'dst_auto0001', label: 'One' }, { id: 'dst_auto0002', label: 'Two' }] });
     expect(app.connector.restoreIfOneDestination(cko, sys)).toBeNull();
     expect(restores()).toHaveLength(0);
-    // Exactly one: sent at once, to that destination, and never twice while it is open.
+    // Exactly one: the check-in that reports it already sends Restore (the hub learns it after the render), and never twice while it is open.
     await cn('POST', '/check-in', p.key, { ...report, destinations: [{ id: 'dst_auto0001', label: 'One' }] });
-    expect(app.connector.restoreIfOneDestination(cko, sys)).toMatchObject({ id: expect.stringMatching(/^pca_/) });
+    expect(restores()).toHaveLength(1);
     expect(app.connector.restoreIfOneDestination(cko, sys)).toBeNull();
     expect(restores().map((r) => JSON.parse(r.payload))).toEqual([{ checkout_id: cko, destination_id: 'dst_auto0001' }]);
     // A checkout that is not rendered gets none.

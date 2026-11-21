@@ -152,7 +152,7 @@ describe('an item not yet delivered', () => {
     app.teams.turns.undelivered(id, X.w.id, 'chat_in_use');
     expect((await rowsFor(id))[0].reason).toMatch(/^Not delivered: chat in use · /);
     app.teams.turns.undelivered(id, X.w.id, 'wake_held');
-    expect((await rowsFor(id))[0].reason).toMatch(/^Not delivered: wake held on this platform · /);
+    expect((await rowsFor(id))[0].reason).toMatch(/^Not delivered: waking is off for this agent on its PC · /);
     expect(() => app.teams.turns.undelivered(id, X.w.id, 'bogus' as never)).toThrow();
     expect(app.teams.turns.delivered(id, X.w.id)).toBe(true);
     expect(await rowsFor(id)).toHaveLength(0);

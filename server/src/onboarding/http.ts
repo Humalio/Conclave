@@ -11,13 +11,16 @@ import { KeyError } from '../keys/keys.js';
 import { sha256Hex } from '../util/crypto.js';
 import { OnboardError, MAX_WAIT_S, type Onboarding } from './onboarding.js';
 
-/** The files the hub serves to a new PC. */
-export const CLIENT_FILES = ['setup.mjs', 'agent-hub-headers.mjs', 'onboarding-prompt.md', 'restore-prompt.md'] as const;
+/**
+ * The files the hub serves under /onboard/client/: only the restore template, which the checkout fills (checkout/render.ts). A PC
+ * joins with the connector, which it installs from its release, so the legacy setup script, helper and prompt are no longer served.
+ */
+export const CLIENT_FILES = ['restore-prompt.md'] as const;
 
 export function findClientDir(explicit?: string): string | null {
   const here = dirname(fileURLToPath(import.meta.url));
   const candidates = [explicit, join(here, '../client'), join(here, '../../../deploy/client'), join(process.cwd(), '../deploy/client')].filter(Boolean) as string[];
-  return candidates.find((c) => existsSync(join(c, 'agent-hub-headers.mjs'))) ?? null;
+  return candidates.find((c) => existsSync(join(c, 'restore-prompt.md'))) ?? null;
 }
 
 /** Client files and the hub's CA certificate, read from disk on each call (small; an upgrade needs no restart). Line ends are LF. */
@@ -41,32 +44,6 @@ export class ClientFiles {
     const pem = readFileSync(this.caFile, 'utf8');
     try { return { pem, sha256: new X509Certificate(pem).fingerprint256.replace(/:/g, '').toLowerCase() }; } catch { return null; }
   }
-}
-
-const FALLBACK_PROMPT = `Set up this PC for the Conclave hub, then the team I describe at the end.
-
-Hub: {{HUB_URL}}{{LAN_LINE}}
-Hub CA certificate SHA-256: {{CA_SHA256}}
-setup.mjs SHA-256: {{SETUP_SHA256}}
-agent-hub-headers.mjs SHA-256: {{HELPER_SHA256}}
-Enrolment code (single use): {{ENROL_CODE}}
-
-Steps: check Node.js 24+, git and {{HUB_URL}}/health; download {{HUB_URL}}/onboard/client/setup.mjs and /onboard/client/agent-hub-headers.mjs into ~/.config/conclave/ and check both hashes; write the code to ~/.config/conclave/onboarding/enrol-code and run node setup.mjs enrol --hub {{HUB_URL}} --ca-sha256 {{CA_SHA256}}; draft the request, show me the summary, and file it with node setup.mjs request --file <path>; ask me how Claude Code should reach the hub; run node setup.mjs wait; then start the coordinator.
-
-What I want:
-`;
-
-/** The prompt for Add PC and Re-enrol PC: the template with the hub URL, hashes, CA fingerprint and the code filled in. */
-export function renderPrompt(files: ClientFiles, o: { hubUrl: string; lanUrl?: string; code: string; pc: string; relay?: { name: string; ca_sha256: string; release_base: string } }): { text: string; template_sha256: string | null; hashes: Record<string, string | null> } {
-  const tpl = files.file('onboarding-prompt.md');
-  const setup = files.file('setup.mjs'), helper = files.file('agent-hub-headers.mjs'), ca = files.ca();
-  const vals: Record<string, string> = {
-    HUB_URL: o.hubUrl, LAN_URL: o.lanUrl ?? '', LAN_LINE: o.relay ? `\nThrough relay "${o.relay.name}"; release base (signed connector updates): ${o.relay.release_base}` : o.lanUrl ? `\nLAN plain-HTTP URL: ${o.lanUrl}` : '', PC_NAME: o.pc,
-    CA_SHA256: o.relay?.ca_sha256 ?? ca?.sha256 ?? '(no CA certificate configured on the hub)', SETUP_SHA256: setup?.sha256 ?? '(setup.mjs not installed on the hub)',
-    HELPER_SHA256: helper?.sha256 ?? '(helper not installed on the hub)', ENROL_CODE: o.code,
-  };
-  const text = (tpl?.text ?? FALLBACK_PROMPT).replace(/\{\{([A-Z0-9_]+)\}\}/g, (m, k: string) => vals[k] ?? m);
-  return { text, template_sha256: tpl?.sha256 ?? null, hashes: { 'setup.mjs': setup?.sha256 ?? null, 'agent-hub-headers.mjs': helper?.sha256 ?? null, ca: ca?.sha256 ?? null } };
 }
 
 const STATUS: Record<string, number> = {
@@ -157,11 +134,7 @@ export function registerOnboarding(f: FastifyInstance, ob: Onboarding, files: Cl
 
   // ── pickup ──
   route('post', '/onboard/pickup', (req) => ob.pickup(ob.authApp(bearer(req), req.ip), obj(req.body).request_id as string, req.ip));
-  // One key from a key prompt (docs/onboarding.md#key-prompts-a-new-rotated-or-reissued-session-key), for an app key of the code's PC.
-  // A collection names collect_id and the wake's instance_id instead of a code.
-  route('post', '/onboard/key-pickup', (req) => { const b = obj(req.body); return ob.keyPickup(ob.authApp(bearer(req), req.ip), b.code, req.ip, { collect_id: b.collect_id, instance_id: b.instance_id }); });
-  // Key collection by the Codex wake (docs/onboarding.md#collect-on-a-pc-the-codex-wake-picks-up-a-routine-rotation): the poll returns no secret.
-  route('post', '/onboard/key-collect/poll', (req) => ob.keyCollectPoll(ob.authApp(bearer(req), req.ip), req.body, req.ip));
-  route('post', '/onboard/key-collect/confirm', (req) => ob.keyCollectConfirm(ob.authApp(bearer(req), req.ip), req.body));
+  // Key pickup codes and the Codex wake's key collection ended with the key handover (docs/onboarding.md#key-handover-a-rotated-key-or-a-recruit-reaches-a-connector-pc).
+  for (const p of ['/onboard/key-pickup', '/onboard/key-collect/poll', '/onboard/key-collect/confirm']) route('post', p, (req) => { ob.authApp(bearer(req), req.ip); return ob.keyRouteGone(); });
   route('post', '/onboard/pickup/confirm', (req) => { const b = obj(req.body); return ob.confirm(ob.authApp(bearer(req), req.ip), b.pickup_id as string, b.written, b.transport, req.ip); });
 }

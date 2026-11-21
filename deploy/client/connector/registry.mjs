@@ -51,14 +51,14 @@ export function teamOf(team) {
 
 /** Binds a folder to a hub and an agent, recording its identity and its settings hash. Returns the stored binding. */
 export function bindFolder(home, folder, opts) { return locked(home, () => bindFolderNow(home, folder, opts)); }
-function bindFolderNow(home, folder, { hubId, caSha256, agent, held = false, provider = null, team = null, origin = null }) {
+function bindFolderNow(home, folder, { hubId, caSha256, agent, agentId = null, held = false, provider = null, team = null, origin = null }) {
   if (!HUB_ID_RE.test(String(hubId)) || !SHA_RE.test(String(caSha256)) || !LABEL_RE.test(String(agent))) throw new Error('invalid hub id, CA fingerprint or agent label');
   const canon = canonicalFolder(folder);
   if (!canon) throw new Error('the folder does not exist');
   const reg = load(home);
   const old = reg.folders[pathKey(canon)];
   // `provider: 'codex'` marks a Codex agent's folder: its local server offers the commit tool and check looks at its role file.
-  const b = { path: canon, identity: folderIdentity(canon), hub_id: hubId, ca_sha256: caSha256, agent, ...(provider === 'codex' ? { provider: 'codex' } : {}), config_sha256: held ? 'held' : configHash(canon), recorded_at: new Date().toISOString() };
+  const b = { path: canon, identity: folderIdentity(canon), hub_id: hubId, ca_sha256: caSha256, agent, ...(typeof agentId === 'string' && TEAM_ID_RE.test(agentId) ? { agent_id: agentId } : old?.agent_id && old.hub_id === hubId && old.ca_sha256 === caSha256 ? { agent_id: old.agent_id } : {}), ...(provider === 'codex' ? { provider: 'codex' } : {}), config_sha256: held ? 'held' : configHash(canon), recorded_at: new Date().toISOString() };
   // The team the agent belongs to, as the hub named it at pickup or restore: its id and name, never anything else. The
   // local screen lists these teams to bind one to an account profile (profiles.mjs).
   const t = teamOf(team);

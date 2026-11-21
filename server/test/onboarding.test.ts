@@ -12,6 +12,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { buildApp, type App } from '../src/app.js';
 import type { Config } from '../src/config.js';
 import { sha256Hex } from '../src/util/crypto.js';
+import { CLIENT_FILES, findClientDir } from '../src/onboarding/http.js';
 import { testConfig, adminLogin } from './hub.js';
 import { mdPlain } from '../public/md.js';
 
@@ -74,6 +75,11 @@ const login = async (appKey: string, secret: string) => {
 const alerts = (type: string) => app.db.prepare('SELECT * FROM security_alerts WHERE type=?').all(type) as { subject: string; details: string }[];
 /** Open or acknowledged alerts of a type for one subject: the ones still asking the operator. */
 const asking = (type: string, subject: string) => (app.db.prepare("SELECT COUNT(*) n FROM security_alerts WHERE type=? AND subject=? AND status IN ('open','acknowledged')").get(type, subject) as { n: number }).n;
+/** A connector route with the PC's app key. */
+const cnr = async (method: string, path: string, key: string, body?: unknown) => {
+  const r = await fetch(`${base}/connector/v1${path}`, { method, headers: { 'content-type': 'application/json', authorization: `Bearer ${key}`, 'x-forwarded-for': freshIp(), 'x-forwarded-proto': 'https' }, body: body === undefined ? undefined : JSON.stringify(body) });
+  return { status: r.status, body: (await r.json().catch(() => ({}))) as any };
+};
 const auditOf = (action: string) => app.db.prepare('SELECT * FROM audit_events WHERE action=?').all(action) as { details: string }[];
 
 beforeAll(async () => {
@@ -81,9 +87,11 @@ beforeAll(async () => {
   mkdirSync(join(dir, 'vault', 'Grants'), { recursive: true });
   const client = join(dir, 'client');
   mkdirSync(client);
-  writeFileSync(join(client, 'agent-hub-headers.mjs'), 'export const helper = 1;\r\n');
+  // The restore template is the only file the hub serves; the legacy files sit beside it to show they are not served.
+  writeFileSync(join(client, 'restore-prompt.md'), 'Restore {{TEAM_NAME}}\r\n');
+  writeFileSync(join(client, 'agent-hub-headers.mjs'), 'export const helper = 1;\n');
   writeFileSync(join(client, 'setup.mjs'), 'export const setup = 1;\n');
-  writeFileSync(join(client, 'onboarding-prompt.md'), 'Hub {{HUB_URL}} setup {{SETUP_SHA256}} helper {{HELPER_SHA256}} code {{ENROL_CODE}} pc {{PC_NAME}}\n');
+  writeFileSync(join(client, 'onboarding-prompt.md'), 'Hub {{HUB_URL}} code {{ENROL_CODE}}\n');
   const config: Config = testConfig(dir, { publicUrl: 'https://hub.test', clientDir: client, maintenanceSeconds: undefined });
   app = await buildApp(config);
   await app.store.ready;
@@ -94,22 +102,34 @@ beforeAll(async () => {
 afterAll(async () => { await app.close(); });
 
 describe('client files and the prompt', () => {
-  it('serves the helper, setup script and prompt template with their hashes, also over plain HTTP', async () => {
-    const h = await ob('GET', '/client/agent-hub-headers.mjs', { from: '192.0.2.50', proto: 'http' });
+  it('serves only the restore template, with its hash, also over plain HTTP; the legacy setup files are not served', async () => {
+    const h = await ob('GET', '/client/restore-prompt.md', { from: '192.0.2.50', proto: 'http' });
     expect(h.status).toBe(200);
-    expect(h.body).toBe('export const helper = 1;\n'); // LF, whatever the checkout
-    expect(h.headers.get('x-content-sha256')).toBe(sha256Hex('export const helper = 1;\n'));
+    expect(h.body).toBe('Restore {{TEAM_NAME}}\n'); // LF, whatever the checkout
+    expect(h.headers.get('x-content-sha256')).toBe(sha256Hex('Restore {{TEAM_NAME}}\n'));
+    for (const f of ['setup.mjs', 'agent-hub-headers.mjs', 'onboarding-prompt.md', 'other.mjs']) expect((await ob('GET', `/client/${f}`)).status, f).toBe(404);
     const m = await ob('GET', '/client/manifest');
-    expect(m.body.files['setup.mjs'].sha256).toBe(sha256Hex('export const setup = 1;\n'));
-    expect((await ob('GET', '/client/other.mjs')).status).toBe(404);
+    expect(m.body.files).toEqual({ 'restore-prompt.md': { sha256: sha256Hex('Restore {{TEAM_NAME}}\n'), bytes: 22 } });
     expect((await ob('GET', '/ca.crt')).status).toBe(404); // no CA_CERT_FILE in this test
   });
-  it('Add PC returns the prompt with the hub URL, hashes and the code; the code is stored only as a verifier', async () => {
+  it('finds the client folder by the restore template, not by the legacy helper', () => {
+    expect(CLIENT_FILES).toEqual(['restore-prompt.md']);
+    const only = mkdtempSync(join(tmpdir(), 'ahonb-rp-'));
+    writeFileSync(join(only, 'restore-prompt.md'), 'x\n');
+    expect(findClientDir(only)).toBe(only);
+    const legacy = mkdtempSync(join(tmpdir(), 'ahonb-lg-'));
+    writeFileSync(join(legacy, 'agent-hub-headers.mjs'), 'x\n');
+    expect(findClientDir(legacy)).not.toBe(legacy);
+  });
+  it('Add PC and Re-enrol return the code but no legacy prompt, and say why there is no connector prompt; the code is stored only as a verifier', async () => {
     const add = await api('POST', '/pcs/add', { name: 'prompt-pc' });
     expect(add.body.code).toMatch(/^cnv_enrol_[a-z2-7]{26}$/);
-    expect(add.body.prompt.text).toContain('Hub https://hub.test');
-    expect(add.body.prompt.text).toContain(`setup ${sha256Hex('export const setup = 1;\n')}`);
-    expect(add.body.prompt.text).toContain(`code ${add.body.code}`);
+    expect(add.body).not.toHaveProperty('prompt');
+    // This hub serves no CA certificate, so nothing can be pinned: no pairing, no connector prompt, and the reason.
+    expect(add.body).toMatchObject({ pairing: null, connector_prompt: null, connector_unavailable: 'no_ca' });
+    const re = await api('POST', `/pcs/${(await api('POST', '/pcs/add', { name: 'prompt-pc-re' })).body.pc.id}/re-enrol`);
+    expect(re.body).not.toHaveProperty('prompt');
+    expect(re.body).toMatchObject({ pairing: null, connector_prompt: null, connector_unavailable: 'no_ca' });
     expect(add.body.key.onboarding_enabled_at).toBeTypeOf('number');
     const dump = JSON.stringify(app.db.prepare('SELECT * FROM enrolment_codes').all());
     expect(dump).not.toContain(add.body.code);
@@ -521,6 +541,83 @@ describe('approval and pickup', () => {
     expect((await login(e.body.app_key, p2.body.agents[0].secret)).isError).toBeFalsy();
     expect(auditOf('pc.re_enrol').length).toBeGreaterThan(0);
   });
+  it('Re-enrol on a connector PC hands every agent key over: the old keys work until confirm and are revoked then', async () => {
+    const pc = await addAndEnrol('reenrol-conn-pc');
+    expect((await cnr('POST', '/check-in', pc.key, { version: '0.9.6' })).status).toBe(200);
+    const rid = await fileApproved(pc.key);
+    const p = await ob('POST', '/pickup', { key: pc.key, body: { request_id: rid } });
+    const c = await ob('POST', '/pickup/confirm', { key: pc.key, body: { pickup_id: p.body.pickup_id, written: p.body.agents.map((x: { session_var: string }) => x.session_var) } });
+    expect(c.status).toBe(200);
+    const r = await api('POST', `/pcs/${pc.pc}/re-enrol`);
+    expect(r.status, JSON.stringify(r.body)).toBe(200);
+    expect(r.body.reopened).toEqual([]);
+    expect(r.body.handover).toMatch(/^obr_/);
+    expect(app.onboarding.request(rid)!.state).toBe('collected');
+    expect(() => app.keys.verifyKey(pc.key, 'app_key')).toThrow();
+    // The agents' keys are not revoked: they work again once the PC is paired with the new code.
+    for (const a of p.body.agents) expect(app.keys.verifyKey(a.secret, 'session_key').status).toBe('active');
+    const n = nonce(), from = freshIp();
+    const e = await ob('POST', '/enrol', { body: { code: r.body.code, nonce: n }, from });
+    expect(e.status).toBe(200);
+    await ob('POST', '/enrol/confirm', { body: { nonce: n }, from });
+    expect((await cnr('GET', '/handovers', pc.key)).status).toBe(401);
+    const list = (await cnr('GET', '/handovers', e.body.app_key)).body.handovers;
+    expect(list.map((h: any) => h.id)).toEqual([r.body.handover]);
+    expect(list[0].agents).toHaveLength(4);
+    expect((await login(e.body.app_key, p.body.agents[0].secret)).isError).toBeFalsy();
+    const p2 = await ob('POST', '/pickup', { key: e.body.app_key, body: { request_id: r.body.handover } });
+    expect(p2.status, JSON.stringify(p2.body)).toBe(200);
+    expect(p2.body.agents).toHaveLength(4);
+    for (const a of p.body.agents) expect(app.keys.verifyKey(a.secret, 'session_key').status).toBe('active');
+    const c2 = await ob('POST', '/pickup/confirm', { key: e.body.app_key, body: { pickup_id: p2.body.pickup_id, written: p2.body.agents.map((x: { session_var: string }) => x.session_var) } });
+    expect(c2.status, JSON.stringify(c2.body)).toBe(200);
+    for (const a of p.body.agents) expect(() => app.keys.verifyKey(a.secret, 'session_key')).toThrow();
+    for (const a of p2.body.agents) expect((await login(e.body.app_key, a.secret)).isError).toBeFalsy();
+    const members = app.teams.members(c.body.team_id);
+    expect(members).toHaveLength(4);
+    for (const m of members) expect(app.keys.credential(m.credential_id)!.status).toBe('active');
+    expect(JSON.parse(auditOf('pc.re_enrol').at(-1)!.details)).toMatchObject({ agents_handed_over: 4, handover: r.body.handover });
+  });
+  it('a Re-enrol handover the connector holds none of the keys for revokes them and reopens the pickup, which the PC can withdraw', async () => {
+    const pc = await addAndEnrol('reenrol-lost-pc');
+    expect((await cnr('POST', '/check-in', pc.key, { version: '0.9.6' })).status).toBe(200);
+    const rid = await fileApproved(pc.key);
+    const p = await ob('POST', '/pickup', { key: pc.key, body: { request_id: rid } });
+    const c = await ob('POST', '/pickup/confirm', { key: pc.key, body: { pickup_id: p.body.pickup_id, written: p.body.agents.map((x: { session_var: string }) => x.session_var) } });
+    const r = (await api('POST', `/pcs/${pc.pc}/re-enrol`)).body;
+    const n = nonce(), from = freshIp();
+    const e = await ob('POST', '/enrol', { body: { code: r.code, nonce: n }, from });
+    await ob('POST', '/enrol/confirm', { body: { nonce: n }, from });
+    // The reinstalled PC holds none of the keys.
+    expect((await cnr('POST', `/handovers/${r.handover}/skip`, e.body.app_key, { reason: 'key_not_held' })).status).toBe(200);
+    expect(app.onboarding.request(r.handover)!.state).toBe('cancelled');
+    for (const a of p.body.agents) expect(() => app.keys.verifyKey(a.secret, 'session_key')).toThrow();
+    expect(app.onboarding.request(rid)!.state).toBe('approved');
+    expect(auditOf('pc.re_enrol_keys_lost')).toHaveLength(1);
+    // Setup cannot finish it (say the folders are gone for good): the PC withdraws it, and the agents stay in their team.
+    const w = await ob('POST', `/requests/${rid}/withdraw`, { key: e.body.app_key });
+    expect(w.status, JSON.stringify(w.body)).toBe(200);
+    expect(app.onboarding.request(rid)!.state).toBe('withdrawn');
+    expect(app.teams.members(c.body.team_id)).toHaveLength(4);
+    // A new request can be filed.
+    expect((await ob('POST', '/requests', { key: e.body.app_key, body: request() })).status).toBe(200);
+  });
+  it('an agent whose keys the hub no longer accepts is Key refused, never Connected', async () => {
+    const pc = await addAndEnrol('refused-pc');
+    expect((await cnr('POST', '/check-in', pc.key, { version: '0.9.6' })).status).toBe(200);
+    const rid = await fileApproved(pc.key);
+    const p = await ob('POST', '/pickup', { key: pc.key, body: { request_id: rid } });
+    await ob('POST', '/pickup/confirm', { key: pc.key, body: { pickup_id: p.body.pickup_id, written: p.body.agents.map((x: { session_var: string }) => x.session_var) } });
+    expect((await login(pc.key, p.body.agents[0].secret)).isError).toBeFalsy();
+    const a0 = p.body.agents[0];
+    app.keys.setStatus(app.keys.verifyKey(a0.secret, 'session_key').id, 'revoked', 'test', { kind: 'system', id: null });
+    const t = (await cnr('GET', '/setup', pc.key)).body;
+    const row = t.agents.find((x: any) => x.agent_id === a0.agent_id);
+    expect(row.state).toBe('key_refused');
+    expect(row.next).toMatchObject({ who: 'you' });
+    expect(t.agents.filter((x: any) => x.state === 'key_refused')).toHaveLength(1);
+    expect(t.steps.find((x: any) => x.step === 'agents_connected')).toMatchObject({ state: 'failed' });
+  });
   it('cancelling a pickup reopened by Re-enrol keeps the working agents as members', async () => {
     const pc = await addAndEnrol('reenrol-cancel-pc');
     const rid = await fileApproved(pc.key);
@@ -566,9 +663,10 @@ describe('approval and pickup', () => {
 });
 
 describe('docs consistency', () => {
-  it('the served prompt template in deploy/client fills every placeholder the hub knows', () => {
-    const tpl = readFileSync(join(process.cwd(), '..', 'deploy', 'client', 'onboarding-prompt.md'), 'utf8');
-    for (const m of tpl.matchAll(/\{\{([A-Z0-9_]+)\}\}/g)) expect(['HUB_URL', 'LAN_URL', 'LAN_LINE', 'PC_NAME', 'CA_SHA256', 'SETUP_SHA256', 'HELPER_SHA256', 'ENROL_CODE']).toContain(m[1]);
+  it('the build copies only the restore template into the image\'s client folder', () => {
+    const copy = readFileSync(join(process.cwd(), 'scripts', 'copy-assets.mjs'), 'utf8');
+    expect(copy).toContain("for (const f of ['restore-prompt.md'])");
+    expect(copy).not.toMatch(/agent-hub-headers|setup\.mjs|onboarding-prompt/);
   });
   it('the LAN plain-HTTP site proxies the onboarding downloads and nothing else of onboarding', () => {
     const cf = readFileSync(join(process.cwd(), '..', 'deploy', 'caddy', 'lan.Caddyfile'), 'utf8');

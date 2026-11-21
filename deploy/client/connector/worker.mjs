@@ -21,7 +21,7 @@ import { storeName } from './keystore.mjs';
 import { startBroker } from './broker.mjs';
 import { createWake } from './wake.mjs';
 import { onResetOrder } from './reset.mjs';
-import { grandfather, unauditedGrandfathered, markAudited } from './approvals.mjs';
+import { grandfather, unauditedGrandfathered, markAudited, unauditedPickupAllowed, markPickupAudited, unreportedDenials, markDenialsReported, pruneDenied } from './approvals.mjs';
 import { manifestPath } from './manifest.mjs';
 import { recordStarted, forgetStarted, takeProcessLock } from './processes.mjs';
 import { connect, request, pinnedFetch, openStream } from './hubclient.mjs';
@@ -41,13 +41,22 @@ import { execDefault, servicePidPath, workerLockPath } from './service.mjs';
 import { atomicWrite, oneLine } from './paths.mjs';
 import { runDisconnect } from './disconnect.mjs';
 import { collectUsage, sendUsage, usageOptIn } from './usage.mjs';
-import { runLoop as runBridge } from './transfers.mjs';
+import { runLoop as runBridge, foreignFoldersOf } from './transfers.mjs';
 import { createSyncHost } from './syncrunner.mjs';
 import { sampler, queueSample, hardwareOptIn, SAMPLE_MS, SAMPLE_MAX } from './hardware.mjs';
 import { reportDestinations } from './destinations.mjs';
 import { contextReport } from './contextsize.mjs';
 import { agentIdOf } from './run.mjs';
+import { legacyLeftovers } from './migrate.mjs';
+
+/** The leftovers flag for the check-in, read at most once a minute (on Windows it reads the registry through a child process). */
+let leftoversMemo = { at: 0, home: null, value: false };
+export function legacyLeftoversCached(home, now = Date.now(), read = legacyLeftovers) {
+  if (leftoversMemo.home !== home || now - leftoversMemo.at >= 60_000) leftoversMemo = { at: now, home, value: !!read(home) };
+  return leftoversMemo.value;
+}
 import { beginRestore, runRestore, activeRestores, finishRestore, save as saveRestore } from './restore.mjs';
+import { runHandovers } from './handover.mjs';
 
 export const CHECK_IN_MS = 60_000;
 export const UPDATE_CHECK_MS = 6 * 3600_000;
@@ -88,7 +97,7 @@ export function report(home, hubKey, pc, section = null, contextCache = null) {
   const s = readSettings(home);
   // The isolation level (docs/connector.md): standard here; the hardened service reports its own.
   const context = contextCache ? contextReport(home, hubKey, section, contextCache, { labelToId: (l) => agentIdOf(home, hubKey, l) }) : undefined;
-  return { version: CONNECTOR_VERSION, platform: platformId(), node: pc.node, git: pc.git, clients: pc.clients, ...s, isolation: isHardened(home) ? 'hardened' : 'standard', key_store: isHardened(home) ? 'service' : storeName(home), agents: runningAgents(home, hubKey), destinations: reportDestinations(home), ...(context ? { context } : {}) };
+  return { version: CONNECTOR_VERSION, platform: platformId(), node: pc.node, git: pc.git, clients: pc.clients, ...s, isolation: isHardened(home) ? 'hardened' : 'standard', key_store: isHardened(home) ? 'service' : storeName(home), agents: runningAgents(home, hubKey), destinations: reportDestinations(home), legacy_leftovers: legacyLeftoversCached(home), ...(context ? { context } : {}) };
 }
 
 /** The rows a `check` order reports: one per agent folder of that hub, then the connector's own. At most 40. */
@@ -103,6 +112,14 @@ export async function checkRows(home, section, claudeJson) {
   const rb = readBuilds(home).rolled_back;
   if (rb) rows.push({ name: 'Rollback', ok: false, detail: `Version ${rb} did not start, so this PC went back to the previous verified build.` });
   return rows;
+}
+
+/**
+ * A refused renewal (pause, lockdown, suspended key) ends a run the wake started: the broker tells the wake which folder and hub,
+ * and the wake stops the whole process tree of the run there. A chat opened by hand is not the wake's to stop (stopFolder says false).
+ */
+export function wireRefusal(broker, wake) {
+  if (broker) broker.onRefused = (run) => wake.stopFolder(run.folder, run.hubKey);
 }
 
 /**
@@ -258,6 +275,27 @@ export async function runWorker({ home, signal, log = logTo(home), claudeJson, d
   }
 
   /**
+   * Key handovers waiting for this PC (docs/onboarding.md#key-handover-a-rotated-key-or-a-recruit-reaches-a-connector-pc): a rotated key
+   * or a recruit's agents, picked up only after the PC's user allowed it on the local screen. One run per hub at a time; a hint while
+   * one runs runs it again after.
+   */
+  const handing = new Map();
+  async function handovers(hubKey, section) {
+    if (handing.get(hubKey)) { handing.set(hubKey, 'again'); return; }
+    handing.set(hubKey, 'busy');
+    try {
+      do {
+        handing.set(hubKey, 'busy');
+        const r = await (deps.runHandovers ?? runHandovers)(home, hubKey, { claudeJson, node: deps.node, connector: deps.connector, gitBin: deps.gitBin });
+        for (const h of r.handovers) {
+          if (h.phase === 'confirmed' && h.agents) log(`hub ${section.hub_id}: key handover ${h.id} confirmed${h.failed?.length ? `; ${h.failed.length} folder(s) not built` : ''}`);
+          else if (h.phase === 'failed') log(`hub ${section.hub_id}: key handover ${h.id} failed (${h.reason})`);
+        }
+      } while (handing.get(hubKey) === 'again');
+    } catch (e) { log(`hub ${section.hub_id}: key handovers not carried out (${e.reason ?? e.message})`); } finally { handing.delete(hubKey); }
+  }
+
+  /**
    * The push stream for one hub (docs/connector.md, "The push stream"). It only says "orders waiting": after every open and every
    * event the orders are fetched as always, so a dropped stream loses nothing. When it cannot open (a proxy that blocks it, an
    * older hub) the same orders come by a long poll. Reconnects back off from 2 s to 60 s and honour the hub's Retry-After.
@@ -273,7 +311,7 @@ export async function runWorker({ home, signal, log = logTo(home), claudeJson, d
     };
     while (!sig.aborted && !restart) {
       const t0 = Date.now();
-      const r = await openStream(hub, { headers: auth, signal: sig, query: `?installation=${install}`, onOrders: fetchOrders, onEvent: (n, d) => { if (n === 'vault_changed' && typeof d?.reader === 'string') syncHost.hint(d.reader); }, ...(deps.streamTimings ?? {}) });
+      const r = await openStream(hub, { headers: auth, signal: sig, query: `?installation=${install}`, onOrders: fetchOrders, onEvent: (n, d) => { if (n === 'vault_changed' && typeof d?.reader === 'string') syncHost.hint(d.reader); else if (n === 'handovers') handovers(hubKey, section); }, ...(deps.streamTimings ?? {}) });
       if (sig.aborted || restart) break;
       if (r.status === 401 || r.status === 403) { log(`hub ${section.hub_id}: the push stream was refused (${r.status}); stopped`); break; }
       fails = Date.now() - t0 > 30_000 ? 0 : fails + 1;
@@ -304,6 +342,16 @@ export async function runWorker({ home, signal, log = logTo(home), claudeJson, d
   }
 
   /** One audit entry per grandfathered folder of this hub; kept and tried again at the next check-in when the hub does not take them. */
+  /** One audit entry per folder allowed with a pickup (docs/connector.md, "Clicks"); kept and tried again until the hub takes it. */
+  async function auditPickupAllowed(hubKey, section, hub, auth) {
+    const todo = unauditedPickupAllowed(home, section.hub_id).slice(0, 100);
+    if (!todo.length) return;
+    try {
+      const r = await request(hub, 'POST', '/connector/v1/folders-allowed-with-pickup', { body: { allowed: todo.map((t) => ({ agent_id: t.agent_id, ref: t.ref })) }, headers: auth });
+      if (r.status === 200) markPickupAudited(home, todo.map((t) => t.key)); else log(`hub ${section.hub_id}: folders allowed with a pickup not audited yet (${r.status})`);
+    } catch (e) { log(`hub ${section.hub_id}: folders allowed with a pickup not audited yet (${e.reason ?? e.message})`); }
+  }
+
   async function auditGrandfathered(hubKey, section, hub, auth) {
     const todo = unauditedGrandfathered(home, section.hub_id);
     if (!todo.length) return;
@@ -311,6 +359,38 @@ export async function runWorker({ home, signal, log = logTo(home), claudeJson, d
       const r = await request(hub, 'POST', '/connector/v1/folders-grandfathered', { body: { agents: todo.slice(0, 200).map((t) => t.agent) }, headers: auth });
       if (r.status === 200) markAudited(home, todo.slice(0, 200).map((t) => t.key)); else log(`hub ${section.hub_id}: grandfathered folders not audited yet (${r.status})`);
     } catch (e) { log(`hub ${section.hub_id}: grandfathered folders not audited yet (${e.reason ?? e.message})`); }
+  }
+
+  /**
+   * The real folder of each agent bound for this hub goes to the hub, which keeps each as a proposed folder for the operator to approve
+   * (the transfers into this PC check approved folders only). Sent again only when the list changed; kept and tried again at the next
+   * check-in when the hub does not take it. Never anything but the folder's canonical path and the agent's label.
+   */
+  const sentFolders = new Map();
+  async function registerFolders(hubKey, section, hub, auth) {
+    const list = foldersOfHub(home, section.hub_id, section.ca_sha256).filter((b) => b.agent && b.path).map((b) => ({ agent: b.agent, path: b.path })).sort((a, b) => (a.path < b.path ? -1 : 1)).slice(0, 200);
+    const sig = JSON.stringify(list);
+    if (!list.length || sentFolders.get(hubKey) === sig) return;
+    try {
+      const r = await request(hub, 'POST', '/connector/v1/folders', { body: { folders: list }, headers: auth });
+      if (r.status === 200) { sentFolders.set(hubKey, sig); if (r.json?.proposed) log(`hub ${section.hub_id}: ${r.json.proposed} folder(s) proposed; the operator approves them in the console`); if (r.json?.refused?.length) log(`hub ${section.hub_id}: the hub refused ${r.json.refused.length} folder(s) (${[...new Set(r.json.refused.map((x) => x.reason))].join(', ')})`); }
+      else log(`hub ${section.hub_id}: folders not registered yet (${r.status})`);
+    } catch (e) { log(`hub ${section.hub_id}: folders not registered yet (${e.reason ?? e.message})`); }
+  }
+
+  /**
+   * What the PC user denied on the connector screen, told to the hub once each: a folder's chat (the agent's label) or a key pickup
+   * (the request id). Kept and tried again at the next check-in when the hub does not take it. The hub keeps one audit entry per
+   * denial and alerts on repeats for one agent.
+   */
+  async function reportDenied(hubKey, section, hub, auth) {
+    const todo = unreportedDenials(home).filter((d) => (d.kind === 'pickup' ? d.hub_key === hubKey : d.hub_id === section.hub_id)).slice(0, 50);
+    if (!todo.length) return;
+    try {
+      const r = await request(hub, 'POST', '/connector/v1/folders-denied', { body: { denied: todo.map((d) => (d.kind === 'pickup' ? { what: 'pickup', request: String(d.request).slice(0, 100) } : { what: 'folder', agent: String(d.agent).slice(0, 100) })) }, headers: auth });
+      if (r.status === 200) { markDenialsReported(home, todo.map((d) => d.id)); pruneDenied(home); } else log(`hub ${section.hub_id}: a denial is not reported yet (${r.status})`);
+    } catch (e) { log(`hub ${section.hub_id}: a denial is not reported yet (${e.reason ?? e.message})`); }
+
   }
 
   async function tick(hubKey, section) {
@@ -333,6 +413,9 @@ export async function runWorker({ home, signal, log = logTo(home), claudeJson, d
     if (r.status !== 200) { log(`hub ${section.hub_id}: check-in answered ${r.status}`); return; }
     await flushOutbox({ home, hubKey, hub, auth, request, log }).catch((e) => log(`hub ${section.hub_id}: results not sent (${e.reason ?? e.message})`));
     await auditGrandfathered(hubKey, section, hub, auth);
+    await auditPickupAllowed(hubKey, section, hub, auth);
+    await reportDenied(hubKey, section, hub, auth);
+    await registerFolders(hubKey, section, hub, auth);
     if (!confirmed) { confirmed = true; if (confirm(home)) log(`version ${CONNECTOR_VERSION} confirmed after its first check-in`); }
     // A key file from an older connector is plain text. It is encrypted only now, after this version's first check-in is confirmed: a rollback to the
     // build before it must still be able to read the file.
@@ -343,7 +426,10 @@ export async function runWorker({ home, signal, log = logTo(home), claudeJson, d
       bridges.set(hubKey, ac);
       // A send reads only from the sending agent's own folder on this hub, never the connector's own folder (docs/transfers.md).
       const agentFolders = (label) => foldersOfHub(home, section.hub_id, section.ca_sha256).filter((b) => b.agent === label).map((b) => b.path);
-      runBridge({ hub: hub.origin, key: section.app_key, signal: ac.signal, fetch: pinnedFetch(hub), log: (...a) => log(`transfers ${section.hub_id}: ${a.join(' ')}`), agentFolders, refusedDirs: [home] })
+      // A save lands in no other agent's folder: every folder bound on this hub to an agent other than the receiver.
+      // The receiver is told apart by its agent id where this PC knows it (the binding's, else the id its relay recorded), by label only where it does not.
+      const foreignFolders = (who) => foreignFoldersOf(foldersOfHub(home, section.hub_id, section.ca_sha256), who, (b) => agentIdOf(home, hubKey, b.agent));
+      runBridge({ hub: hub.origin, key: section.app_key, signal: ac.signal, fetch: pinnedFetch(hub), log: (...a) => log(`transfers ${section.hub_id}: ${a.join(' ')}`), agentFolders, foreignFolders, refusedDirs: [home] })
         .catch((e) => log(`transfers ${section.hub_id} stopped: ${e.message}`)).finally(() => { if (bridges.get(hubKey) === ac) bridges.delete(hubKey); });
     }
     if (r.json?.measure_only === true) { if (!measured.has(hubKey)) measured.set(hubKey, []); } else measured.delete(hubKey);
@@ -354,6 +440,7 @@ export async function runWorker({ home, signal, log = logTo(home), claudeJson, d
       await wake.tick(wctx).catch((e) => log(`wake: ${e.message}`));
     }
     if (measured.has(hubKey) && hardwareOptIn(home)) await sendSamples(section, hub, auth, measured.get(hubKey));
+    if (r.json?.handovers > 0) await handovers(hubKey, section);
     if (r.json?.orders > 0) await orders(hubKey, section, hub, auth).catch((e) => log(`hub ${section.hub_id}: orders failed (${e.reason ?? e.message})`));
     if (!measured.has(hubKey)) await resumeRestores(hubKey, section, hub, auth).catch((e) => log(`hub ${section.hub_id}: restore failed (${e.reason ?? e.message})`));
     if (!restart && autoUpdateOn(home) && Date.now() - lastUpdateCheck > UPDATE_CHECK_MS) {
@@ -374,7 +461,7 @@ export async function runWorker({ home, signal, log = logTo(home), claudeJson, d
   if (!deps.noBroker) { try { broker = await startBroker({ home, log: (w) => log(w), deps: deps.broker ?? {} }); } catch (e) { log(`the local broker could not start (${e.message}); sessions get no turn token until it does`); } }
   const wake = createWake({ home, log: (m) => log(m), broker, deps: deps.wake ?? {} });
   // A refused renewal (pause, lockdown, suspended key) ends a run the wake started, not only its token (broker.mjs, renewAll).
-  if (broker) broker.onRefused = (run) => wake.stopFolder(run.folder, run.hubKey);
+  wireRefusal(broker, wake);
   const adopted = new Set(), quiet = new Set();
   let empty = 0, noHubs = false;
   while (!signal?.aborted && !restart) {

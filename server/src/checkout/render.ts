@@ -545,7 +545,8 @@ export class CheckoutKeys implements CheckoutLink {
     const c = this.byRequest(r);
     const m = this.teams.members(c.team_id).find((x) => x.agent_id === s.agent_id);
     if (!m) throw err('invalid_state', `${s.agent_id} is no longer a member of the team.`);
-    return this.keys.issueSuccessor(m.credential_id, r.machine_id, sys, `${s.label} (moved by ${c.id})`);
+    // The label names the team's checkout, never its id: the operator reads it in the console (docs/design-guidelines.md, no ids in titles).
+    return this.keys.issueSuccessor(m.credential_id, r.machine_id, sys, `${s.label} (moved by the ${this.teams.team(c.team_id)?.name ?? 'team'} checkout)`);
   }
   unissue(r: RequestRow, s: SlotRow, reason: string): void {
     const c = this.byRequest(r);

@@ -99,7 +99,7 @@ The connector keeps a folder on the PC as a **read-only mirror** of a reader's s
 
 ```
 conclave sync add <hub> <folder> [--name <n>]   the pairing code is read from standard input (never an argument)
-conclave sync list [--json]                     each sync: name, hub, folder, state, last run, files, size, local edits, warnings
+conclave sync list [--json]                     each sync: name, hub, folder, state, last run, files, size, local edits, new local files, warnings
 conclave sync pause <name> | resume <name>
 conclave sync remove <name>                     forgets the sync and its key here; the folder stays
 ```
@@ -118,7 +118,8 @@ conclave sync remove <name>                     forgets the sync and its key her
 - **Nothing is lost.** A file deleted on the hub or out of scope, and a local edit about to be overwritten, goes to
   `<folder>/.conclave-trash/<date>/` (an edit as `name (local <date>).ext`). Trash older than 30 days is emptied, and the
   trash is also held to the size cap by emptying the oldest day first. Files that exist only locally are never touched; `sync
-  list` counts local edits.
+  list` counts local edits and warns about each file created in the mirror folder that the hub does not have (it is never
+  uploaded, and a hub file with the same name later replaces it, keeping yours in the trash).
 - **Limits.** A file over 64 MiB is skipped and reported (the hub does not track it), and a sync stops taking files at its
   size cap (5 GB by default) and reports it, which the console shows as a warning.
 - **Path safety.** Every hub path is checked before anything is written; a refused path is reported and nothing is written.

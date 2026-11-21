@@ -56,8 +56,16 @@ const PC = idMap(() => S.pcs);
 const AG = idMap(() => S.agents);
 const SESA = idMap(() => S.ses, (s) => s.agent.id);
 const keyName = (k) => (k.kind === 'app_key' ? k.app_name || k.label : k.label);
+/* A checkout names a moved key "<label> (moved by the <team> checkout)"; keys moved before 0.9.6 say "(moved by cko_…)". The title
+   is the label alone; by says which checkout, as words ("a checkout" for the old ids, which mean nothing to a person). */
+const keyMoved = (k) => {
+  const nm = keyName(k) || '', m = / \(moved by (.+)\)$/.exec(nm);
+  return m ? { title: nm.slice(0, m.index), by: /^cko_[a-z0-9]+$/.test(m[1]) ? 'a checkout' : m[1] } : { title: nm, by: null };
+};
 const stOf = (k) => {
   const e = k.effective_status;
+  // A key held by a leak rotation (docs/onboarding.md, key handover) is suspended with the reason leak_hold.
+  if (e === 'suspended' && k.status_reason === 'leak_hold') return [e, 'Held: leak rotation', 'susp', 'var(--bad)'];
   if (e !== 'active') return [e, e[0].toUpperCase() + e.slice(1), 'susp', 'var(--bad)'];
   if (k.live_logins > 0) return ['live', 'Live', 'live', 'var(--ok)'];
   if (!k.first_used_at) return ['new', 'New', 'new', 'var(--info)'];
@@ -729,10 +737,10 @@ const dotCls = (tone) => (tone === 'info' ? 'new' : tone);
 const keyKind = (k) => (k.kind === 'app_key' ? 'App key' : 'Session key');
 function keyRow(k) {
   const tone = keyTone(k), used = k.last_used_at ? ago(k.last_used_at) + ' ago' : 'never used';
-  /* A checkout names a moved key "<label> (moved by cko_…)"; the list shows the name and says "moved by a checkout" instead of the raw id. */
-  const nm = keyName(k), mv = / \(moved by cko_[a-z0-9]+\)$/.exec(nm || ''), title = mv ? nm.slice(0, mv.index) : nm;
-  const meta = k.kind === 'app_key' ? ['App key', k.pc?.name, admOnbMeta(k), used].filter(Boolean).join(' · ') : `Session key${mv ? ' · moved by a checkout' : ''} · ${k.last_used_at ? 'seen ' + used : used}`;
-  return row({ lead: `<i class="dot ${dotCls(tone)}"></i>`, dot: true, title, meta, attrs: { 'data-key': k.id, ...(mv ? { title: nm } : {}) }, cls: 'top' + (['revoked', 'expired'].includes(k.effective_status) ? ' dim' : ''),
+  // A moved key: the name, and "moved by the <team> checkout" in the meta line, never the checkout's id.
+  const { title, by } = keyMoved(k);
+  const meta = k.kind === 'app_key' ? ['App key', k.pc?.name, admOnbMeta(k), used].filter(Boolean).join(' · ') : `Session key${by ? ` · moved by ${by}` : ''} · ${k.last_used_at ? 'seen ' + used : used}`;
+  return row({ lead: `<i class="dot ${dotCls(tone)}"></i>`, dot: true, title, meta, attrs: { 'data-key': k.id }, cls: 'top' + (['revoked', 'expired'].includes(k.effective_status) ? ' dim' : ''),
     trail: pill(stOf(k)[1], tone) }); // the PC is in the meta line; a second copy on the right only made the pills ragged
 }
 /* The Keys search: a key's name, its agent and its PC. */
@@ -952,7 +960,10 @@ function coFormHtml(t, c, o, f) {
       <label class="fld"><span class="vlabel">Provider</span><select class="sel" data-co-f="provider">${(o.providers || Object.keys(CO_PROV)).map((p) => `<option value="${esc(p)}"${p === x.provider ? ' selected' : ''}>${esc(CO_PROV[p] || p)}</option>`).join('')}</select></label>
       <label class="fld"><span class="vlabel">Model</span><input class="inp" data-co-f="model" value="${esc(x.model || '')}" placeholder="Default" maxlength="80" autocomplete="off"></label>
       <label class="fld"><span class="vlabel">Permissions</span><select class="sel" data-co-f="permissions">${perm(a, x)}</select></label></div>`).join('');
-  const accept = unm.length && f.target !== 'same_user' ? `<label class="co-chk"><input type="checkbox" id="coAccept"${f.accept ? ' checked' : ''}><span>Leave the unmerged work of ${esc(unm.map((a) => coName(t, a)).join(', '))} on ${esc(coPc(c.source_machine_id))}</span></label>` : '';
+  const unmWho = unm.map((a) => coName(t, a)).join(', '), unmPc = coPc(c.source_machine_id);
+  const accept = unm.length && f.target !== 'same_user' ? `${overline('Unmerged work', null, pill('Required', 'warn'))}<div class="fld co-req">`
+    + `<p class="hint" id="coAcceptWhy">${esc(unmWho)} ${unm.length === 1 ? 'has' : 'have'} work that is not merged yet. It cannot move to the target: it stays on ${esc(unmPc)}. Tick the box to go on.</p>`
+    + `<label class="co-chk"><input type="checkbox" id="coAccept" required aria-required="true" aria-describedby="coAcceptWhy"${f.accept ? ' checked' : ''}><span>Leave the unmerged work of ${esc(unmWho)} on ${esc(unmPc)}</span></label></div>` : '';
   const again = c.status === 'rendered';
   return `${CO.unavail[c.id] ? `<p class="co-warn">${ic('warn')}<span><b>${esc(CO_UNAVAIL)}</b> Your choices are kept. Try again once the hub has it.</span></p>` : ''}
     ${overline('Target')}<div role="radiogroup" aria-label="Target" class="dc-opts">${tg}</div>${pcF}
@@ -1071,7 +1082,7 @@ async function coView(id) {
   main = waitCard + main;
   return {
     t: `${ic('pc')}<span class="ellip">${esc(t.name)} · Checkout</span>${c ? coStPill(c.status) : ''}`,
-    a: menu.some(Boolean) ? moreBtn() : '',
+    a: open ? `<button type="button" class="btn sm bad" id="coCancel">${ic('ban')}Cancel checkout</button>` : '',
     here: { label: 'Checkout', meta: c ? CO_ST[c.status]?.[0] || c.status : '' },
     dbar: { title: 'Checkout', menu },
     b: `<div class="kd-grid co"><div class="kd-col">${main}</div><div class="kd-col">${side}</div></div>`,
@@ -1093,6 +1104,7 @@ async function coView(id) {
         const go = async () => { await post(`${cP}/scan/${encodeURIComponent(folder)}`, { decision, findings_sha256: s.findings_sha256 }); toast(decision === 'approve' ? `${folder} approved · the restore goes on` : `${folder} left untrusted · the restore goes on`); await re(); };
         if (decision === 'approve') fbSheet({ title: `Trust ${folder}`, label: 'Approve', fields: vnote(`The restore writes trust for <b class="mono">${esc(folder)}</b>, so its ${esc(plural(s.findings.length, 'finding'))} run or load without Claude Code asking. Approve only config you recognise.`), onGo: go });
         else run(go); }));
+      if ($('#coCancel')) $('#coCancel').onclick = () => coCancel(c, cP, re);
       if ($('#coNew')) $('#coNew').onclick = () => { CO.edit[c.id] = true; openD('tco', id, true); };
       if ($('#coKeep')) $('#coKeep').onclick = () => { CO.edit[c.id] = false; openD('tco', id, true); };
       if ($('#coFinish')) $('#coFinish').onclick = () => fbSheet({ title: 'Finish by hand', label: 'Finish', fields: vnote("Marks the checkout restored. Handouts of agents that haven't resumed are removed, and the team pause is lifted."),
@@ -1114,7 +1126,7 @@ function coFormWire(t, c, o, f, id, cP, re) {
     const body = { target: f.target, rotate_agent_keys: f.target === 'same_user' ? f.rotate : true,
       agents: Object.fromEntries(Object.entries(f.agents).map(([a, x]) => [a, { provider: x.provider, model: x.model || null, permissions: x.permissions }])) };
     if (f.target === 'other_pc') { if (f.pc) body.machine_id = f.pc; else { toast('Add the PC with the connector first', true); return; } }
-    if ((o.unmerged_work_on_source || []).length && f.target !== 'same_user') { if (!f.accept) { toast('Tick the box to leave the unmerged work on the source PC', true); $('#coAccept')?.focus(); return; } body.accept_unmerged_work = true; }
+    if ((o.unmerged_work_on_source || []).length && f.target !== 'same_user') { if (!f.accept) { const x = $('#coAccept'); if (x) { x.closest('.fld').scrollIntoView({ block: 'center' }); fieldErr(x, `Tick this box first: the unmerged work stays on ${coPc(c.source_machine_id)} and does not move to the target.`); } return; } body.accept_unmerged_work = true; }
     let r;
     try { r = await post(cP + '/render', body); }
     catch (e) { if (e.code === 'restore_unavailable') { CO.unavail[c.id] = true; draw(); $('.co-warn')?.scrollIntoView({ block: 'nearest' }); return; } throw e; }
@@ -1146,7 +1158,8 @@ function coTeamCard(t, c) {
 }
 async function coTeamFill(t) {
   const r = await api('/teams/' + encodeURIComponent(t.id) + '/checkout').catch(() => null); if (!r) return;
-  const c = r.checkout, html = c ? coTeamCard(t, c) : ''; CO.team[t.id] = html; if (c) CO.last[t.id] = c.id;
+  const c = r.checkout, html = c ? coTeamCard(t, c) : '', had = !!CO.team[t.id]; CO.team[t.id] = html; if (c) CO.last[t.id] = c.id;
+  if (had !== !!html && DR.type === 'team' && DR.arg === t.id) return openD('team', t.id, true);
   const el = $('#coTeam'); if (el && el.dataset.coTeam === t.id && el.innerHTML !== html) { el.innerHTML = html; tipIcons(el); }
 }
 const coMenuItem = (t) => (['running', 'paused'].includes(t.status) || CO.team[t.id] ? { label: CO.team[t.id] || coHeld(t) ? 'Open checkout' : 'Check out team', icon: 'pc', fn: () => openD('tco', t.id) } : null);
@@ -4151,15 +4164,18 @@ document.addEventListener('click', (e) => {
 const dotH = (k) => `<span class="dot lg ${dotCls(keyTone(k))}"></span>`;
 
 /* ---------- secret result view ---------- */
-/* A key's one-time result (docs/onboarding.md#key-prompts-a-new-rotated-or-reissued-session-key). A session key shows its key
-   prompt: with a pickup code when the key has a known PC (no key on screen at all), else the raw key with the chat warning.
+/* A key's one-time result (docs/onboarding.md#key-prompts-a-new-rotated-or-reissued-session-key). A session key whose PC has no
+   connector shows its key prompt with the raw key and the chat warning (a connector PC gets its key by key handover instead).
    An app key shows its key and setup lines. Nothing here downloads; leaving uncopied asks first (onceArm). note: one line on top. */
 /* Where the prompt goes, by the client the hub resolved: the same words the prompt's restart step uses. */
 const promptClient = (c) => c === 'codex' ? 'Codex' : c === 'claude_code' ? 'Claude Code' : "the agent's client (Claude Code or Codex)";
 function keyPromptNote(p) {
-  if (p.mode === 'pickup') return `Paste this prompt into ${promptClient(p.client)} on <b>${esc(p.pc)}</b>, or follow it by hand there.${p.note ? ` <b>${esc(p.note)}</b>` : ''} It holds a single-use pickup code, not the key: the code works only on ${esc(p.pc)}, until ${esc(dt(p.expires_at))}, and the Conclave connector on that PC stores the key in its own key file.`;
   return 'This key is not bound to a PC, so the prompt holds the key itself. It is shown once. Do not paste it into a chat with a person or another agent.';
 }
+/* What Rotate secret does to whoever uses the key, and how the new one gets there (the key handover). */
+const rotWhat = (k) => (k.kind === 'app_key'
+  ? `The old secret stops at once: agents on ${k.pc?.name || 'its PC'} that log in through it are signed out until the new secret, shown once, is set on the PC. On a connector PC, Re-enrol PC hands a new key over instead.`
+  : `On a PC that runs the connector, the new key is sent there and ${k.agent?.label || 'the agent'} keeps working with the old one until the PC user allows it. Otherwise the old secret stops at once: ${k.agent?.label || 'the agent'} is signed out until the new key, shown once, reaches it.`);
 function secretView(res, title, note) {
   const sec_ = res.secret || '', k = res.key, mask = sec_.slice(0, 13) + '•'.repeat(18), p = res.prompt;
   $('#dA').innerHTML = ''; navOn(DR.type, DR.arg);
@@ -4269,7 +4285,10 @@ const VIEWS = {
           const aid = $('#nA').value, d = +$('#nE .on').dataset.d, tid = $('#nT .on').dataset.v;
           const mid = pc ? $('#nB .on').dataset.v : '';
           const res = await post('/keys', { kind: 'session_key', ...(aid ? { agent_id: aid } : { new_agent: { label, owner_id: $('#nO').value || null } }), label, template_id: tid || null, expires_at: d ? Date.now() + d * 864e5 : null, ...(mid ? { machine_id: mid } : {}) });
-          refresh(); const v = secretView(res, label); $('#dT').innerHTML = v.t; $('#dB').innerHTML = v.b; v.after();
+          refresh();
+          // A key for a PC that runs the connector goes there by key handover: no secret on screen, the key's page shows the wait.
+          if (res.handover) { toast(`Sent: waiting for the user of ${res.handover.pc.name}`); return openD('key', res.key.id); }
+          const v = secretView(res, label); $('#dT').innerHTML = v.t; $('#dB').innerHTML = v.b; v.after();
         });
       },
     };
@@ -4374,8 +4393,10 @@ const VIEWS = {
     const keyTitle = (p) => { const [, l, icn] = KEY_TABS.find((x) => x[0] === p); return ic(icn) + l; };
     const k = d.key, alias = S.me.vault_alias, isApp = k.kind === 'app_key', dead = k.effective_status === 'revoked';
     const st = stOf(k);
-    // Collect on the PC (docs/onboarding.md): whether the Codex wake can collect the next rotation, and this key's latest collection.
-    const col = k.kind === 'session_key' && !dead ? await api(`${kp}/collect`).catch(() => ({ offer: null, collection: null })) : { offer: null, collection: null };
+    // Key handover (docs/onboarding.md#key-handover-a-rotated-key-or-a-recruit-reaches-a-connector-pc): the PC a rotation goes to,
+    // the open handover (waiting for the PC user), and a rotation confirmed in the last 24 hours.
+    const noHo = { handover: null, target: null, confirmed: null };
+    const ho = k.kind === 'session_key' ? (await api(`${kp}/handover`).catch(() => null)) ?? noHo : noHo;
     // Counts are this key's own calls in the last hour (fetched for the key, not the console's recent sample).
     const hour = inv.invocations.filter((i) => Date.now() - i.created_at < 3600_000);
     const calls = hour.length, den = hour.filter((i) => i.result === 'denied').length;
@@ -4397,29 +4418,24 @@ const VIEWS = {
     const doEnd = () => act(() => post(`${kp}/end-logins`), 'Ended');
     const doRev = () => act(() => post(`${kp}/revoke`), 'Revoked');
     // Rotate secret and Make a new prompt are one act (POST /rotate); the reissue says that the old prompt stops working.
-    const doRot = (note) => run(async () => { const r = await post(`${kp}/rotate`); refresh(); const v = secretView(r, keyName(k), typeof note === 'string' ? note : ''); $('#dT').innerHTML = v.t; $('#dB').innerHTML = v.b; v.after(); });
+    const doRot = (note) => run(async () => { const r = await post(`${kp}/rotate`); refresh(); if (r.handover) { toast(`Sent: waiting for the user of ${r.handover.pc.name}`); return openD('key', r.key.id, true); } const v =secretView(r, keyName(k), typeof note === 'string' ? note : ''); $('#dT').innerHTML = v.t; $('#dB').innerHTML = v.b; v.after(); });
     const doNew = () => doRot('A new prompt was made. The old prompt and its key stop working.');
-    /* Rotate secret asks "Could this key have leaked?" first. Collect on the PC is offered only for a routine rotation the hub says
-       it can collect; a key prompt is always there. The mockup's three sheets are this one sheet in three states. */
-    const offer = col.offer, cc = col.collection, agentLabel = k.agent?.label || keyName(k), pcLabel = offer?.pc?.name || cc?.pc || 'its PC';
+    /* Rotate secret asks "Could this key have leaked?" first. A key whose PC runs the connector is sent to it (Rotate and send to
+       <PC>): nothing changes until the PC user allows it and the connector confirms. Any other key is rotated now and shown once. */
+    const agentLabel = k.agent?.label || keyName(k), tgt = ho.target, oh = ho.handover, okh = ho.confirmed, nop = ho.not_on_pc, held = k.status_reason === 'leak_hold' && k.effective_status === 'suspended';
     const showPrompt = (r, note) => { refresh(); const v = secretView(r, keyName(k), note); $('#dT').innerHTML = v.t; $('#dB').innerHTML = v.b; v.after(); };
     const openRotate = (anchor, leak0 = 'yes') => {
-      let leak = leak0, how = 'prompt';
-      const can = () => leak === 'no' && !!offer?.ok;
-      const appId = offer?.app_credential_id || via?.id || '';
+      let leak = leak0;
+      const appId = via?.id || '';
       const body = () => {
-        if (!can()) how = 'prompt';
-        const why = leak === 'yes' ? "Whoever took the key may also hold this agent's app key, so rotate the PC's app key too (or re-enrol the PC), then use a key prompt." : (offer?.message || 'Collect is not offered for this key.');
-        const opt = (v, title, sub, off) => `<button type="button" class="rot-opt${how === v ? ' on' : ''}" role="radio" aria-checked="${how === v}" data-how="${v}"${off ? ' disabled' : ''}><b>${esc(title)}</b><span>${esc(sub)}</span></button>`;
-        return `<div class="sheet-form"><p class="hint">The current secret stops working at once.</p>
+        const how = tgt
+          ? `The connector on <b>${esc(tgt.name)}</b> asks its user to allow the new key, then writes it into ${esc(agentLabel)}'s key file. The current key works until then; nothing changes if nobody allows it within 24 hours.`
+          : 'This key has no PC that runs the connector, so the new key is shown here once and must be put on its PC by hand. The current key stops working at once.';
+        return `<div class="sheet-form"><p class="hint">${how}</p>
           <p class="rot-q" id="rotQ">Could this key have leaked?</p>
           <div class="seg sheet-seg" role="group" aria-labelledby="rotQ"><button type="button" data-leak="yes" class="${leak === 'yes' ? 'on' : ''}" aria-pressed="${leak === 'yes'}">Yes, or I'm not sure</button><button type="button" data-leak="no" class="${leak === 'no' ? 'on' : ''}" aria-pressed="${leak === 'no'}">No, this is routine</button></div>
-          <div class="rot-opts" role="radiogroup" aria-label="How the new key reaches the agent">
-            ${opt('collect', `Collect on ${pcLabel}`, can() ? `The Codex wake on this PC picks the key up and writes it into ${agentLabel}'s keys file.${offer.last_seen_at ? ` Last seen ${ago(offer.last_seen_at)} ago.` : ''}` : leak === 'yes' ? 'Not available after a possible leak.' : 'Not available.', !can())}
-            ${can() ? '' : `<p class="rot-why">${esc(why)}</p>`}
-            ${opt('prompt', 'Show a key prompt', `Copy a prompt into the agent's session${offer?.pc ? ` on ${offer.pc.name}` : ''}, as today.`, false)}
-          </div>
-          <div class="sheet-acts rot-acts">${leak === 'yes' && appId ? '<button type="button" class="btn lg ghost" id="rotApp">Rotate the app key…</button>' : ''}<button type="button" class="btn lg" data-sheet-close>Cancel</button><button type="button" class="btn pri lg" id="rotGo">${how === 'collect' ? 'Rotate and collect' : 'Rotate and show prompt'}</button></div></div>`;
+          ${leak === 'yes' ? (tgt ? `<p class="rot-why">Whoever took the key may also hold the connector's app key on ${esc(tgt.name)}, so that app key is replaced too. You get a new pairing code once: the user of ${esc(tgt.name)} must pair the connector again with it. This key is held at once: its logins are refused. Until then no agent on ${esc(tgt.name)} can reach the hub (their sessions end; their keys stay valid), and the new key waits for the connector.</p>` : `<p class="rot-why">Whoever took the key may also hold the app key of its PC. Rotate that app key too, or re-enrol the PC.</p>`) : ''}
+          <div class="sheet-acts rot-acts">${leak === 'yes' && appId && !tgt ? '<button type="button" class="btn lg ghost" id="rotApp">Rotate the app key…</button>' : ''}<button type="button" class="btn lg" data-sheet-close>Cancel</button><button type="button" class="btn pri lg" id="rotGo">${tgt ? `Rotate and send to ${esc(tgt.name)}` : 'Rotate and show the key once'}</button></div></div>`;
       };
       // A centred dialog, not a popover: the sheet changes height with the answer to the leak question.
       const sh = openSheet({ title: `Rotate the secret of ${agentLabel}?`, cls: 'form', html: '<div id="rotB"></div>' });
@@ -4427,56 +4443,34 @@ const VIEWS = {
       paint();
       sh.addEventListener('click', (e) => {
         const lb = e.target.closest('[data-leak]');
-        if (lb) { leak = lb.dataset.leak; if (can()) how = 'collect'; paint(); $(`[data-leak="${leak}"]`, sh)?.focus(); return; }
-        const hb = e.target.closest('[data-how]');
-        if (hb && !hb.disabled) { how = hb.dataset.how; paint(); $(`[data-how="${how}"]`, sh)?.focus(); return; }
+        if (lb) { leak = lb.dataset.leak; paint(); $(`[data-leak="${leak}"]`, sh)?.focus(); return; }
         if (e.target.closest('#rotApp')) { closeSheet(); openD('key', appId); return; }
         if (!e.target.closest('#rotGo')) return;
-        const reason = leak === 'yes' ? 'suspected_leak' : 'routine', delivery = how;
+        const reason = leak === 'yes' ? 'suspected_leak' : 'routine';
         closeSheet();
         run(async () => {
-          const r = await post(`${kp}/rotate`, { reason, delivery });
+          const r = await post(`${kp}/rotate`, { reason });
           refresh();
-          if (delivery === 'collect') { toast('Collecting: the Codex wake will pick the new key up'); openD('key', r.key.id, true); } else showPrompt(r, '');
+          if (r.pairing) { openD('key', r.key.id, true); return rotPairSheet(r); }
+          if (r.handover) { toast(`Sent: waiting for the user of ${r.handover.pc.name}`); openD('key', r.key.id, true); } else showPrompt(r, 'No connector will pick this key up: put it on its PC by hand.');
         });
       });
     };
-    const colPost = (path, msg) => act(() => post(`${kp}/${path}`), msg);
-    const tryAgain = () => run(async () => { const r = await post(`${kp}/rotate`, { reason: 'routine', delivery: 'collect' }); refresh(); toast('Collecting again'); openD('key', r.key.id, true); });
-    const promptInstead = () => run(async () => { const r = await post(`${kp}/collect/prompt`); showPrompt(r, 'The collection was cancelled and a key prompt made. The old secret stays dead.'); });
-    // The status line for the key's latest collection: waiting, collected, signed in, or why it failed (design section 4 and the mockup).
-    const durTxt = (ms) => (ms < 90e3 ? `${Math.max(1, Math.round(ms / 1e3))} s` : ms < 90 * 60e3 ? `${Math.round(ms / 60e3)} min` : `${Math.round(ms / 36e5)} h`);
-    const colState = (c) => {
-      if (!c) return null;
-      const pc = c.pc || 'its PC', out = c.outcome, retry = c.retry && !!offer?.ok;
-      const lnk = (id, label) => `<button type="button" class="btn ghost sm" id="${id}">${label}</button>`, pri = (id, label) => `<button type="button" class="btn pri sm" id="${id}">${label}</button>`;
-      const alert = '<button type="button" class="btn ghost sm" data-go="log" data-arg="alerts">Open the alert</button>';
-      const fail = (t, d, steps, acts) => ({ tone: 'bad', t, d, steps, acts });
-      const openActs = lnk('cPrompt', 'Show a key prompt instead') + '<button type="button" class="btn sm" id="cCancel">Cancel</button>';
-      // The hub says why an open collection cannot proceed right now (hold); it stays open and expires as usual.
-      if (c.status === 'open' && c.hold === 'lockdown') return { tone: 'wait', t: 'Waiting: a lockdown is on.', d: 'The collection stays open until the lockdown ends or it expires.', steps: ['done', 'now', '', ''], acts: openActs };
-      if (c.status === 'open' && c.hold === 'app_key_inactive') return { tone: 'bad', t: `The Codex wake on ${pc} cannot sign in: its app key is ${c.app_key_status || 'not active'}.`, d: 'The collection stays open until it expires. Resume or replace the app key, or show a key prompt instead.', steps: ['done', 'x', '', ''], acts: openActs };
-      if (c.status === 'open' && c.hold === 'pc_inactive') return { tone: 'bad', t: `${pc} is suspended, so it cannot collect the key.`, d: 'The collection stays open until it expires. Resume the PC, or show a key prompt instead.', steps: ['done', 'x', '', ''], acts: openActs };
-      if (c.status === 'void' && out === 'binding_changed') return fail("This key's PC changed, so the collection was cancelled.", 'Rotate again for the new PC.', ['done', 'x', '', ''], '');
-      if (c.status === 'open') return { tone: 'wait', t: `Waiting for the Codex wake on ${pc}`, d: `${c.last_seen_at ? `Last seen ${ago(c.last_seen_at)} ago` : 'Not seen yet'} · expires in ${durTxt(c.expires_at - Date.now())}`, steps: ['done', 'now', '', ''], acts: lnk('cPrompt', 'Show a key prompt instead') + '<button type="button" class="btn sm" id="cCancel">Cancel</button>' };
-      if (c.status === 'collected') return { tone: 'wait', t: `Collected by ${pc}, waiting for it to confirm`, d: 'The Codex wake has 10 minutes to confirm the write, or the key is cancelled.', steps: ['done', 'done', 'now', ''], acts: '' };
-      const took = c.picked_at ? `Collected by ${pc} ${durTxt(c.picked_at - c.created_at)} after the click` : `Collected by ${pc}`;
-      if (c.status === 'confirmed') return { tone: 'ok', t: took, d: `Written to ${agentLabel}'s keys file · waiting for the agent to sign in`, steps: ['done', 'done', 'done', 'now'], acts: '', note: true };
-      if (c.status === 'signed_in') return { tone: 'ok', t: took, d: `Written to ${agentLabel}'s keys file · the agent signed in with the new key ${ago(c.signed_in_at)} ago`, steps: ['done', 'done', 'done', 'done'], acts: '', note: true };
-      const again = retry ? pri('cRetry', 'Try again') : '', inst = lnk('cPrompt', 'Show a key prompt instead');
-      if (c.status === 'expired') return fail('Not collected in 24 hours', `The Codex wake on ${pc} did not ask for it. Nothing was created.`, ['done', 'x', '', ''], inst + again);
-      if (c.status === 'failed' && out === 'write_failed') return fail(`${pc} collected the key but could not write ${agentLabel}'s keys file`, 'So the key was cancelled. Check the file on the PC, then try again.', ['done', 'done', 'x', ''], inst + again);
-      if (c.status === 'failed' && out === 'unconfirmed') return fail('Collected but not confirmed in 10 minutes', `So the key was cancelled. Check the Codex wake on ${pc}, then try again.`, ['done', 'done', 'x', ''], inst + again);
-      if (c.status === 'failed' && out === 'elsewhere') return fail('The new key was used from somewhere else', 'A sign-in with it came through another app key and was refused. Treat the key as leaked: rotate the app key and use a key prompt.', ['done', 'done', 'done', 'x'], alert + pri('cLeak', 'Rotate as a leak…'));
-      if (out === 'conflict') return fail('Two copies of the Codex wake asked for this key', `The collection was cancelled and an alert raised. Check ${pc}, then use a key prompt.`, ['done', 'x', '', ''], alert + pri('cPrompt', 'Show a key prompt'));
-      return null;
-    };
-    const cs = colState(cc), CSTEP = ['Rotated', 'Collect', 'Confirmed', 'Signed in'];
-    const colCard = cs ? `<div class="pcard kd-card" id="colCard" data-key="${esc(k.id)}">${kd('Collect on the PC')}
-      <div class="col-status ${cs.tone}" role="status"><div class="col-t">${esc(cs.t)}</div><div class="col-d">${esc(cs.d)}</div>
-        <ul class="col-steps" aria-label="Progress">${CSTEP.map((n, i) => `<li class="${cs.steps[i]}">${n}${cs.steps[i] === 'x' ? '<span class="sr"> failed</span>' : ''}</li>`).join('')}</ul></div>
-      ${cs.note ? '<p class="hint">Restart the client; if it shows no hub tools, run <span class="mono">conclave check</span> in the folder of that agent.</p>' : ''}
-      ${cs.acts ? `<div class="col-acts">${cs.acts}</div>` : ''}</div>` : '';
+    // The key's handover card: waiting for the PC user (with Cancel), or green once the connector confirmed.
+    const durTxt = (ms) => (ms < 90 * 60e3 ? `${Math.max(1, Math.round(ms / 60e3))} min` : `${Math.round(ms / 36e5)} h`);
+    const HSTEP = ['Sent', 'Allowed', 'Confirmed'];
+    const hoState = oh
+      ? { tone: 'wait', t: `Waiting for the PC user to allow it on ${oh.pc.name}`, d: `${oh.picked_up ? 'Picked up, not confirmed yet' : 'Not allowed on the PC yet'} · expires in ${durTxt(oh.expires_at - Date.now())}. ${held ? 'The current key is held until then: its logins are refused.' : 'The current key works until then.'}`, steps: ['done', oh.picked_up ? 'done' : 'now', oh.picked_up ? 'now' : ''], acts: '<button type="button" class="btn sm" id="hCancel">Cancel</button>' }
+      : okh ? { tone: 'ok', t: `Sent to ${okh.pc.name}`, d: okh.key === k.id ? `The connector wrote the new key into ${agentLabel}'s key file ${ago(okh.confirmed_at)} ago. Start a new chat there.` : 'This key was replaced when the PC confirmed the new one.', steps: ['done', 'done', 'done'], acts: okh.key === k.id ? '' : `<button type="button" class="btn sm" data-key-open="${esc(okh.key)}">Open the new key</button>` }
+      // The PC's connector said it does not hold this key: nothing was sent, the current key goes on working.
+      // A leak rotation ended without confirm (expired, cancelled, skipped): the key stays held until rotated again or revoked.
+      : ho.leak_unfinished ? { tone: 'bad', t: 'Leak rotation not finished: rotate again or revoke', d: 'The new key never reached the PC, so this key stays held and its logins are refused. Rotate it again to send a new key, or revoke it.', steps: ['done', '', ''], acts: '<button type="button" class="btn sm" id="hRot">Rotate again…</button>' }
+      : nop ? { tone: 'bad', t: `Not on ${nop.pc.name}: this PC does not hold the key`, d: `The connector there skipped the handover ${ago(nop.at)} ago. The current key works. Rotate again and show the key once, or bind the key to the PC that holds it.`, steps: ['done', '', ''], acts: '' }
+      : null;
+    const colCard = hoState ? `<div class="pcard kd-card" id="hoCard" data-key="${esc(k.id)}">${kd('Key handover')}
+      <div class="col-status ${hoState.tone}" role="status"><div class="col-t">${esc(hoState.t)}</div><div class="col-d">${esc(hoState.d)}</div>
+        <ul class="col-steps" aria-label="Progress">${HSTEP.map((n, i) => `<li class="${hoState.steps[i]}">${n}</li>`).join('')}</ul></div>
+      ${hoState.acts ? `<div class="col-acts">${hoState.acts}</div>` : ''}</div>` : '';
     const canNew = !isApp && !dead && !k.first_used_at && k.effective_status === 'active';
 
     /* Access: the matrix on desktop, folder rows on phones. Both read the same grid state (E.M). */
@@ -4577,7 +4571,8 @@ const VIEWS = {
       ${kv('Expires', `${esc(expText)}${dead ? '' : `<button type="button" class="btn ghost sm" id="kExp" aria-haspopup="dialog">Change expiry</button>`}`)}
       ${k.revoked_at ? kv('Revoked', dt(k.revoked_at)) : ''}
       ${k.replaces_credential_id ? kv('Replaces', K(k.replaces_credential_id) ? `<a href="#" data-key="${esc(k.replaces_credential_id)}">${esc(keyName(K(k.replaces_credential_id)))}</a>` : '<span class="kv-sub">A removed key</span>') : ''}
-      ${kv('Key id', `<span title="${esc(k.masked_key)}">${esc(midTrunc(k.masked_key, 22))}</span>`, { id: true })}</div>`;
+      ${keyMoved(k).by ? kv('Moved by', esc(cap(keyMoved(k).by))) : ''}
+      ${kv('Key id', esc(k.masked_key), { id: true })}</div>`;
     // What it may do: one row per editing tab, each with a summary and the tab it opens.
     // Read comes from the effective access (templates and app key included); write from the key's own folder rules, the grid the Access tab edits.
     const fAll = [ef.root, ...ef.folders].filter(Boolean), fRead = fAll.filter((f) => f.read).length;
@@ -4604,12 +4599,13 @@ const VIEWS = {
       ${row({ one: true, title: 'All calls in Audit', trail: `<span>${calls}</span>`, chev: true, cls: 'kd-door', attrs: { 'data-go': 'log', 'data-arg': `calls|${id}` } })}</div>`;
     // Danger zone: each action with what it does. Rotate and Revoke ask once more (arm); phones use the overflow instead.
     const dangerCard = dead ? '' : `<div class="pcard kd-card kd-danger only-d">${kd('Danger zone')}
-      ${dz('rot', 'Rotate secret', 'A new secret, shown once. The old one stops at once.', `<button type="button" class="btn sm" id="kRot">Rotate secret</button>`)}
+      ${dz('rot', 'Rotate secret', rotWhat(k), `<button type="button" class="btn sm" id="kRot">Rotate secret</button>`)}
       ${dz('out', 'End logins', 'Signs out every live login. The key keeps working.', `<button type="button" class="btn sm" id="kEnd"${live ? '' : ' disabled'}>End ${live || ''} login${live === 1 ? '' : 's'}</button>`)}
-      ${sus ? dz('play', 'Resume key', 'Logins work again with the same secret.', `<button type="button" class="btn sm" id="kRe">Resume key</button>`)
+      ${held ? dz('play', 'Resume key', 'Held because it may have leaked: rotate it again or revoke it.', '<button type="button" class="btn sm" id="kRe" disabled>Resume key</button>')
+        : sus ? dz('play', 'Resume key', 'Logins work again with the same secret.', `<button type="button" class="btn sm" id="kRe">Resume key</button>`)
         : dz('pause', 'Suspend key', 'Logins are refused until you resume it.', `<button type="button" class="btn sm" id="kSus"${k.effective_status === 'active' ? '' : ' disabled'}>Suspend key</button>`)}
       ${dz('trash', 'Revoke key', isApp ? 'Permanent. No agent can log in through it.' : 'Permanent. The agent can no longer log in with it.', `<button type="button" class="btn sm" id="kRev">Revoke key</button>`)}</div>
-      <p class="hint only-m kd-hint">${andList(['Rotate', live ? 'End logins' : '', k.effective_status === 'active' ? 'Suspend' : sus ? 'Resume' : '', 'Revoke'].filter(Boolean))} are in ⋯.</p>`;
+      <p class="hint only-m kd-hint">${andList(['Rotate', live ? 'End logins' : '', k.effective_status === 'active' ? 'Suspend' : sus && !held ? 'Resume' : '', 'Revoke'].filter(Boolean))} are in ⋯.</p>`;
     const body =
       pane('overview', `<div class="kd-grid"><div class="kd-col">${colCard}${idCard}${mayCard}</div><div class="kd-col">${useCard}${dangerCard}</div></div>`) +
       pane('access', `<div class="pcard"><div class="ohd">${overline('Folders', rows.length)}${info('Each folder is allowed, denied or inherited from its parent.')}${lg}</div><div id="mxW">${accHtml()}</div></div>`) +
@@ -4665,12 +4661,12 @@ const VIEWS = {
 
     return {
       t: keyTitle(keyTab), b: tabsH + body + savebar,
-      bar: `<h2 id="ctxTitle">${dotH(k)}<span class="ctx-name">${esc(keyName(k))}</span><span class="tag">${esc(k.masked_key)}</span></h2><nav class="seg ws-tabs" aria-label="Key sections">${KEY_TABS.map(([p, l, icn]) => `<button data-key-tab="${p}" class="${p === keyTab ? 'on' : ''}">${ic(icn)}${l}</button>`).join('')}</nav>`,
+      bar: `<h2 id="ctxTitle">${dotH(k)}<span class="ctx-name">${esc(keyMoved(k).title)}</span></h2><nav class="seg ws-tabs" aria-label="Key sections">${KEY_TABS.map(([p, l, icn]) => `<button data-key-tab="${p}" class="${p === keyTab ? 'on' : ''}">${ic(icn)}${l}</button>`).join('')}</nav>`,
       here: { label: keyName(k), meta: `${keyKind(k)} · ${st[1]}` },
       dbar: { title: keyName(k), dot: dotCls(keyTone(k)),
         menu: dead ? [] : [isApp ? { label: 'Rotate secret', icon: 'rot', confirm: 'Tap again: the old secret stops', fn: doRot } : { label: 'Rotate secret', icon: 'rot', fn: () => openRotate(null) },
           k.live_logins ? { label: 'End logins', icon: 'out', fn: doEnd } : null,
-          k.effective_status === 'active' ? { label: 'Suspend key', icon: 'pause', confirm: 'Tap again: logins refused until resumed', fn: doSus } : k.effective_status === 'suspended' ? { label: 'Resume key', icon: 'play', fn: doRe } : null,
+          k.effective_status === 'active' ? { label: 'Suspend key', icon: 'pause', confirm: 'Tap again: logins refused until resumed', fn: doSus } : k.effective_status === 'suspended' && !held ? { label: 'Resume key', icon: 'play', fn: doRe } : null,
           { label: 'Revoke key', icon: 'trash', bad: true, confirm: 'Tap again: permanent, logins stop', fn: doRev }] },
       after() {
         $$('[data-key-tab]').forEach((b) => (b.onclick = () => {
@@ -4687,14 +4683,15 @@ const VIEWS = {
         on('#kEnd', doEnd);
         if ($('#kRev')) arm($('#kRev'), doRev, 'Yes, revoke');
         if ($('#kRot')) { if (isApp) arm($('#kRot'), doRot, 'Yes, rotate'); else on('#kRot', (e) => openRotate(e.currentTarget)); }
-        on('#cPrompt', promptInstead); on('#cRetry', tryAgain); on('#cLeak', (e) => openRotate(e.currentTarget, 'yes'));
-        if ($('#cCancel')) arm($('#cCancel'), () => colPost('collect/cancel', 'Collection cancelled'), 'Yes, cancel');
-        // An open collection changes while the page is open (the wake asks, confirms, the agent signs in): look again every 15 s.
-        if (cc && ['open', 'collected', 'confirmed'].includes(cc.status)) {
+        if ($('#hCancel')) arm($('#hCancel'), () => act(() => post(`${kp}/handover/cancel`), held ? 'Cancelled: the key stays held' : 'Cancelled: the current key goes on working'), 'Yes, cancel');
+        if ($('#hRot')) on('#hRot', (e) => openRotate(e.currentTarget));
+        $$('[data-key-open]').forEach((b) => (b.onclick = () => openD('key', b.dataset.keyOpen)));
+        // An open handover changes while the page is open (the PC user allows it, the connector confirms): look again every 15 s.
+        if (oh) {
           const timer = setInterval(async () => {
-            if ($('#colCard')?.dataset.key !== k.id) return clearInterval(timer);
-            const n = (await api(`${kp}/collect`).catch(() => null))?.collection;
-            if (n && (n.id !== cc.id || n.status !== cc.status)) { clearInterval(timer); openD('key', id, true); }
+            if ($('#hoCard')?.dataset.key !== k.id) return clearInterval(timer);
+            const n = await api(`${kp}/handover`).catch(() => null);
+            if (n && (n.handover?.id !== oh.id || n.handover?.picked_up !== oh.picked_up)) { clearInterval(timer); openD('key', id, true); }
           }, 15000);
         }
         if ($('#kNew')) arm($('#kNew'), doNew, 'Yes, the old prompt stops');
@@ -5830,24 +5827,35 @@ const pcBridge = (p) => {
   return { waiting_install: ['Installing', 'info'], waiting_pairing: ['Waiting to pair', 'info'], waiting_folder_approval: ['Folders to approve', 'warn'] }[b.setup_status] || ['Not paired', ''];
 };
 const pcBridgeH = (p) => { const [l, t] = pcBridge(p); return t ? pill(l, t) : `<span class="meta">${esc(l)}</span>`; };
-const PCF_SEG = [['', 'All', () => true], ['live', 'Live', (p) => pcLive(p) > 0 || p.bridge?.online], ['needs', 'Needs you', (p) => pcNeeds(p) > 0 || obPending(p.id).some((q) => q.state === 'submitted')], ['susp', 'Suspended', (p) => p.status !== 'active']];
+/* A legacy bridge is shown only where one is paired or being set up; a PC that joined with the connector never has one. */
+const pcHasBridge = (p) => !!(p.bridge?.paired || ['waiting_install', 'waiting_pairing', 'waiting_folder_approval'].includes(p.bridge?.setup_status));
+/* The PCs list's Connection column: the connector's state (docs/connector.md, "PC status"), the bridge's on a PC that uses one,
+   else Not connected. Suspended is drawn by the row itself. */
+const pcConn = (p) => {
+  const c = p.connector;
+  if (c && c.status !== 'never') return c.status === 'disconnected' ? ['Disconnected', 'bad'] : c.online ? ['Connector online', 'ok'] : ['Connector offline', 'idle'];
+  if (pcHasBridge(p)) { const [l, t] = pcBridge(p); return [`Bridge ${l.toLowerCase()}`, t]; }
+  return ['Not connected', ''];
+};
+const pcConnH = (p) => { const [l, t] = pcConn(p); return t ? pill(l, t) : `<span class="meta">${esc(l)}</span>`; };
+const PCF_SEG = [['', 'All', () => true], ['live', 'Connected', (p) => pcLive(p) > 0 || p.bridge?.online || p.connector?.online], ['needs', 'Needs you', (p) => pcNeeds(p) > 0 || obPending(p.id).some((q) => q.state === 'submitted')], ['susp', 'Suspended', (p) => p.status !== 'active'], ['old', 'Old setup left', (p) => p.connector?.legacy_leftovers === true]];
 function pcRow(p) {
   const apps = pcApps(p), live = pcLive(p), ag = p.agents || [], tm = pcTeams(p), off = p.status !== 'active', nd = pcNeeds(p);
   const ob = obPcLabel(p), obFlag = ob && ob[1] && ob[1] !== 'idle' ? pill(ob[0].split(' · ')[0], ob[1]) : '';
-  const flag = off ? pill('Suspended', 'bad') : obFlag || (nd ? pill(`${plural(nd, 'folder')} to approve`, 'warn') : '');
-  const mMeta = [`${plural(ag.length, 'agent')}`, `${plural(tm.length, 'team')}`, live ? `${live} live` : ''].filter(Boolean).join(' · ');
+  const flag = off ? pill('Suspended', 'bad') : obFlag || (nd ? pill(`${plural(nd, 'folder')} to approve`, 'warn') : p.connector?.legacy_leftovers === true ? pill('Old setup left', 'warn') : '');
+  const mMeta = [`${plural(ag.length, 'agent')}`, `${plural(tm.length, 'team')}`, live ? `${live} signed in` : ''].filter(Boolean).join(' · ');
   return `<div class="tm-row pc-row" role="row" tabindex="0" data-pc="${esc(p.id)}" title="Open PC ${esc(p.name)}" aria-label="Open PC ${esc(p.name)}">
     <span class="tm-c tm-lead" role="cell" aria-hidden="true"><span class="tm-ico">${ic('pc')}</span></span>
     <span class="tm-c tm-name" role="cell"><b class="mono">${esc(p.name)}</b><span class="meta"><span class="only-d">${esc(p.description || 'No description')}</span><span class="only-m">${mMeta}</span></span></span>
-    <span class="tm-c pc-apps meta" role="cell">${plural(apps.length, 'app key')} · ${live ? `<span class="ok-t">${live} live</span>` : 'none live'}</span>
+    <span class="tm-c pc-apps meta" role="cell">${plural(apps.length, 'app key')} · ${live ? `<span class="ok-t">${live} signed in</span>` : 'no one signed in'}</span>
     <span class="tm-c pc-ag" role="cell">${ag.length ? tmAvatars(ag.map((a) => a.label)) : '<span class="faint">–</span>'}</span>
     <span class="tm-c pc-tm meta" role="cell">${tm.length || '–'}</span>
     <span class="tm-c tm-when" role="cell" title="${p.last_seen_at ? 'Last seen ' + esc(dt(p.last_seen_at)) : 'Never seen'}">${pcSeen(p)}${ic('chev', 'chev only-m')}</span>
-    <span class="tm-c tm-st pc-br" role="cell">${flag ? `<span class="only-m">${flag}</span>` : ''}<span class="only-d">${off ? pill('Suspended', 'bad') : pcBridgeH(p)}</span></span>
+    <span class="tm-c tm-st pc-br" role="cell">${flag ? `<span class="only-m">${flag}</span>` : ''}<span class="only-d">${off ? pill('Suspended', 'bad') : pcConnH(p)}</span></span>
     <span class="tm-c pc-ob" role="cell">${obPcH(p)}</span>
     <span class="tm-c tm-open" role="cell" aria-hidden="true">${ic('chev', 'chev')}</span></div>`;
 }
-const pcHead = () => `<div class="tm-row pc-row tm-head only-d" role="row"><span role="columnheader"><span class="sr">Type</span></span><span role="columnheader">PC</span><span role="columnheader" class="pc-apps">App keys</span><span role="columnheader" class="pc-ag">Agents</span><span role="columnheader" class="pc-tm">Teams</span><span role="columnheader" class="tm-when">Last seen</span><span role="columnheader" class="pc-br">Bridge</span><span role="columnheader" class="pc-ob">Onboarding</span><span role="columnheader"><span class="sr">Open</span></span></div>`;
+const pcHead = () => `<div class="tm-row pc-row tm-head only-d" role="row"><span role="columnheader"><span class="sr">Type</span></span><span role="columnheader">PC</span><span role="columnheader" class="pc-apps">App keys</span><span role="columnheader" class="pc-ag">Agents</span><span role="columnheader" class="pc-tm">Teams</span><span role="columnheader" class="tm-when">Last seen</span><span role="columnheader" class="pc-br">Connection</span><span role="columnheader" class="pc-ob">Onboarding</span><span role="columnheader"><span class="sr">Open</span></span></div>`;
 function pcList() {
   const q = PCF.q, test = (PCF_SEG.find(([v]) => v === PCF.f) || PCF_SEG[0])[2];
   const hit = (p) => !q || [p.name, p.description || '', ...(p.agents || []).map((a) => a.label), ...pcTeams(p).map((t) => t.name)].some((s) => s.toLowerCase().includes(q));
@@ -5870,7 +5878,8 @@ VIEWS.pcs = async () => { const V = S.me?.role === 'admin' ? ((await api('/conne
     <div class="srch pc-q">${ic('search')}<input class="inp" id="pcQ" type="search" placeholder="Search PCs, agents, teams" aria-label="Search PCs" value="${esc(PCF.q)}" autocomplete="off"></div>`) + `<div class="pcard pc-card" id="pcL">${pcList()}</div>${pcVerCard(V)}<div class="actionbar only-m"><button type="button" class="btn pri" id="obAddM">${ic('plus')}Add PC</button></div>`,
   after() {
     $('#pcF').onclick = (e) => { const b = e.target.closest('button'); if (!b) return; PCF.f = b.dataset.f; $$('#pcF button').forEach((x) => x.classList.toggle('on', x === b)); $('#pcL').innerHTML = pcList(); tipIcons($('#pcL')); };
-    onSearch($('#pcQ'), (v) => { PCF.q = v; $('#pcL').innerHTML = pcList(); tipIcons($('#pcL')); });
+    const verCard = () => { const c = $('#pcVer'); if (c) c.hidden = !!PCF.q; }; verCard();
+    onSearch($('#pcQ'), (v) => { PCF.q = v; $('#pcL').innerHTML = pcList(); tipIcons($('#pcL')); verCard(); });
     $$('#obAdd').forEach((b) => (b.onclick = () => obAddPc()));
     $$('#obSet').forEach((b) => (b.onclick = (e) => run(() => obSettings(e.currentTarget))));
     $('#obAddM').onclick = () => obAddPc();
@@ -5886,7 +5895,7 @@ VIEWS.pcs = async () => { const V = S.me?.role === 'admin' ? ((await api('/conne
 const CN_UNK = '<span class="kv-sub">Unknown</span>';
 const CN_CLIENT = { claude_code: 'Claude Code', claude_desktop: 'Claude Desktop', codex: 'Codex' };
 const CN_WHO = { you: 'You', pc_user: "The PC's user", agent: 'The agent' };
-const CN_AG = { waiting_for_approval: ['Waiting for approval', 'warn'], ready_to_open: ['Ready to open', 'info'], connected: ['Connected', 'ok'] };
+const CN_AG = { waiting_for_approval: ['Waiting for approval', 'warn'], ready_to_open: ['Ready to open', 'info'], connected: ['Connected', 'ok'], key_refused: ['Key refused', 'bad'] };
 /* What the PC reports about its own agent (docs/connector.md): only its own facts, never the hub's states. */
 const CN_PCREP = { repair_connection: 'the PC reports it cannot reach the hub', chat_in_use: 'the PC reports its chat is in use', open: 'open on the PC' };
 /* The account profile a PC reported for a run the connector started on it (docs/connector.md, Account profiles), as muted
@@ -5895,7 +5904,7 @@ const pcProfileText = (p) => (p?.name ? `Profile: ${p.name}` : p?.hidden ? 'Prof
 const PC_PROFILE_HIDDEN_TIP = "The PC's user hid the name of the account profile this run uses.";
 const CN_DSC = { access_revoked: ['Access revoked', 'warn'], cleanup_pending: ['Cleanup pending', 'info'], removed: ['Removed', 'ok'], needs_attention: ['Needs attention', 'bad'] };
 const CN_DSC_OPEN = ['access_revoked', 'cleanup_pending'];
-const CN_STEP = { added: 'Added to the hub', paired: 'Connector paired', request_filed: 'Team request filed', approved: 'Request approved', keys_collected: 'Keys collected on the PC', agents_connected: 'Agents connected' };
+const CN_STEP = { added: 'Added to the hub', paired: 'Connector paired', app_key: 'Set up without the connector', request_filed: 'Team request filed', approved: 'Request approved', keys_collected: 'Keys collected on the PC', agents_connected: 'Agents connected' };
 const CN_STEP_IC = { done: 'check', waiting: 'clock', failed: 'x', not_yet: 'more' };
 const CN_ACT = { check: 'Check this PC', restore: 'Restore', update: 'Update', disconnect: 'Disconnect' };
 const CN_AST = { queued: ['Waiting for the PC', 'idle'], fetched: ['Taken by the PC', 'info'], done: ['Done', 'ok'], failed: ['Failed', 'bad'], expired: ['Expired', 'idle'] };
@@ -5988,7 +5997,7 @@ VIEWS.pc = async (id) => {
     ${kv('Status', `${pill(on ? 'Active' : dscGone ? 'Disconnected' : 'Access suspended', on ? 'ok' : 'bad')}<span class="kv-sub"> · ${seen}</span>`)}
     ${kv('Description', p.description ? `<span title="${esc(p.description)}">${esc(p.description)}</span>` : '<span class="kv-sub">None</span>')}
     ${obE || obAll.length ? kv('Onboarding', `${obPcH(p)}${obE?.status === 'unused' ? `<button type="button" class="btn ghost sm" id="pcCodeX" title="The prompt's code stops working; Re-enrol PC makes a new one">Revoke code</button>` : ''}`) : ''}
-    ${kv('Bridge', `${pcBridgeH(p)}${br.paired ? '' : `<button type="button" class="btn ghost sm" id="pcSetup" title="Create a one-hour setup message to paste into an app on this PC">Set up bridge</button>`}`)}
+    ${pcHasBridge(p) || cn.status === 'never' ? kv('Bridge', `${pcBridgeH(p)}${br.paired ? '' : `<button type="button" class="btn ghost sm" id="pcSetup" title="Create a one-hour setup message to paste into an app on this PC">Set up bridge</button>`}`) : ''}
     ${br.os || br.version ? kv('System', esc([br.os, br.version && 'bridge ' + br.version].filter(Boolean).join(' · '))) : ''}
     ${kv('Added', dt(p.created_at))}
     ${su ? `<div class="pc-setup">${overline('Setup message')}${codeBox(su.message)}<span class="tag self-start">${ic('clock')} ${Math.max(0, Math.round((su.exp - Date.now()) / 60000))}m left</span></div>` : ''}</div>`;
@@ -6009,6 +6018,7 @@ VIEWS.pc = async (id) => {
     ${kv('Node', cnV(cn.node))}${kv('git', cnV(cn.git))}
     ${kv('Clients', cn.clients?.length ? cn.clients.map((c) => `${esc(CN_CLIENT[c.client] || c.client)} ${cnV(c.version)}`).join(' · ') : CN_UNK)}
     ${kv('Auto-update', cnSw(cn.auto_update))}${kv('Remote cleanup', cnSw(cn.remote_cleanup))}
+    ${kv('Old setup', cn.legacy_leftovers === true ? `${pill('Left on this PC', 'warn')}<span class="kv-sub"> · its user clears it with <span class="mono">conclave migrate --finish --remove-legacy-ca</span></span>` : cn.legacy_leftovers === false ? 'Cleared' : CN_UNK)}
     ${kv('Isolation', cn.isolation ? `${esc(CN_ISO[cn.isolation] || cn.isolation)}<span class="kv-sub"> · ${esc(CN_KEYSTORE[cn.key_store] || 'key store unknown')}</span>` : CN_UNK)}${verRow}</div>`;
   const tlCard = tl ? `<div class="pcard kd-card">${kd('Setup', info('Each step of setting up this PC. A step that waits says what happens next and who does it.'))}<ol class="cn-tl">${tl.steps.map(cnStepH).join('')}</ol></div>` : '';
   // PC actions: stored on the hub, fetched by the connector on its next call.
@@ -6047,7 +6057,7 @@ VIEWS.pc = async (id) => {
       return row({ one: true, lead: `<span class="fi-${m[1]}" title="${m[2]}">${ic(m[0])}</span>`, title: raw(`<span class="mono" title="${esc(f.path)}">${esc(midTrunc(f.path, 40))}</span>`),
         trail: f.status === 'proposed' ? `<button type="button" class="btn sm" data-fd="approve" data-path="${esc(f.path)}">Approve</button><button type="button" class="btn sm" data-fd="reject" data-path="${esc(f.path)}">Reject</button>` : `<span>${m[2]}</span>` }); }).join('')}</div>` : '';
   const dangerCard = `<div class="pcard kd-card kd-danger only-d">${kd('Danger zone')}
-    ${dz('rot', 'Re-enrol PC', 'New prompt; this PC\'s keys are revoked now.', '<button type="button" class="btn sm" id="pcReEnrol">Re-enrol PC</button>')}
+    ${dz('rot', 'Re-enrol PC', 'New prompt and app key. With the connector, the agents\' keys are handed over; else they are revoked now.', '<button type="button" class="btn sm" id="pcReEnrol">Re-enrol PC</button>')}
     ${dscOpen ? '' : dz('out', 'Disconnect this hub from this PC', 'Revokes its access now; its connector then removes this hub from the PC. Repositories and chats stay.', '<button type="button" class="btn sm" id="pcDisc">Disconnect</button>')}</div>
     <p class="hint only-m kd-hint">Re-enrol PC and Disconnect are in ⋯.</p>`;
   return {
@@ -6056,7 +6066,7 @@ VIEWS.pc = async (id) => {
     here: { label: p.name, meta: `${on ? 'Active' : 'Suspended'} · ${seen}` },
     dbar: { title: p.name, dot: on ? 'ok' : 'bad',
       menu: [{ label: 'Rename PC', icon: 'edit', fn: () => doRename() }, { label: 'Add app key', icon: 'plus', fn: () => openD('app', p.id) }, on ? { label: 'New session key', icon: 'key', fn: () => openD('new', p.id) } : null, br.paired ? null : { label: 'Set up bridge', icon: 'hub', fn: doSetup },
-        { label: 'Re-enrol PC', icon: 'rot', bad: true, confirm: 'Tap again: revokes this PC\'s keys', fn: () => run(() => obReEnrol(p)) },
+        { label: 'Re-enrol PC', icon: 'rot', bad: true, confirm: 'Tap again: replaces this PC\'s keys', fn: () => run(() => obReEnrol(p)) },
         on ? { label: 'Suspend access', icon: 'pause', bad: true, confirm: 'Tap again: logins from it refused', fn: doSus } : dscGone ? null : { label: 'Resume access', icon: 'play', fn: doSus },
         dscOpen ? null : { label: 'Disconnect this hub', icon: 'out', bad: true, fn: () => pcDisconnectSheet(p, cn, re) }] },
     b: `<div class="kd-grid"><div class="kd-col">${dscCard}${cnCard}${tlCard}${agCard}${idCard}${obCard}</div><div class="kd-col">${acCard}${useCard}${appCard}${tmCard}${fdCard}${dangerCard}</div></div>`,
@@ -6071,7 +6081,7 @@ VIEWS.pc = async (id) => {
       if ($('#pcUpdate')) arm($('#pcUpdate'), () => doAct('update', { version: cn.update_available }), `Yes, update to ${cn.update_available}`);
       if ($('#pcDisc')) $('#pcDisc').onclick = () => pcDisconnectSheet(p, cn, re);
       $$('[data-ver]').forEach((b) => { if (b.dataset.ver === 'refuse') arm(b, () => doVer(b.dataset.v, 'refuse'), 'Yes, refuse'); else b.onclick = () => doVer(b.dataset.v, 'approve'); });
-      arm($('#pcReEnrol'), () => run(() => obReEnrol(p)), 'Yes, re-enrol');
+      arm($('#pcReEnrol'), () => run(() => obReEnrol(p)), 'Yes, revoke its keys now');
       if ($('#pcCodeX')) arm($('#pcCodeX'), () => run(async () => { await api(`/pcs/${p.id}/enrolment`, 'DELETE'); toast('Code revoked'); re(); }), 'Yes, revoke');
       $$('[data-fd]').forEach((b) => (b.onclick = () => run(async () => { await post(`/pcs/${p.id}/folders/${encodeURIComponent(b.dataset.path)}/${b.dataset.fd}`); re(); })));
       $$('[data-more]').forEach((b) => (b.onclick = () => { const box = $('#' + b.dataset.more), all = box.classList.toggle('all'); b.setAttribute('aria-expanded', String(all)); b.querySelector('.lrow-title').textContent = all ? 'Show fewer' : `Show all ${agAll.length} agents`; }));
@@ -6084,6 +6094,9 @@ VIEWS.pc = async (id) => {
    it is only ever rendered escaped (as text or as input values), labelled with its source, under what the hub computed. ---------- */
 const OB_ST = { submitted: ['Waiting for you', 'warn'], needs_changes: ['Changes asked', 'info'], approved: ['Keys not collected', 'info'], collected: ['Set up', 'ok'], denied: ['Denied', 'bad'], withdrawn: ['Withdrawn', 'idle'], cancelled: ['Cancelled', 'idle'] };
 const obPill = (s) => pill(...(OB_ST[s] || [cap(String(s).replace(/_/g, ' ')), 'idle']));
+/* Right after Approve or Deny on a team request, the header pill shows the decision and the buttons turn off at once; the
+   reload that follows can take a moment, and the page must not read "Waiting for you" meanwhile. */
+const obDecided = (st) => { const m = $('#ctxBar .ctx-meta'); if (m) m.innerHTML = obPill(st); $$('#ctxBar .ws-act button').forEach((b) => (b.disabled = true)); };
 const OB_TR = [['coordinator', 'Coordinator'], ['worker', 'Worker'], ['reviewer', 'Reviewer'], ['stakeholder', 'Stakeholder']];
 const obTr = (r) => (OB_TR.find(([v]) => v === r) || [r, cap(r)])[1];
 const obPending = (pcId) => (S.ob || []).filter((q) => q.pc?.id === pcId);
@@ -6098,17 +6111,54 @@ function obPcLabel(p) {
 }
 const obPcH = (p) => { const s = obPcLabel(p); return !s ? '<span class="faint">–</span>' : s[1] ? pill(s[0], s[1]) : `<span class="meta">${esc(s[0])}</span>`; };
 
-/* The hub address and CA fingerprint shown beside a PC's prompt. */
-const obHubFacts = (prompt) => { const fp = prompt?.hashes?.ca; return `<div class="ob-kv">${kv('Hub', `<span class="mono">${esc(S.me?.public_url || '')}</span>`)}${kv('CA SHA-256', fp ? `<span class="mono ob-fp" title="${esc(fp)}">${esc(midTrunc(fp, 28))}</span>` : '<span class="kv-sub">No CA certificate on the hub</span>')}</div>`; };
-/* The ready-to-copy prompt from Add PC or Re-enrol PC. The code in it works once and is not shown again. */
+/* The hub the PC pairs with, beside its prompt: the hub's own origin, or the relay's when the code was made through one. */
+const obHubFacts = (pairing) => `<div class="ob-kv">${kv('Hub', `<span class="mono">${esc(pairing?.hub_origin || S.me?.public_url || '')}</span>`)}${pairing?.relay ? kv('Through relay', esc(pairing.relay.name)) : ''}</div>`;
+/* The connector's pairing step. The code and the hub check go into the connector's own pairing screen, never into a chat; the
+   connector checks the hub's certificate against the hub check before it sends the code. */
+const obPairH = (r, step = '') => {
+  const p = r.pairing, exp = p.code_expires_at;
+  return `<div class="jn-dl ob-pair">${ic('pc')}<span>${step}On <b>${esc(r.pc.name)}</b>, open the connector's pairing screen and enter the code <code class="ob-chip">${esc(p.code)}</code> and the hub check <code class="ob-chip">${esc(p.ca_check)}</code>. The code works once and it is valid for 30 minutes${exp ? `, until ${esc(new Date(exp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }))}` : ''}; <b>Re-enrol PC</b> on the PC's page makes a new one.</span></div>`;
+};
+/* Why Add PC or Re-enrol PC gave no prompt (connector_unavailable): the hub has nothing the connector can check. There is no
+   other prompt to fall back to, so the sheet says what to fix on the hub. */
+/* Add PC's first step: the installer to run on the PC. Its file is named after the newest approved connector version
+   (connector_version), and the link is the Releases page when the hub has one (docs/connector.md, "Add PC"). */
+const jnInstallH = (made) => {
+  const file = `conclave-install-${made.connector_version || '<version>'}.mjs`, pc = `<b>${esc(made.pc.name)}</b>`;
+  const get = made.download_url ? `download <code>${esc(file)}</code> from <a href="${esc(made.download_url)}" target="_blank" rel="noopener noreferrer">GitHub Releases</a>` : `copy <code>${esc(file)}</code> from the connector's release files to it`;
+  return `<div class="jn-dl">${ic('dl')}<span><b>1.</b> Install the connector on ${pc}: ${get}, then run <code class="ob-chip">node ${esc(file)}</code> in a terminal there. It installs the connector and opens its pairing screen.</span></div>`;
+};
+const OB_NO_PROMPT = {
+  no_ca: "The hub has no CA certificate (<code>CA_CERT_FILE</code>), so the connector can't check the hub before it sends the code.",
+  no_origin: "The hub's public address isn't HTTPS (<code>PUBLIC_URL</code>), so the connector has no hub address to check.",
+};
+const obNoPrompt = (r) => `<div class="alert ob-none" role="alert"><b>No prompt for ${esc(r.pc.name)}</b><span>${OB_NO_PROMPT[r.connector_unavailable] || OB_NO_PROMPT.no_ca} Fix that on the hub, then use <b>Re-enrol PC</b> on the PC's page for a new code.</span></div>`;
+/* After a leak rotation the connector's app key on the key's PC was replaced (docs/onboarding.md, key handover): its new
+   pairing code is shown here once. The PC user pairs the connector again; until then no agent on that PC reaches the hub. */
+function rotPairSheet(r) {
+  const p = r.pairing, pc = p.pc?.name || r.handover?.pc?.name || 'the PC', exp = p.code_expires_at;
+  const cmd = `conclave pair --hub ${p.hub_origin || '<hub address>'} --check ${p.ca_check || '<hub check>'}`;
+  openSheet({ title: `Pair the connector on ${pc} again`, html: `<div class="sheet-form ob-pr">
+    ${vnote(`The connector's app key on <b>${esc(pc)}</b> was replaced, because whoever took the key may hold it too. Give this code to the user of <b>${esc(pc)}</b>: they pair the connector again with it. It works once and is not shown again${exp ? `; it is valid until ${esc(new Date(exp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }))}` : ''}.`)}
+    <p class="hint">Until they pair again, no agent on <b>${esc(pc)}</b> can reach the hub: their sessions and turn tokens ended with the old app key, and their session keys stay valid. The new key for the rotated agent waits, for up to 24 hours, until the paired connector picks it up.</p>
+    <div class="code mono ob-prompt" data-v="${esc(p.code)}" tabindex="0" aria-label="Pairing code">${esc(p.code)}</div>
+    <p class="hint">On ${esc(pc)}: <code>${esc(cmd)}</code>, then enter the code. Re-enrol PC on the PC's page makes a new code if this one runs out.</p>
+    <div class="sheet-acts"><button type="button" class="btn lg" data-sheet-close>Done</button><button type="button" class="btn pri lg" data-copy>${ic('copy')}Copy code</button></div></div>` }).classList.add('wide');
+  const b = $('.ob-pr [data-copy]'); if (b) b.dataset.copy = p.code;
+  onceArm($('.ob-pr'));
+}
+/* Re-enrol PC's sheet: the pairing step, then the connector prompt with Copy. The code works once and is not shown again. */
 function obPromptSheet(r, title) {
+  const ok = !!(r.connector_prompt && r.pairing);
   openSheet({ title, html: `<div class="sheet-form ob-pr">
-    ${vnote(`Paste it into the coding agent (Claude Code, Codex or another) on <b>${esc(r.pc.name)}</b> and add the team you want. The code works once and is not shown again.`)}
-    <div class="code mono ob-prompt" data-v="${esc(r.prompt.text)}" tabindex="0" aria-label="Prompt">${esc(r.prompt.text)}</div>
-    ${obHubFacts(r.prompt)}
-    <div class="sheet-acts"><button type="button" class="btn lg" data-sheet-close>Done</button><button type="button" class="btn pri lg" data-copy>${ic('copy')}Copy prompt</button></div></div>` }).classList.add('wide');
+    ${ok ? `${obPairH(r)}
+    ${vnote(`Then paste this into the coding agent (Claude Code, Codex or another) on <b>${esc(r.pc.name)}</b> and add the team you want. It holds no code and no key.`)}
+    <div class="code mono ob-prompt" data-v="${esc(r.connector_prompt)}" tabindex="0" aria-label="Prompt">${esc(r.connector_prompt)}</div>
+    ${obHubFacts(r.pairing)}` : obNoPrompt(r)}
+    <div class="sheet-acts"><button type="button" class="btn lg" data-sheet-close>Done</button>${ok ? `<button type="button" class="btn pri lg" data-copy>${ic('copy')}Copy prompt</button>` : ''}</div></div>` }).classList.add('wide');
+  if (!ok) return;
   // data-copy reads the nearest [data-v]: point the button at the prompt.
-  const b = $('.ob-pr [data-copy]'); if (b) b.dataset.copy = r.prompt.text;
+  const b = $('.ob-pr [data-copy]'); if (b) b.dataset.copy = r.connector_prompt;
   onceArm($('.ob-pr'));
 }
 /* Add PC (header, after Lockdown; the More sheet on phones; the PCs page): one screen that onboards a PC. Three steps, the PC
@@ -6157,7 +6207,7 @@ function joinSheet(anchor, start = 'choose') {
   $('#jnOptTeam', sh).onclick = () => { closeSheet(); go('tbuild'); };
   tick($('#jnC', sh), (b) => { client = b.dataset.v; });
   const want = $('#jnW', sh), out = $('#jnOut', sh);
-  const text = () => joinPrompt(made.prompt.text, want.value);
+  const text = () => joinPrompt(made.connector_prompt, want.value);
   const status = (tone, html) => { const w = $('#jnSt', sh); if (!w) return; w.className = 'wait jn-st' + (tone ? ' ' + tone : ''); w.innerHTML = html; };
   const waitH = (label) => `<span class="dot pulse"></span><span>${label}</span>`;
   async function poll() {
@@ -6178,19 +6228,34 @@ function joinSheet(anchor, start = 'choose') {
     timer = setTimeout(poll, 3000);
   }
   async function create() {
-    const name = $('#jnN', sh).value.trim(), err = $('#jnErr', sh);
+    const name = $('#jnN', sh).value.trim(), err = $('#jnErr', sh), go = $('#jnGo', sh);
     if (!name) return fieldErr($('#jnN', sh), 'Name the PC');
+    if (go.disabled) return; // one request at a time: a second press would try to add the PC twice
     err.textContent = '';
-    made = await post('/pcs/add', { name });
+    // The hub can take a while to answer; the button says it is working so nobody presses it again.
+    const label = go.innerHTML;
+    go.disabled = true; go.setAttribute('aria-busy', 'true'); go.innerHTML = '<span class="dot pulse" aria-hidden="true"></span>Getting the prompt…';
+    try { made = await post('/pcs/add', { name }); }
+    catch (e) {
+      if (e.code !== 'conflict') throw e;
+      // The name is taken, often by this very PC from a first press whose answer came late: the code is shown only once, so
+      // the way on is the PC's page, where Re-enrol PC makes a new one.
+      await refresh();
+      const p = (S.pcs || []).find((x) => x.name === name);
+      err.innerHTML = `A PC named <b>${esc(name)}</b> already exists.${p ? ` If you just added it, open it and use <b>Re-enrol PC</b> for a new code. <button type="button" class="btn sm" id="jnOpenPc">Open ${esc(name)}</button>` : ' Choose another name.'}`;
+      if (p) $('#jnOpenPc', sh).onclick = () => { closeSheet(); openD('pc', p.id); };
+      return;
+    } finally { if (!made) { go.disabled = false; go.removeAttribute('aria-busy'); go.innerHTML = label; } }
     $('#jnN', sh).disabled = true; $$('#jnC button', sh).forEach((b) => { b.disabled = true; }); $('#jnGoRow', sh).hidden = true; out.hidden = false; back.hidden = true;
-    const exp = made.pairing?.code_expires_at;
-    out.innerHTML = `${made.download_url ? `<div class="jn-dl">${ic('dl')}<span>First install the connector on <b>${esc(made.pc.name)}</b>: <a href="${esc(made.download_url)}" target="_blank" rel="noopener noreferrer">Download it from GitHub Releases</a>.</span></div>` : ''}
-      ${made.pairing ? `<div class="jn-dl">${ic('pc')}<span>With the connector, enter on its pairing screen the code <code>${esc(made.pairing.code)}</code> and the hub check <b>${esc(made.pairing.ca_check)}</b>. The connector checks the hub's certificate against it before it sends the code.</span></div>` : ''}
-      ${vnote(`Paste this into <b>${esc(jnAgent(client))}</b> on <b>${esc(made.pc.name)}</b>. The pairing code in it works once and is not shown again; ${exp ? `it is valid for 30 minutes, until ${esc(new Date(exp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }))}. <b>Re-enrol PC</b> on the PC's page makes a new one if it runs out.` : "revoke it from the PC's page if it goes astray."}`)}
+    // Only the connector prompt: without one (no CA, or no HTTPS address) the sheet says why, and nothing else is offered.
+    if (!made.connector_prompt || !made.pairing) { out.innerHTML = `${obNoPrompt(made)}<div class="sheet-acts jn-acts"><button type="button" class="btn lg" data-sheet-close>Done</button></div>`; refresh(); return; }
+    out.innerHTML = `${jnInstallH(made)}
+      ${obPairH(made, '<b>2.</b> ')}
+      ${vnote(`<b>3.</b> Open <b>${esc(jnAgent(client))}</b> on <b>${esc(made.pc.name)}</b> and paste this prompt into it. The prompt holds no code and no key: the agent asks what the team should do, drafts the team request and files it through the connector.`)}
       <div class="sheet-acts jn-acts"><button type="button" class="btn lg" data-sheet-close>Done</button><button type="button" class="btn pri lg" id="jnCopy">${ic('copy')}Copy prompt</button></div>
       <div class="wait jn-st" id="jnSt" role="status" aria-live="polite"></div>
       <div class="code mono ob-prompt jn-prompt" id="jnP" tabindex="0" aria-label="Prompt"></div>
-      ${obHubFacts(made.prompt)}`;
+      ${obHubFacts(made.pairing)}`;
     const draw = () => { $('#jnP', sh).textContent = text(); };
     draw(); want.oninput = draw;
     $('#jnCopy', sh).onclick = async () => { try { await navigator.clipboard.writeText(text()); if (ONCE && ONCE.el === out) ONCE.copied = true; toast('Prompt copied'); } catch { toast('Copy failed: select the prompt and copy it'); } };
@@ -6210,7 +6275,7 @@ async function obReEnrol(p) {
   const r = await post(`/pcs/${p.id}/re-enrol`);
   await refresh(); if (DR.type === 'pc') await openD('pc', p.id, true);
   obPromptSheet(r, `New prompt for ${r.pc.name}`);
-  toast(r.reopened?.length ? `Old keys revoked; ${plural(r.reopened.length, 'pickup')} reopened` : 'Old keys revoked');
+  toast(r.handover ? 'Old app key revoked. The agents\' keys stay valid and are handed over once the PC is paired again' : r.reopened?.length ? `Old keys revoked; ${plural(r.reopened.length, 'pickup')} reopened` : 'Old keys revoked');
 }
 /* Settings → Onboarding: the per-request limits and the filing rate limits (per PC key). */
 async function obSettings(anchor) {
@@ -6736,7 +6801,7 @@ VIEWS.ob = async (id) => {
       after() {
         if ($('#obRe')) arm($('#obRe'), () => run(async () => { await post(`/onboarding/${id}/reissue-pickup`); toast('Pickup reissued'); re(); }));
         if ($('#obCx')) $('#obCx').onclick = (e) => fbSheet({ title: 'Cancel request', anchor: e.currentTarget, tone: 'bad', label: 'Cancel request', fields: vnote('Revokes keys not yet collected, archives its agents and stops the draft team.') + fbArea('obNote', 'Note for the PC (optional)', 500), onGo: async (sh) => { await post(`/onboarding/${id}/cancel`, { note: fbVal(sh, 'obNote') || null }); toast('Cancelled'); re(); } });
-        if ($('#obDeny')) $('#obDeny').onclick = (e) => fbSheet({ title: 'Deny request', anchor: e.currentTarget, tone: 'bad', label: 'Deny', fields: fbArea('obNote', 'Note for the PC (optional)', 500), onGo: async (sh) => { await post(`/onboarding/${id}/deny`, { note: fbVal(sh, 'obNote') || null }); toast('Denied'); re(); } });
+        if ($('#obDeny')) $('#obDeny').onclick = (e) => fbSheet({ title: 'Deny request', anchor: e.currentTarget, tone: 'bad', label: 'Deny', fields: fbArea('obNote', 'Note for the PC (optional)', 500), onGo: async (sh) => { await post(`/onboarding/${id}/deny`, { note: fbVal(sh, 'obNote') || null }); obDecided('denied'); toast('Denied'); re(); } });
       },
     };
   }
@@ -6800,7 +6865,7 @@ VIEWS.ob = async (id) => {
           const off = folders.map((f) => fit(f, u)).filter(Boolean);
           if (off.length) return toast(off[0], true);
           await post(`/onboarding/${id}/approve`, { version: R.version, edits: { team: { name: vName.trim() }, roles: [{ ...V, job: (V.job || '').trim(), folders }] }, agents: [{ slot: V.name || 'vault_agent', include: true, template_id: null, bound }], owner_id: u.id });
-          toast('Approved; the PC collects the key'); viewEdited = false; re();
+          obDecided('approved'); toast('Approved; the PC collects the key'); viewEdited = false; re();
         }));
       },
     };
@@ -6910,7 +6975,7 @@ VIEWS.ob = async (id) => {
         if (requirements.some((x) => !x.title || !x.text)) { return toast('A kept requirement needs a title and its text', true); }
         const agents = obSlots(E.roles, teamName(), d.proposed_slots).map((s) => { const c = ch(s.slot); return { slot: s.slot, include: c.include, template_id: c.template_id || null, bound: c.bound }; });
         await post(`/onboarding/${id}/approve`, { version: R.version, edits: newTeam ? { project: E.project, team, roles, ...(E.rules.length ? { rules } : {}), ...(STD.length ? { standard } : {}), ...(E.requirements.length ? { requirements } : {}), ...(nRes ? { research: keptRes() } : {}) } : { roles, ...(E.rules.length ? { rules } : {}) }, agents, start_when_set_up: newTeam ? $('#obStart').classList.contains('on') : true, confirm_root_write: needRoot(), owner_id: $('#obOw')?.value || null });
-        toast('Approved; the PC collects the keys'); viewEdited = false; re();
+        obDecided('approved'); toast('Approved; the PC collects the keys'); viewEdited = false; re();
       }));
     },
   };
@@ -7219,7 +7284,7 @@ const dur2 = (ms) => { const m = Math.round(Math.abs(ms) / 60000); return m < 60
    agent's woken run works on another task, and "PC offline since hh:mm" (never "asleep"). Empty once it was delivered and read. */
 const CN_ISO = { standard: 'Standard isolation', hardened: 'Hardened isolation' };
 const CN_KEYSTORE = { dpapi: 'keys encrypted with Windows DPAPI', keychain: 'keys encrypted, secret in the macOS login keychain', secret_service: 'keys encrypted, secret in the Linux secret service', file: 'keys encrypted, secret in a private file', service: 'keys held by the key service' };
-const DELIV = { pc_offline: 'Not delivered: waiting for the PC', chat_in_use: 'Not delivered: chat in use', wake_held: 'Not delivered: wake held on this platform', agent_unknown: 'Not delivered: no session to wake', connector_too_old: 'Not delivered: connector too old' };
+const DELIV = { pc_offline: 'Not delivered: waiting for the PC', chat_in_use: 'Not delivered: chat in use', wake_held: 'Not delivered: waking is off for this agent on its PC', agent_unknown: 'Not delivered: this PC has no folder for the agent', connector_too_old: 'Not delivered: connector too old' };
 const atTime = (t) => { const d = new Date(t), hm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`; return d.toDateString() === new Date().toDateString() ? hm : dt(t); };
 const delivText = (u) => (!u ? '' : u.delivered_at ? `Delivered ${atTime(u.delivered_at)}` : u.seen_at ? '' : u.waiting_behind ? `Waiting behind task ${u.waiting_behind.title}`
   : u.pc_offline_since ? `Not delivered: PC offline since ${atTime(u.pc_offline_since)}` : DELIV[u.delivery_reason] || 'Not delivered yet');
@@ -9563,7 +9628,15 @@ function dirArgStr(f) {
   return s === 's=retired' ? 'retired' : s;
 }
 /* State that is not in the route and must survive the background redraw: ticked rows and folded groups. */
-const DIR_UI = { data: null, checked: new Set(), folded: new Set(), req: 0 };
+const DIR_UI = { data: null, checked: new Set(), folded: new Set(), req: 0, twins: new Map() };
+/* The same rule set separately for several scopes (same title and text) is one row: the first in the list's order stands for
+   the others, with every scope named and the reads added up. Each stays its own directive (its pane names the others). */
+const dirTwinKey = (d) => String(d.title || '').trim().toLowerCase() + '\n' + String(d.body || '').trim();
+const dirFold = (L) => {
+  const by = new Map();
+  for (const d of L) { const k = dirTwinKey(d), g = by.get(k); if (g) g.push(d); else by.set(k, [d]); }
+  return [...by.values()].map((g) => (g.length === 1 ? g[0] : { ...g[0], twins: g.slice(1), current: g.reduce((n, d) => n + d.current, 0), agents: g.reduce((n, d) => n + d.agents, 0) }));
+};
 const dirFirstLine = (b) => String(b || '').split('\n').map((l) => l.trim()).find(Boolean) || '';
 const dirMatch = (d, f) => {
   if (f.q) { const hay = [d.title, d.body, d.reach_label || d.scope_label, ...(d.tags || [])].join(' ').toLowerCase(); if (!f.q.toLowerCase().split(/\s+/).every((w) => hay.includes(w))) return false; }
@@ -9593,14 +9666,15 @@ const dirTarget = (d) => d.scope_kind === 'hub' ? 'All agents' : d.scope_kind ==
 /* What the exemptions add to the scope (the hub's except_label): "Except team ECHO Research", or '' when nothing is kept off. */
 const dirExcept = (d) => (d.exempt_count && d.except_label) || '';
 function dirRow(d, f) {
-  const live = d.status === 'active', sel = d.id === f.d;
+  const live = d.status === 'active', sel = d.id === f.d || !!d.twins?.some((x) => x.id === f.d);
   const box = live ? `<label class="dl-hit"><input type="checkbox" class="dl-chk" data-dchk="${esc(d.id)}" aria-label="Select ${esc(d.title)}"${DIR_UI.checked.has(d.id) ? ' checked' : ''}></label>` : '';
-  const where = f.g === '' ? dirTarget(d) : DIR_KIND_LABEL[d.scope_kind] || cap(d.scope_kind);
+  const all = d.twins ? [d, ...d.twins] : null, targets = all && all.map(dirTarget);
+  const where = all ? `${all.length} scopes` : f.g === '' ? dirTarget(d) : DIR_KIND_LABEL[d.scope_kind] || cap(d.scope_kind);
   // Grouped by category, the group header already names it (a proposal still shows).
   const cat = f.g === 'cat' && d.category ? '' : dirCatText(d);
   // Phones have no room for the scope chip: it moves to the start of the meta line (design guidelines §4).
   // Kept off somewhere: the meta line starts with the reach (reach_label): its except part after the scope chip on desktop, in full on phones.
-  const reach = d.reach_label || cap(d.scope_label), ex = dirExcept(d);
+  const reach = all ? `Same rule for ${targets.join(', ')}` : d.reach_label || cap(d.scope_label), ex = all ? reach : dirExcept(d);
   const scope = `<span class="tag txt dl-scope only-d" title="${esc(reach)}">${esc(where)}</span>`;
   const lead = ex ? `<span class="only-d">${esc(ex)} · </span><span class="only-m">${esc(reach)} · </span>` : `<span class="only-m">${esc(where)} · </span>`;
   return row({ as: 'div', cls: 'dl-row' + (sel ? ' on' : ''), lead: box, chev: true,
@@ -9612,21 +9686,24 @@ function dirRow(d, f) {
 const dirGroups = (f, L) => (f.g === 'cat'
   ? [...DIR_CATS, ['none', 'No category']].map(([k, l]) => ['c:' + k, l, L.filter((d) => dirCatKey(d) === k)])
   : DIR_KINDS.map((k) => [k, DIR_KIND_LABEL[k], L.filter((d) => d.scope_kind === k)])).filter(([, , g]) => g.length);
-/* Matching directives in display order: by group (unless ungrouped), not reviewed first, then the hub's order. */
-const dirOrdered = (f) => { const L = DIR_UI.data.directives.filter((d) => dirMatch(d, f)).sort((a, b) => !!a.reviewed_at - !!b.reviewed_at);
+/* Matching directives in display order: by group (unless ungrouped), not reviewed first, then the hub's order; the same rule
+   for several scopes once (dirFold). Filtered to Not read by everyone, the rules most agents have not read come first. */
+const dirOrdered = (f) => { const L = dirFold(DIR_UI.data.directives.filter((d) => dirMatch(d, f)).sort((a, b) => !!a.reviewed_at - !!b.reviewed_at));
+  if (f.rd === 'behind') L.sort((a, b) => (b.agents - b.current) - (a.agents - a.current));
   return f.g === 'none' ? L : dirGroups(f, L).flatMap(([, , g]) => g); };
 /* The list pane: the overline (Select all shown, the count, Group by), folding groups, and the bulk bar while rows are ticked. */
 function dirListHtml(f) {
   const D = DIR_UI.data, all = D.directives, live = f.st === 'active';
-  const L = dirOrdered(f);
+  const L = dirOrdered(f), folded = dirFold(all), rules = folded.length;
+  DIR_UI.twins = new Map(folded.filter((d) => d.twins).flatMap((d) => { const g = [d, ...d.twins]; return g.map((x) => [x.id, g.filter((y) => y.id !== x.id)]); }));
   // Only rows the filters show stay ticked, so a bulk action never reaches a hidden one.
-  const shown = new Set(L.map((d) => d.id)); for (const id of DIR_UI.checked) if (!shown.has(id)) DIR_UI.checked.delete(id);
+  const shown = new Set(L.flatMap((d) => [d.id, ...(d.twins || []).map((x) => x.id)])); for (const id of DIR_UI.checked) if (!shown.has(id)) DIR_UI.checked.delete(id);
   const unrev = L.filter((d) => live && !d.reviewed_at).length, behind = L.filter((d) => live && d.current < d.agents).length;
   const ticked = L.filter((d) => DIR_UI.checked.has(d.id)).length;
   // Select all shown ticks only the rows shown and sits outside the live count.
   const sum = all.length ? listOverline([
     live && L.length ? { html: `<input type="checkbox" class="dl-chk" id="dlAll" aria-label="Select all shown" title="Select all shown"${ticked && ticked === L.length ? ' checked' : ''}>` } : '',
-    { html: `<span class="lov-n" id="dlShown" tabindex="-1" aria-live="polite"><b>${L.length}</b> of ${all.length}${unrev ? ` · <span class="info-t">${unrev} not reviewed</span>` : ''}${behind ? ` · <span class="warn-t">${behind} not read by everyone</span>` : ''}</span>` },
+    { html: `<span class="lov-n" id="dlShown" tabindex="-1" aria-live="polite"><b>${L.length}</b> of ${rules}${unrev ? ` · <span class="info-t">${unrev} not reviewed</span>` : ''}${behind && f.rd !== 'behind' ? ` · <button type="button" class="lnk warn-t" data-drd="behind" title="Show only these, the ones most agents have not read first">${behind} not read by everyone</button>` : ''}</span>` },
     L.length ? { name: 'Group by', attrs: 'id="dlG"', options: DIR_GROUPS, value: f.g } : '',
   ]) : '';
   let body;
@@ -9658,7 +9735,10 @@ async function dirShowPane(id, keepScroll = 0) {
   if (!id) { pane.innerHTML = none('sl', 'Select a directive'); DBAR_MENU = []; return; }
   let r; try { r = await dirDetail(id, dirAgArgs(DR.type === 'directives' ? DR.arg : '')); } catch (e) { if (req === DIR_UI.req && pane.isConnected) pane.innerHTML = none('sl', e.status === 404 ? 'This directive no longer exists' : 'Could not load it'); return; }
   if (req !== DIR_UI.req || !pane.isConnected) return;
-  pane.innerHTML = dirPaneHtml(r); pane.scrollTop = keepScroll;
+  const tw = DIR_UI.twins.get(id) || [];
+  const twin = tw.length ? `<p class="hint dl-twins">The same rule is also set for ${tw.map((x) => `<button type="button" class="lnk" data-dtw="${esc(x.id)}">${esc(dirTarget(x))}</button>`).join(', ')}, each as its own directive: edit or retire each one, or keep the widest and retire the others.</p>` : '';
+  pane.innerHTML = dirPaneHtml({ ...r, b: twin + r.b }); pane.scrollTop = keepScroll;
+  $$('[data-dtw]', pane).forEach((b) => { b.onclick = () => dirSelect(b.dataset.dtw); });
   DBAR_MENU = (r.dbar.menu || []).filter(Boolean);
   r.after(); tipIcons(pane);
 }
@@ -9695,7 +9775,8 @@ function dirBindList(f) {
   box.onclick = (e) => {
     const t = e.target;
     if (t.closest('.dl-hit') && !t.matches('input')) return; // the label passes the click on to its box
-    const chk = t.closest('[data-dchk]'); if (chk) { DIR_UI.checked[chk.checked ? 'add' : 'delete'](chk.dataset.dchk); dirSet({}); return; }
+    const chk = t.closest('[data-dchk]'); if (chk) { for (const id of [chk.dataset.dchk, ...(DIR_UI.twins.get(chk.dataset.dchk) || []).map((x) => x.id)]) DIR_UI.checked[chk.checked ? 'add' : 'delete'](id); dirSet({}); return; }
+    if (t.closest('[data-drd]')) { dirSet({ rd: t.closest('[data-drd]').dataset.drd }); $('#dlShown')?.focus(); return; }
     if (t.id === 'dlAll') { const L = DIR_UI.data.directives.filter((d) => dirMatch(d, f)); L.forEach((d) => DIR_UI.checked[t.checked ? 'add' : 'delete'](d.id)); dirSet({}); return; }
     if (t.closest('[data-dclr]')) { dirClear(); return; }
     const g = t.closest('[data-dgrp]'); if (g) { const k = g.dataset.dgrp; DIR_UI.folded[DIR_UI.folded.has(k) ? 'delete' : 'add'](k); dirSet({}); $(`[data-dgrp="${k}"]`)?.focus(); return; }
@@ -10076,7 +10157,7 @@ function teamAttention(t, id, nm, bps, ny) {
   // here asks no decision of the operator: For awareness, with the hub's own rows (stalls, missed milestones) dismissable.
   const who = (k) => esc(k.assignee ? nm(k.assignee) : 'Unassigned');
   const task = (k, glyph, meta) => row({ lead: glyph, title: planTitle(k.title), meta: raw(meta), chev: true, attrs: { 'data-task': `${id}|${k.id}` } });
-  const need = (ny?.items || []).map((r) => nyCard(r)); // the expanded row, as on the Needs you screen
+  const need = nyCards(ny?.items || []); // the expanded rows, folded as on the Needs you screen
   const items = [
     ...(ny?.awareness?.items || []).map((r) => awRow(r)),
     ...(t.warnings || []).map((w) => row({ lead: planGlyph('unclear', ic('warn'), 'Warning'), title: w.label, meta: w.app_name })),
@@ -11816,7 +11897,7 @@ const NY_KIND = { undelivered: ['Not delivered yet', 'clock'], overdue: ['Past i
   unblock: ['Task blocked', 'ban'], refine_waiting: ['Refining requirements', 'graph'], proposal: ['Blueprint change', 'graph'], backlog: ['New brief', 'note'], onboarding: ['Team request', 'team'], checkout: ['Checkout step', 'pc'],
   directive: ['Directive to review', 'sl'], directive_suggestion: ['Suggestion from an agent', 'sl'], feedback: ['New feedback', 'bug'], vault_conflict: ['Vault conflict', 'note'], unclear: ['Unclear requirement', 'info'],
   team_pause: ['Team paused', 'pause'], setup: ['Team setup', 'team'], team_paused: ['Team paused', 'pause'],
-  stalled: ['Member stalled', 'clock'], missed_milestone: ['Milestone missed', 'warn'], claim_not_supported: ['Claim not supported', 'warn'], keys_not_collected: ['Keys not collected', 'key'], key_collection: ['Key not collected', 'key'], rules_applied: ['Applied by rules', 'check'], blocking_work: ['Blocks work', 'warn'] };
+  stalled: ['Member stalled', 'clock'], missed_milestone: ['Milestone missed', 'warn'], claim_not_supported: ['Claim not supported', 'warn'], keys_not_collected: ['Keys not collected', 'key'], key_handover: ['Waiting for the PC user', 'key'], key_leak_unfinished: ['Leak rotation not finished', 'warn'], rules_applied: ['Applied by rules', 'check'], blocking_work: ['Blocks work', 'warn'] };
 const nyKind = (k) => NY_KIND[k] || [cap(String(k).replace(/_/g, ' ')), 'info'];
 /* Where a row's record opens in the operator's console. */
 function nyOpenAttr(o) {
@@ -11980,6 +12061,32 @@ function nyCard(r, open = nyOpenAttr, pfx = 'ny') {
 function awCard(r, open = nyOpenAttr, pfx = 'ny') {
   return nyCardBox(r.id, nyHead(r), r.title, mdText([nyUntil(r), nySum(r)].filter(Boolean).join(' · ')), '', '', [awBtns(r, open, pfx, false)]);
 }
+/* Identical items fold into one row with a count, so a burst (say 140 vault conflicts) does not bury the rest. Vault
+   conflicts become one card that opens Vault → Conflicts; other rows of the same kind and title show the first card with
+   "Show N more like this" for the others (their buttons work as before). Questions never fold. Single items come first, in
+   the hub's order; folded rows follow. Returns one HTML string per row. */
+function nyCards(items, open = nyOpenAttr, pfx = 'ny') {
+  const by = new Map();
+  for (const r of items) {
+    const k = r.kind === 'vault_conflict' ? 'vault_conflict' : r.kind === 'question' ? 'q:' + r.id : `${r.kind}|${r.title || ''}`;
+    if (!by.has(k)) by.set(k, []); by.get(k).push(r);
+  }
+  const one = [], many = [];
+  for (const [k, L] of by) {
+    if (L.length < 2) one.push(nyCard(L[0], open, pfx));
+    else if (k === 'vault_conflict') many.push(nyConflictCard(L));
+    else many.push(`<div class="ny-grp" data-ny-grp>${nyCard(L[0], open, pfx)}<button type="button" class="btn ghost sm ny-grp-btn" data-ny-grp-btn aria-expanded="false">${ic('chev')}<span>Show ${L.length - 1} more like this</span></button><div class="ny-grp-more" hidden>${L.slice(1).map((r) => nyCard(r, open, pfx)).join('')}</div></div>`);
+  }
+  return [...one, ...many];
+}
+const nyConflictCard = (L) => nyCardBox('fold:vault_conflict', nyHeadLine(nyKind('vault_conflict')[1], ['Vault conflict', `${L.length} items`], L[0].at),
+  `${L.length} vault conflicts wait for you`, esc('Two versions of the same note met. Each needs a choice in Vault → Conflicts.'), '', '',
+  ['<button type="button" class="btn pri" data-go="vault" data-arg="conf">Open conflicts</button>']);
+function nyGrpToggle(b) {
+  const box = b.closest('[data-ny-grp]')?.querySelector('.ny-grp-more'); if (!box) return;
+  const on = box.hidden, n = box.children.length; box.hidden = !on; b.setAttribute('aria-expanded', String(on));
+  b.querySelector('span').textContent = on ? 'Show fewer' : `Show ${n} more like this`;
+}
 /* The active backlog as one card: the count, the oldest brief and its team, and Open backlog. */
 function nyBacklogCard(L, arg = '') {
   if (!L.length) return '';
@@ -12008,7 +12115,7 @@ VIEWS.needs = async (arg) => {
     + `<select class="sel ny-team" id="nyTeam" aria-label="Team"><option value="">All teams</option>${teams.map((t) => `<option value="${esc(t.id)}"${t.id === f.team ? ' selected' : ''}>${esc(t.name)}</option>`).join('')}</select>`);
   const list = seg === 'aw' ? A.map((r) => awCard(r)).join('') || none('check', 'Nothing for awareness', true)
     : seg === 'later' ? LT.map((r) => laterRow(r)).join('') || none('clock', 'Nothing set aside', true)
-    : rest.map((r) => nyCard(r)).join('') + (bl.length ? nyBacklogCard(bl, blTo('')) : '') || none('check', 'Nothing waits for you', true);
+    : nyCards(rest).join('') + (bl.length ? nyBacklogCard(bl, blTo('')) : '') || none('check', 'Nothing waits for you', true);
   const foot = `<div class="ny-foot"><button type="button" class="btn ghost sm" data-go="log" data-arg="alerts">${ic('warn')}All alerts · ${S.alerts.length}</button>`
     + (pp ? `<button type="button" class="btn ghost sm" data-go="backlog" data-arg="${esc(blTo('postponed'))}">${ic('note')}Postponed backlog tasks · ${pp.postponed_total ?? pp.total ?? 0}</button>` : '') + '</div>';
   return {
@@ -12636,10 +12743,19 @@ function lockItems() {
   const l = S.lock; if (!l) return [];
   return [...(l.writes_disabled ? [['writes', '']] : []), ...l.vaults.map((v) => ['vault', v]), ...l.agents.map((v) => ['agent', v]), ...l.pcs.map((v) => ['pc', v]), ...l.teams.map((v) => ['team', v])];
 }
+/* What each lock stops, for the chip under the page title (docs/blueprint.md: lockdown refuses writes; reads stay open). */
+const LK_WHAT = {
+  writes: 'Lockdown: every write is paused. Agents can still read.',
+  vault: 'Lockdown: your vault is frozen.',
+  agent: 'Lockdown on this agent: it cannot change anything; it can still read.',
+  pc: 'Lockdown on this PC: agents working through it cannot change anything; they can still read.',
+  team: 'Lockdown on this team: its agents cannot change anything; they can still read.',
+};
 function renderLock() {
   const L = lockItems(); $('#lk').classList.toggle('on', L.length > 0); $('#lk').title = L.length ? `Lockdown · ${L.length} active` : 'Lockdown';
   const b = $('#lkb'); b.hidden = !L.length;
-  b.innerHTML = L.map(([s, id]) => `<div class="chip sev-crit"><span class="ico">${ic('lock')}</span><b>${ic(LKI[s])}</b><span class="who">${esc(lkName(s, id))}</span><button class="btn sm" data-lk="${esc(s)}|${esc(id)}|0" aria-label="Unlock">${ic('x')}</button></div>`).join('');
+  // Each chip names the lock ("Locked · pc-tern9"), says what it stops on hover, opens Lockdown, and its X lifts that lock (Undo follows).
+  b.innerHTML = L.map(([s, id]) => { const nm = lkName(s, id); return `<div class="chip sev-crit" title="${esc(LK_WHAT[s])}"><span class="ico">${ic('lock')}</span><b>${ic(LKI[s])}</b><button type="button" class="lnk who" data-go="lock" aria-label="${esc(`Locked: ${nm}. ${LK_WHAT[s]} Open Lockdown`)}">Locked · ${esc(nm)}</button><button type="button" class="btn sm" data-lk="${esc(s)}|${esc(id)}|0" aria-label="Lift the lock on ${esc(nm)}" title="Lift the lock on ${esc(nm)} (you can undo it)">${ic('x')}</button></div>`; }).join('');
 }
 let uT;
 function undo(msg, fn) {
@@ -12662,6 +12778,10 @@ async function liftAll() {
   await setAll(false);
   undo('Lifted ' + items.length, () => setAll(true));
 }
+/* Reset is not a Security tab (one click from wiping the hub): it sits here, at the end of the emergency page, as a danger zone
+   for admins. The reset page itself still asks which parts, then the password. */
+const lkDanger = () => (S.me?.role !== 'admin' ? '' : `<div class="pcard kd-card kd-danger lk-danger">${kd('Danger zone')}
+  ${dz('rot', 'Reset hub data', "Removes the parts of the hub's data you pick, or all of it. You choose the parts next; nothing is removed until you confirm with your password.", `<button type="button" class="btn bad sm" data-go="reset">${ic('rot')}Reset hub data…</button>`)}</div>`);
 VIEWS.lock = async () => {
   const l = S.lock || { writes_disabled: false, vaults: [], agents: [], pcs: [], teams: [] };
   const al = S.me.vault_alias, active = lockItems();
@@ -12684,7 +12804,7 @@ VIEWS.lock = async () => {
     b: `<div class="lk-status${active.length ? ' on' : ''}" role="status">${ic(active.length ? 'lock' : 'check')}<span>${esc(status)}</span></div>
       <div class="pcard">${switchRow('writes', '', l.writes_disabled, 'pause', 'Pause all writes', l.writes_disabled ? 'Locked' : 'Every agent, every app')}${switchRow('vault', al, l.vaults.includes(al), 'vault', 'Freeze vault', l.vaults.includes(al) ? 'Locked' : 'No changes to ' + al)}</div>` +
       vtools(`<div class="srch">${ic('search')}<input class="inp" id="lkQ" type="search" placeholder="Find agent, PC or team" aria-label="Filter" value="${esc(LK_Q)}"></div>`) +
-      list('Agents', 'agent', agents, l.agents) + list('PCs', 'pc', pcs, l.pcs) + list('Teams', 'team', teams, l.teams) + '<div id="lkNone" hidden></div>',
+      list('Agents', 'agent', agents, l.agents) + list('PCs', 'pc', pcs, l.pcs) + list('Teams', 'team', teams, l.teams) + '<div id="lkNone" hidden></div>' + lkDanger(),
     after() {
       // A search hides the rows that do not match, then each list with no match left; each list's overline says "2 of 8",
       // and a search that matches nothing says so with Clear search.
@@ -13421,6 +13541,7 @@ const reqCard = (r) => `<div class="pcard rqc" data-rq="${esc(r.id)}">
   ${r.justification ? `<p class="rq-why">${esc(r.justification)}</p>` : ''}
   <div class="fld"><span class="vlabel">Grant for (optional)</span><div class="seg" data-dur>${RQ_DUR.map((d) => `<button type="button" data-d="${d}">${d}</button>`).join('')}</div></div>
   <label class="fld"><span class="vlabel">Narrow to (optional)</span><input class="inp mono" data-narrow placeholder="${esc(r.resource)}" aria-label="Narrow the resource" maxlength="1024" autocomplete="off"></label>
+  <p class="meta rq-def">Left empty, Approve grants what was asked: ${esc(r.actions.join(', '))} on the whole resource, for ${r.requested_duration_s ? fmtD(Math.min(r.requested_duration_s, 7 * 86400)) : '1 hour'}.</p>
   <div class="rq-acts"><button type="button" class="btn pri" data-rqa="ok">${ic('check')}Approve</button><button type="button" class="btn" data-rqa="no">${ic('x')}Deny</button></div></div>`;
 VIEWS.req = async (tab = 'req') => {
   const seg = vtools(subTabs('data-rt', [['req', 'Pending', S.reqs.length ? ' ' + S.reqs.length : ''], ['grants', 'Temporary grants']], tab));
@@ -13463,8 +13584,9 @@ const chTitle = (c) => { const who = c.from_label || agLabel(String(c.from)), [w
   return c.direction === 'download' ? [`${what} → ${who}`, `${full} → ${who}`] : [`${who} → ${what}`, `${who} → ${full}`]; };
 /* The hub writes "download <path>" as the purpose of a vault download; the title already names the file. */
 const chPurpose = (c) => { const p = String(c.purpose || ''); return /^download \//.test(p) && String(c.to || '').endsWith(p.slice(9)) ? '' : p; };
-const chReason = (c) => { const r = String(c.failure_reason || ''), m = /^closed_by_(peer|sender)(?:: ([\s\S]*))?$/.exec(r);
-  if (m) { const by = m[1] === 'sender' ? c.from_label || 'the sender' : c.to_label || c.from_label || 'the receiver'; return `Closed by ${by}${m[2] ? ': ' + m[2] : ''}`; }
+/* The hub sends its code (closed_by_peer, closed_by_sender) and the closing agent's own reason apart, as close_reason. */
+const chReason = (c) => { const r = String(c.failure_reason || ''), m = /^closed_by_(peer|sender)$/.exec(r);
+  if (m) { const by = m[1] === 'sender' ? c.from_label || 'the sender' : c.to_label || c.from_label || 'the receiver'; return `Closed by ${by}${c.close_reason ? `: "${c.close_reason}"` : ''}`; }
   return CH_WHY[r] || cap(r.replace(/_/g, ' ')); };
 VIEWS.shares =async (tab = 'shares') => {
   const seg = (extra = '') => vtools(subTabs('data-sht', [['shares', 'Shares'], ['chans', 'Channels']], tab) + extra);
@@ -13596,8 +13718,11 @@ function openFbFilters(btn, tools, draw) {
   [['#fbK', 'kind'], ['#fbT', 'tool'], ['#fbTm', 'team'], ['#fbA', 'agent'], ['#fbAs', 'assignee'], ['#fbLk', 'linked']].forEach(([s, k]) => ($(s, sh).onchange = () => { FB_F[k] = $(s, sh).value; draw(); }));
   $('#fbClear', sh).onclick = () => { Object.assign(FB_F, { kind: '', tool: '', team: '', agent: '', assignee: '', linked: '' }); closeSheet(); draw(); };
 }
+/* Feedback opens on New; when New is empty and reports are still open, it opens on Open, so the number on the tab is never
+   next to an empty list. The title counts the reports in the list shown (the dot on the Feedback tab counts New only). */
+const fbDefault = () => (!(S.fbc?.new > 0) && S.fbc?.open > 0 ? 'open' : 'new');
 VIEWS.feedback = async (arg) => {
-  const bucket = ['new', 'open', 'closed'].includes(arg) ? arg : 'new';
+  const bucket = ['new', 'open', 'closed'].includes(arg) ? arg : fbDefault();
   FB_Q.bucket = bucket; // a report opened from here steps through this list
   const [d, set] = await Promise.all([api('/feedback?' + fbQuery(bucket)), api('/feedback/settings')]);
   S.fbc = { ...(S.fbc || {}), ...d.counts };
@@ -13605,7 +13730,7 @@ VIEWS.feedback = async (arg) => {
   const exportParams = () => Object.fromEntries(fbQuery(bucket));
   const ch = fbChips();
   return {
-    t: `${ic('wish')}Feedback <span class="n">${d.counts.new + d.counts.open}</span>`,
+    t: `${ic('wish')}Feedback <span class="n">${d.counts[bucket]}</span>`,
     a: `<button type="button" class="btn sm" id="fbEx">${ic('dl')}Export</button><button type="button" class="btn sm" id="fbSet">${ic('shield')}Settings</button>`,
     pmenu: [...fbExportItems(exportParams()), { label: 'Feedback settings', icon: 'shield', fn: () => openFbSettings(null, set) }],
     b: (set.enabled ? '' : vnote('Feedback is turned off. Agents cannot file or read reports until you turn it on in Settings.'))
@@ -13904,6 +14029,7 @@ document.addEventListener('click', (e) => {
   const c = t.closest('[data-copy]'); if (c) { const v = c.closest('[data-v]'); const once = ONCE && ONCE.el.contains(c) ? ONCE : null; copy(v ? v.dataset.v : c.dataset.copy, () => { if (once && ONCE === once) once.copied = true; }); return; }
   // A Needs you row's one-click actions and dismissals (Home, the Needs you screen, a team or Blueprint page).
   const nyq = t.closest('[data-ny-qdet-btn]'); if (nyq) { nyQDet(nyq); return; }
+  const nyg = t.closest('[data-ny-grp-btn]'); if (nyg) { nyGrpToggle(nyg); return; }
   const nyr = t.closest('[data-ny-reply]'); if (nyr) { nyReply(nyr); return; }
   const nyx = t.closest('[data-ny-reply-x]'); if (nyx) { nyReply(nyx, false); return; }
   const nym = t.closest('[data-ny-more]'); if (nym) { nyMore(nym); return; }
@@ -14035,4 +14161,7 @@ $('#expInfo').innerHTML = info('Which vault folders agents can reach: more keys 
 let th = 'dark'; try { th = localStorage.getItem('ah-theme') || 'dark'; } catch { /* ignore */ }
 setTheme(th);
 muInit();
-api('/me').then(enter, () => showLogin());
+/* Start: ask whether this browser has a live session (public, never refused) before /api/me, so a signed-out start shows the
+   login page without a refused call in the browser's log. If the hub cannot say, /api/me decides as before. */
+const start = () => api('/me').then(enter, () => showLogin());
+fetch('/api/session', { credentials: 'same-origin' }).then((r) => r.json()).then((x) => (x.signed_in ? start() : showLogin()), start);

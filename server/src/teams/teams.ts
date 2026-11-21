@@ -2416,7 +2416,7 @@ export class Teams {
   }
   /** Where and how the recruit's key is picked up, for the coordinator or the operator. Never a key. */
   static pickupText(label: string, p: RecruitPickup): string {
-    return `Its key is not shown anywhere: it waits for pickup on PC "${p.pc.name}" (request ${p.request_id}). On that PC, run \`${p.command}\`. The setup client writes the key into keys.env as ${p.session_var} and builds the folder ${p.folder} beside the team's other folders; then start "${label}" in that folder. It joins the team when the pickup is confirmed.`;
+    return `Its key is not shown anywhere: it waits for pickup on PC "${p.pc.name}" (request ${p.request_id}). The PC's user allows the new agent on the connector's screen within 24 hours; the connector then writes the key into its key file and builds the folder ${p.folder} beside the team's other folders. Start "${label}" in that folder. It joins the team when the pickup is confirmed.`;
   }
   /** team_recruit: in 'auto' the agent exists at once and its key waits for pickup on the coordinator's PC; in 'propose' the administrator decides. */
   recruit(w: Who, a: { team_id: string; label: string; role: string; purpose: string }, via: { machineId: string | null } = { machineId: null }): { status: 'created' | 'pending'; agent_id?: string; request_id?: string; pickup?: RecruitPickup } {

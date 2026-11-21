@@ -23,8 +23,8 @@ describe('delivery state words', () => {
     expect(delivText(turn())).toBe('Not delivered yet');
     expect(delivText(turn({ delivery_reason: 'pc_offline' }))).toBe('Not delivered: waiting for the PC');
     expect(delivText(turn({ delivery_reason: 'chat_in_use' }))).toBe('Not delivered: chat in use');
-    expect(delivText(turn({ delivery_reason: 'wake_held' }))).toBe('Not delivered: wake held on this platform');
-    expect(delivText(turn({ delivery_reason: 'agent_unknown' }))).toBe('Not delivered: no session to wake');
+    expect(delivText(turn({ delivery_reason: 'wake_held' }))).toBe('Not delivered: waking is off for this agent on its PC');
+    expect(delivText(turn({ delivery_reason: 'agent_unknown' }))).toBe('Not delivered: this PC has no folder for the agent');
     expect(delivText(turn({ delivery_reason: 'connector_too_old' }))).toBe('Not delivered: connector too old');
     const at = new Date(); at.setHours(9, 5, 0, 0);
     // An offline PC names since when, in the viewer's clock, and never says "asleep"; a busy woken run names the task it works on.

@@ -54,15 +54,17 @@ export const DEFAULT_LIVE_LOGINS = 100, MAX_LIVE_LOGINS = 500;
 /** A session key keeps the old stored value: the limit is read from the app key, and the column default of 100 is for app keys only. */
 export const SESSION_KEY_LIVE_LOGINS = 20;
 const CRED_COLS = 'id,kind,agent_id,machine_id,app_name,label,key_id,status,status_reason,expires_at,replaces_credential_id,policy_id,max_live_sessions,bound_machine_id,onboarding_enabled_at,succession,session_var,created_at,first_used_at,last_used_at,revoked_at';
-/** How long a key prompt's pickup code works (docs/onboarding.md#key-prompts-a-new-rotated-or-reissued-session-key). */
-/** The keys.env variable names setup.mjs accepts (deploy/client/setup.mjs, keyCmd). */
+/** The status reason of a session key held by a leak rotation that is not confirmed yet (Keys.hold). */
+export const LEAK_HOLD = 'leak_hold';
+/** The variable names a session key may be kept under on its PC (keys.env, and the connector's key file). */
 export const SESSION_VAR_RE = /^[A-Z][A-Z0-9_]{0,63}$/;
-export const KEY_PICKUP_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+/** A key handover's pickup secret: its public key id and the verifier the hub keeps until confirm. */
+export interface StagedSecret { keyId: string; verifier: string }
 export const TOKEN_IDLE_MS = 60 * 60 * 1000;
 /** A turn token lives this long unless the connector renews it (docs/connector.md, "Isolation levels"). */
 export const TURN_TOKEN_MS = 15 * 60 * 1000;
 /** What a notice is about (agent_notices.ref_kind, 0106): its settler says when it stops describing the current state. */
-export type NoticeRefKind = 'task' | 'feedback' | 'directive' | 'directive_stop';
+export type NoticeRefKind = 'task' | 'feedback' | 'directive' | 'directive_stop' | 'checkout';
 /** notify()'s ref: the one shape, or the two older ones (`{task, state}`, `{feedback, rev}`) that callers still pass. */
 export type NoticeRef = { kind: NoticeRefKind; id: string; state?: string | number | null } | { task: string; state: string } | { feedback: string; rev: number };
 /**
@@ -81,6 +83,8 @@ export const NOTICE_SETTLERS: Record<NoticeRefKind, string> = {
   directive: `EXISTS (SELECT 1 FROM directives d JOIN agents ag ON ag.id=n.agent_id WHERE d.id=n.ref_id AND ${inForceSql('d', 'ag')})
     AND NOT EXISTS (SELECT 1 FROM directive_acks a WHERE a.directive_id=n.ref_id AND a.agent_id=n.agent_id AND a.version>=CAST(n.ref_state AS INTEGER))`,
   directive_stop: 'NOT EXISTS (SELECT 1 FROM directive_reads r WHERE r.agent_id=n.agent_id AND r.read_at>n.created_at)',
+  // "Stop taking new work" (checkout_requested) holds only until the move starts: a restored agent never gets it again.
+  checkout: "EXISTS (SELECT 1 FROM checkouts c WHERE c.id=n.ref_id AND c.status IN ('collecting','ready','rendered'))",
 };
 const REF_KINDS = Object.keys(NOTICE_SETTLERS) as NoticeRefKind[];
 /**
@@ -411,11 +415,13 @@ export class Keys {
   setStatus(id: string, status: 'active' | 'suspended' | 'revoked', reason: string | null, actor: Actor): Credential {
     const c = this.credential(id); if (!c) throw new KeyError('not_found', 'key not found');
     if (c.status === 'revoked') throw new KeyError('invalid_state', 'a revoked key cannot change');
+    // A key held by a leak rotation may have leaked: it comes back only as a new key (rotate) or not at all (revoke).
+    if (status === 'active' && this.isHeld(c)) throw new KeyError('invalid_state', 'This key is held because it may have leaked, so it cannot be resumed. Rotate it again to send a new key, or revoke it.');
     tx(this.db, () => {
       this.db.prepare('UPDATE credentials SET status=?, status_reason=?, revoked_at=? WHERE id=?').run(status, reason, status === 'revoked' ? Date.now() : null, id);
       if (status !== 'active') this.revokeTokensFor(id, status);
-      if (status === 'revoked') this.db.prepare("UPDATE key_pickups SET status='void' WHERE credential_id=? AND status='open'").run(id);
-      if (status === 'revoked') this.voidCollections(id, 'revoked');
+      // An open key handover for it (keys/handover.ts) would hand a suspended or revoked key a new secret: it is cancelled.
+      if (status !== 'active') this.handoverCancel?.(id, 'revoked', actor);
       // A checkout successor that is not confirmed yet stands for this key: it goes down with it (docs/checkout.md §5),
       // so a key suspended or revoked after pickup cannot live on as its successor.
       if (status !== 'active' && c.succession === 'superseded_pending') {
@@ -430,6 +436,25 @@ export class Keys {
   }
 
   /**
+   * A leak rotation holds the suspected session key at once (docs/onboarding.md, key handover, "After a possible leak"):
+   * it is suspended with the reason `leak_hold`, so its logins and turn tokens end and none is given again through any PC's
+   * app key. Unlike a suspend it does not cancel the key's handover; confirm still rotates the held key.
+   */
+  hold(id: string, actor: Actor): Credential {
+    const c = this.credential(id); if (!c) throw new KeyError('not_found', 'key not found');
+    if (c.status === 'revoked') throw new KeyError('invalid_state', 'a revoked key cannot change');
+    tx(this.db, () => {
+      this.db.prepare("UPDATE credentials SET status='suspended', status_reason=?, revoked_at=NULL WHERE id=?").run(LEAK_HOLD, id);
+      this.revokeTokensFor(id, 'suspended');
+    });
+    this.onAccessEnded?.({ credential: id });
+    this.audit.event(actor, 'key.hold', { kind: 'credential', id }, { reason: 'suspected_leak' });
+    return this.credential(id)!;
+  }
+  /** Held by a leak rotation that has not been confirmed (hold). */
+  isHeld(c: Credential): boolean { return c.status === 'suspended' && c.status_reason === LEAK_HOLD; }
+
+  /**
    * PC binding (docs/onboarding.md#pc-binding-of-session-keys): a bound session key logs in only through an app key
    * on that PC; null makes it free. Checked at every login, so a change applies to the next one; live logins go on.
    */
@@ -442,10 +467,8 @@ export class Keys {
     if (pc && pc.status === 'retired' && c.bound_machine_id !== machineId) throw new KeyError('invalid_state', 'a key cannot be bound to a retired PC');
     if (c.bound_machine_id === machineId) return c;
     this.db.prepare('UPDATE credentials SET bound_machine_id=? WHERE id=?').run(machineId, id);
-    // An open pickup code names the PC it was made for; after a move it would hand the key to the PC it just left.
-    this.db.prepare("UPDATE key_pickups SET status='void' WHERE credential_id=? AND status='open'").run(id);
-    // So does an open collection: it names the PC and the one app key there that may collect it.
-    this.voidCollections(id, 'binding_changed');
+    // An open key handover names the PC and app key it was made for; after a move it would hand the key to the PC it just left.
+    this.handoverCancel?.(id, 'binding_changed', actor);
     this.audit.event(actor, 'key.binding_set', { kind: 'credential', id }, { from: c.bound_machine_id, to: machineId });
     return this.credential(id)!;
   }
@@ -503,21 +526,22 @@ export class Keys {
    * every token of it ends, and the agent gets a key_rotated notice. A key in an unsettled checkout move (one with a
    * successor, or a successor whose old key is not settled) is refused: rotating it would leave the agent two live keys.
    */
-  rotate(id: string, actor: Actor, why: { reason?: 'routine' | 'suspected_leak' | null; delivery?: 'prompt' | 'collect' } = {}): { credential: Credential; secret: string } {
+  rotate(id: string, actor: Actor, why: { reason?: 'routine' | 'suspected_leak' | 're_enrol' | null; delivery?: 'prompt' | 'handover' | 'shown'; staged?: StagedSecret } = {}): { credential: Credential; secret: string } {
     const old = this.credential(id); if (!old) throw new KeyError('not_found', 'key not found');
     if (old.status === 'revoked') throw new KeyError('invalid_state', 'a revoked key cannot be rotated');
     if (old.succession) throw new KeyError('invalid_state', 'This key has a checkout successor that is not settled. Finish or cancel the checkout first.');
     if (old.replaces_credential_id && this.credential(old.replaces_credential_id)?.succession) throw new KeyError('invalid_state', 'This key is the successor in a checkout that is not settled. Finish or cancel the checkout first.');
     return tx(this.db, () => {
-      const s = this.newSecret(old.kind);
+      // A handover's confirm brings the secret its pickup staged (the hub has only its verifier); otherwise a new one.
+      const fresh = why.staged ? null : this.newSecret(old.kind);
+      const s = why.staged ? { keyId: why.staged.keyId, verifier: why.staged.verifier, full: '' } : { keyId: fresh!.keyId, verifier: this.verifier(fresh!.secret), full: fresh!.full };
       const spare = this.insertPolicy('credential', null, 'released by rotation');
       this.db.prepare("UPDATE credentials SET policy_id=?, status='revoked', status_reason='rotated', revoked_at=? WHERE id=?").run(spare, Date.now(), id);
       this.revokeTokensFor(id, 'rotated');
-      this.db.prepare("UPDATE key_pickups SET status='void' WHERE credential_id=? AND status='open'").run(id);
-      this.voidCollections(id, 'rotated');
+      this.handoverCancel?.(id, 'replaced', actor);
       const nid = newId.credential();
       this.db.prepare(`INSERT INTO credentials(id,kind,agent_id,machine_id,app_name,label,key_id,verifier,status,expires_at,replaces_credential_id,policy_id,max_live_sessions,bound_machine_id,onboarding_enabled_at,session_var,created_at,created_by_admin)
-        VALUES (?,?,?,?,?,?,?,?,'active',?,?,?,?,?,?,?,?,?)`).run(nid, old.kind, old.agent_id, old.machine_id, old.app_name, old.label, s.keyId, this.verifier(s.secret), old.expires_at, id, old.policy_id, old.max_live_sessions, old.bound_machine_id, old.onboarding_enabled_at, old.session_var ?? null, Date.now(), actor.kind === 'admin' ? actor.id : null);
+        VALUES (?,?,?,?,?,?,?,?,'active',?,?,?,?,?,?,?,?,?)`).run(nid, old.kind, old.agent_id, old.machine_id, old.app_name, old.label, s.keyId, s.verifier, old.expires_at, id, old.policy_id, old.max_live_sessions, old.bound_machine_id, old.onboarding_enabled_at, old.session_var ?? null, Date.now(), actor.kind === 'admin' ? actor.id : null);
       this.db.prepare('UPDATE temporary_grants SET credential_id=? WHERE credential_id=?').run(nid, id);
       this.db.prepare("UPDATE access_requests SET credential_id=? WHERE credential_id=? AND status='pending'").run(nid, id);
       // Team membership names the key its team rules live on; left on the old key, the next re-wire would drop them.
@@ -525,7 +549,11 @@ export class Keys {
       // An app key's onboarding requests and enrolment code follow it, so its pickup still counts as the filing key's.
       this.db.prepare('UPDATE onboarding_requests SET app_credential_id=? WHERE app_credential_id=?').run(nid, id);
       this.db.prepare('UPDATE enrolment_codes SET app_credential_id=? WHERE app_credential_id=?').run(nid, id);
-      if (old.agent_id) this.notify(old.agent_id, 'key_rotated', 'Your session key was rotated. Wait for the new key from the administrator, then call session_login with it.');
+      // The connector's report names the app key a handover binds to: the new key takes its place until the next check-in.
+      this.db.prepare('UPDATE connector_reports SET app_credential_id=? WHERE app_credential_id=?').run(nid, id);
+      if (old.agent_id) this.notify(old.agent_id, 'key_rotated', why.delivery === 'handover'
+        ? 'Your session key was rotated. The connector on your PC wrote the new key: start a new chat, or call session_login with it.'
+        : 'Your session key was rotated. Wait for the new key from the administrator, then call session_login with it.');
       this.audit.event(actor, 'key.rotate', { kind: 'credential', id: nid }, { replaces: id, ...(old.kind === 'session_key' ? { reason: why.reason ?? null, delivery: why.delivery ?? 'prompt' } : {}) });
       return { credential: this.credential(nid)!, secret: s.full };
     });
@@ -547,7 +575,7 @@ export class Keys {
     const chain = `WITH RECURSIVE ch(id) AS (SELECT ? UNION SELECT c.replaces_credential_id FROM credentials c JOIN ch ON c.id=ch.id WHERE c.replaces_credential_id IS NOT NULL)`;
     const slot = this.db.prepare(`${chain}
       SELECT s.session_var, s.folder, r.machine_id, r.body FROM onboarding_slots s JOIN onboarding_requests r ON r.id=s.request_id
-      WHERE s.credential_id IN (SELECT id FROM ch) ORDER BY s.created_at DESC LIMIT 1`).get(id) as { session_var: string; folder: string; machine_id: string; body: string } | undefined;
+      WHERE s.credential_id IN (SELECT id FROM ch) AND r.kind<>'rotate' ORDER BY s.created_at DESC LIMIT 1`).get(id) as { session_var: string; folder: string; machine_id: string; body: string } | undefined;
     // The last login says where the agent runs today and through which client; the onboarding slot may be older than a move.
     const last = this.db.prepare(`${chain}
       SELECT a.machine_id, a.app_name FROM session_tokens t JOIN credentials a ON a.id=t.app_credential_id
@@ -577,77 +605,35 @@ export class Keys {
   }
 
   /**
-   * Arm a pickup for a session key: its secret stops working at once (a fresh key id, no usable verifier), any open code of
-   * the key is void, and a new single-use code for that PC is stored as a hash. The key is made at redeemPickup().
+   * A new session-key secret for a key handover's pickup (keys/handover.ts): the full key goes to the PC once, and the hub keeps
+   * only its key id and verifier on the handover's slot until confirm. Nothing changes on the credential here.
    */
-  armPickup(id: string, machineId: string, sessionVar: string, actor: Actor): { code: string; expires_at: number } {
-    return tx(this.db, () => {
-      const c = this.credential(id); if (!c) throw new KeyError('not_found', 'key not found');
-      if (c.kind !== 'session_key' || c.status !== 'active') throw new KeyError('invalid_state', 'only an active session key gets a pickup code');
-      if (!SESSION_VAR_RE.test(sessionVar)) throw new KeyError('invalid_argument', 'the session variable must be 1 to 64 capitals, digits or underscores, starting with a letter');
-      const now = Date.now(), code = `cnv_key_${randomToken(17).slice(0, 26)}`, expires = now + KEY_PICKUP_TTL_MS;
-      this.db.prepare("UPDATE key_pickups SET status='void' WHERE credential_id=? AND status='open'").run(id);
-      this.voidCollections(id, 'prompt_instead');
-      this.blankSecret(id, 'pickup');
-      this.db.prepare('INSERT INTO key_pickups(id,credential_id,machine_id,session_var,code_hash,created_at,expires_at,created_by_admin) VALUES (?,?,?,?,?,?,?,?)')
-        .run(`kpk_${randomToken(10)}`, id, machineId, sessionVar, sha256Hex(code), now, expires, actor.kind === 'admin' ? actor.id : null);
-      this.audit.event(actor, 'key.pickup_armed', { kind: 'credential', id }, { pc: machineId, session_var: sessionVar, expires_at: expires });
-      return { code, expires_at: expires };
-    });
+  stageSecret(): StagedSecret & { full: string } {
+    const s = this.newSecret('session_key');
+    return { keyId: s.keyId, verifier: this.verifier(s.secret), full: s.full };
   }
-
-  /**
-   * Swap a pickup code for its key, through an app key of the code's PC. An unknown code, or one for another PC, is
-   * not_found; a used, void or expired one invalid_state; the key must still be active and, when bound, bound to that PC.
-   * `refuse` may stop it for the key's agent (a lockdown) before the key is made: the code then stays open. Audited without the code or key.
-   */
-  redeemPickup(app: Credential, code: string, refuse?: (agentId: string | null) => string | null): { session_var: string; secret: string; label: string; pc: string; credential_id: string } {
-    return tx(this.db, () => {
-      const p = /^cnv_key_[a-z2-7]{26}$/.test(code) ? this.db.prepare('SELECT * FROM key_pickups WHERE code_hash=?').get(sha256Hex(code)) as { id: string; credential_id: string; machine_id: string; session_var: string; status: string; expires_at: number } | undefined : undefined;
-      if (!p || p.machine_id !== app.machine_id) throw new KeyError('not_found', 'Unknown key pickup code.');
-      const c = this.credential(p.credential_id)!;
-      if (p.status !== 'open') throw new KeyError('invalid_state', p.status === 'used' ? 'This key pickup code was already used.' : 'This key pickup code was replaced. Ask the administrator for a new prompt.');
-      if (p.expires_at <= Date.now()) throw new KeyError('invalid_state', 'This key pickup code has expired. Ask the administrator for a new prompt.');
-      if (c.bound_machine_id && c.bound_machine_id !== p.machine_id) {
-        throw new KeyError('invalid_state', 'This key is now bound to another PC, so this code was replaced. Ask the administrator for a new prompt.');
-      }
-      if (this.effectiveStatus(c) !== 'active') throw new KeyError('invalid_state', `The key is ${this.effectiveStatus(c)}.`);
-      const no = refuse?.(c.agent_id); if (no) throw new KeyError('lockdown', no);
-      const secret = this.issueSessionSecret(c.id);
-      this.db.prepare("UPDATE key_pickups SET status='used', used_at=? WHERE id=?").run(Date.now(), p.id);
-      const pc = this.machine(p.machine_id)!;
-      this.audit.event({ kind: 'system', id: null }, 'key.pickup', { kind: 'credential', id: c.id }, { pc: pc.id, session_var: p.session_var, app_key: app.id });
-      return { session_var: p.session_var, secret, label: c.label, pc: pc.name, credential_id: c.id };
-    });
+  /** A key with no working secret yet (a new key sent by handover) takes the staged one at confirm. Its logins end. */
+  takeStagedSecret(id: string, staged: StagedSecret, reason: string): void {
+    this.db.prepare('UPDATE credentials SET key_id=?, verifier=? WHERE id=?').run(staged.keyId, staged.verifier, id);
+    this.revokeTokensFor(id, reason);
   }
   /** A session key's secret stops working at once: a fresh key id, no usable verifier, and its logins end. */
   blankSecret(id: string, reason: string): void {
     this.db.prepare("UPDATE credentials SET key_id=?, verifier='' WHERE id=?").run(this.newSecret('session_key').keyId, id);
     this.revokeTokensFor(id, reason);
   }
-  /** A new secret for a session key whose secret was blanked (a pickup or a collection): returned once, stored only as its verifier. */
-  issueSessionSecret(id: string): string {
-    const s = this.newSecret('session_key');
-    this.db.prepare('UPDATE credentials SET key_id=?, verifier=? WHERE id=?').run(s.keyId, this.verifier(s.secret), id);
-    return s.full;
-  }
-  /** An open collection of the key (keys/keyCollect.ts) is void: a binding change, a revoke, a rotation or a key prompt instead. */
-  private voidCollections(id: string, outcome: string): void {
-    this.db.prepare("UPDATE key_collections SET status='void', outcome=?, ended_at=? WHERE credential_id=? AND status='open'").run(outcome, Date.now(), id);
+  /** Whether a key has a working secret: a new key sent by handover has none until its confirm. */
+  hasSecret(id: string): boolean {
+    return !!this.db.prepare("SELECT 1 x FROM credentials WHERE id=? AND verifier<>''").get(id);
   }
   /**
-   * Set by the key collections (keys/keyCollect.ts): runs at each login with a valid session key, before the PC binding
-   * check, and refuses a collected key used through any app key but the one it was collected for, on this PC or another.
+   * Set by the key handovers (keys/handover.ts): cancels the open handovers that carry this key when it is revoked,
+   * suspended, re-bound or rotated another way. Runs inside the caller's transaction.
    */
-  collectGuard: ((ses: Credential, app: Credential) => void) | null = null;
+  handoverCancel: ((credentialId: string, reason: 'revoked' | 'binding_changed' | 'replaced', actor: Actor) => void) | null = null;
   /** Vault sync (docs/vault-sync.md): a reader's rules stay read-only whoever edits them, and its key never logs in as a working agent. */
   ruleGuard: ((policyId: string, rules: Omit<Rule, 'id'>[]) => void) | null = null;
   loginGuard: ((credentialId: string) => void) | null = null;
-  /** The open pickup of a key, if any (the console shows its expiry). */
-  openPickup(id: string): { machine_id: string; session_var: string; expires_at: number } | null {
-    return (this.db.prepare("SELECT machine_id, session_var, expires_at FROM key_pickups WHERE credential_id=? AND status='open' AND expires_at>? ORDER BY created_at DESC LIMIT 1").get(id, Date.now()) as { machine_id: string; session_var: string; expires_at: number } | undefined) ?? null;
-  }
-
   /**
    * A checkout's successor key (docs/checkout.md §5). Unlike rotate(), the old key stays active (marked succession
    * 'superseded_pending') and no notice is sent: the new row replaces it, is bound to the target PC in the same transaction (even
@@ -861,7 +847,6 @@ export class Keys {
     const ses = this.verifyKey(sessionKey, 'session_key');
     if (ses.succession === 'suspended') throw new KeyError('suspended', 'this session key was moved by a checkout; its successor is in use');
     this.loginGuard?.(ses.id);
-    this.collectGuard?.(ses, app);
     if (ses.bound_machine_id && ses.bound_machine_id !== app.machine_id) throw new BoundElsewhereError(ses, app);
     const now = Date.now();
     const live = (this.db.prepare('SELECT COUNT(*) n FROM session_tokens WHERE app_credential_id=? AND revoked_at IS NULL AND suspended_at IS NULL AND expires_at>?').get(app.id, now) as { n: number }).n;

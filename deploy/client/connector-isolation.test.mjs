@@ -202,6 +202,7 @@ describe('the upgrade grandfathers unchanged folders, and only those', () => {
   });
 });
 
+const esc = (s) => String(s).replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
 describe('the local screen', () => {
   async function open(home) {
     const s = await startScreen(home, { win: false, io: { reveal() {} } });
@@ -225,7 +226,11 @@ describe('the local screen', () => {
       assert.match(page, /Standard isolation/);
       assert.match(page, /does not stop a determined agent/);
       assert.match(page, /key file is encrypted/);
-      assert.match(page, /work as <b>dev-1<\/b>/);
+      assert.match(page, /Needs you/);
+      assert.ok(page.includes('<span class="hub" title="Text from the hub">dev-1</span>'));
+      assert.ok(page.includes(esc(c)), 'the full folder path is on the row');
+      assert.match(page, /claude/);
+      assert.doesNotMatch(page, /Allow all/);
       assert.match(page, /session keys for the Atlas team/);
       const { folders, pickups } = pendingList(home);
       assert.equal((await post('/allow-folder', { key: folders[0].key })).status, 303);
@@ -243,7 +248,7 @@ describe('the local screen', () => {
     const { s, get, post } = await open(home);
     try {
       let page = await get();
-      assert.ok(page.includes('<b>dev-1</b> <span class="muted">· Standard isolation · wake off'));
+      assert.ok(page.includes('dev-1</span></b> <span class="muted">· Standard isolation · wake off'));
       assert.ok(page.includes('off (default)'));
       assert.equal(wakeEnabled(home, 'dev-1'), false);
       assert.equal((await post('/wake-set', { label: 'dev-1', on: '1' })).status, 303);

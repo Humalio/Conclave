@@ -16,3 +16,7 @@ dist/
 docs/plans/
 eval/out/
 /.claude/
+
+# Vault stress run output (setup.mjs writes session keys here)
+stress-secrets.json
+stress-out/

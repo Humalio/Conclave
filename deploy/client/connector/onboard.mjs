@@ -9,13 +9,13 @@
  * or the PC was closed, and Retry rebuilds one agent without touching the others. Nothing here prints or returns a key.
  */
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync, readFileSync, readdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { readJson, atomicWrite, canonicalFolder, WIN, oneLine } from './paths.mjs';
 import { readKeyFile, putAgentKey, LABEL_RE } from './keyfile.mjs';
-import { pickupApproved, requestPickup, spendPickup } from './approvals.mjs';
+import { pickupApproved, requestPickup, spendPickup, pickupDenied, allowWithPickup } from './approvals.mjs';
 import { connect, request } from './hubclient.mjs';
 import { registerFolder } from './register.mjs';
 import { record } from './manifest.mjs';
@@ -32,9 +32,12 @@ const isCodex = (client) => /codex/i.test(String(client ?? ''));
 
 /** What a person reads for each state of an agent. */
 export const AGENT_STATES = {
-  waiting_for_approval: 'Waiting for approval',
+  waiting_for_approval: 'Waiting for your administrator',
+  waiting_for_allow: 'Waiting for your Allow',
+  picking_up: 'Picking up keys',
   ready_to_open: 'Ready to open',
   connected: 'Connected',
+  key_refused: 'Key refused by the hub',
   failed: 'Setup failed',
 };
 export const DESKTOP_LINE = 'In Claude Desktop, start a new Code session in this folder; the chat shows under that folder.';
@@ -94,6 +97,22 @@ export async function fileRequest(home, hubKey, body, { check = false, root } = 
   return { ok: true, request_id: res.request_id, state: res.state, summary: summary(body) };
 }
 
+/**
+ * `conclave setup withdraw`: withdraws this PC's request for this hub, so a new one can be filed. That includes a request
+ * an earlier Re-enrol reopened for a new pickup, which setup could not finish (docs/onboarding.md, Re-enrol): agents that
+ * already joined their team stay. Answers `{ok, request_id?, state?, reason?}`; `reason` is `no_request` when there is none.
+ */
+export async function withdrawRequest(home, hubKey) {
+  const s = loadSetup(home, hubIdOf(home, hubKey));
+  if (!s.request) return { ok: false, reason: 'no_request' };
+  if (['denied', 'withdrawn', 'cancelled'].includes(s.request.state)) return { ok: true, request_id: s.request.id, state: s.request.state, already: true };
+  const st = await call(home, hubKey, 'POST', `/onboard/requests/${encodeURIComponent(s.request.id)}/withdraw`, {});
+  s.request.state = st.state ?? 'withdrawn'; s.request.version = st.version ?? s.request.version;
+  delete s.pickup_id; delete s.confirmed;
+  save(home, s);
+  return { ok: true, request_id: s.request.id, state: s.request.state };
+}
+
 // ───────────── one step of setup ─────────────
 
 const folderOf = (s, a) => resolve(s.request.root, safeSeg(s.request.project ?? (s.request.kind === 'vault_agent' ? 'vault-agents' : 'project')), safeSeg(a.folder));
@@ -115,6 +134,8 @@ function localLabel(a, taken) {
  */
 export function buildAgent(home, s, a, { claudeJson, node, connector, win = WIN, gitBin } = {}) {
   const dir = folderOf(s, a);
+  // Only a folder that is new or empty when built is allowed with the pickup; one that already holds files waits for its own click.
+  const fresh = !existsSync(dir) || readdirSync(dir).length === 0;
   mkdirSync(dir, { recursive: true });
   const { section } = hubOf(home, s.hub_key);
   const codex = isCodex(a.client ?? s.request.client);
@@ -124,7 +145,7 @@ export function buildAgent(home, s, a, { claudeJson, node, connector, win = WIN,
     if (st === 'old') throw new Error(`This folder holds an ${OVERRIDE} from the old Codex setup. Run conclave migrate (it replaces it), then Retry.`);
     if (st === 'unmarked') throw new Error(`This folder holds an ${OVERRIDE} that Conclave did not write, and setup never overwrites it. Move it away, then Retry.`);
   }
-  const reg = registerFolder(home, dir, { hubId: section.hub_id, caSha256: section.ca_sha256, agent: a.label, claudeJson, node, connector, win, provider: codex ? 'codex' : null, team: s.request.team_id ? { id: s.request.team_id, name: s.request.team_name } : null });
+  const reg = registerFolder(home, dir, { hubId: section.hub_id, caSha256: section.ca_sha256, agent: a.label, agentId: a.agent_id, claudeJson, node, connector, win, provider: codex ? 'codex' : null, team: s.request.team_id ? { id: s.request.team_id, name: s.request.team_name } : null });
   const folder = reg.folder, cx = { home, claudeJson, folders: [folder] };
   const md = join(folder, 'CLAUDE.md');
   if (!codex && !existsSync(md) && a.instructions) {
@@ -159,6 +180,8 @@ export function buildAgent(home, s, a, { claudeJson, node, connector, win = WIN,
   if (codex) writeOverride(home, folder, a.instructions ?? '', cx);
   // Last, after every write above (CLAUDE.md included): the folder's settings as they now are, so `conclave check` sees no change.
   rerecord(home, folder);
+  // Last of all, after the registry entry and the settings are final: the pickup the PC user allowed also allows the first chat here.
+  if (fresh && s.pickup_id) allowWithPickup(home, folder, { agent: a.label, agent_id: a.agent_id, hub_id: section.hub_id, ref: s.pickup_id });
   return folder;
 }
 
@@ -176,13 +199,14 @@ export async function advance(home, hubKey, { waitS = 0, claudeJson, node, conne
     s.request.state = st.state; s.request.version = st.version; s.request.team_name = st.team_name ?? s.request.team_name;
     if (st.project) s.request.project = typeof st.project === 'string' ? st.project : st.project.name ?? s.request.project;
     save(home, s);
-    if (st.state === 'submitted') return { phase: 'waiting', filed_at: st.filed_at ?? null };
+    if (st.state === 'submitted') return { phase: 'waiting', stage: 'admin', filed_at: st.filed_at ?? null };
     if (st.state === 'needs_changes') return { phase: 'changes', note: st.operator_note ?? null };
     if (['denied', 'withdrawn', 'cancelled'].includes(st.state)) return { phase: 'closed', state: st.state, note: st.operator_note ?? null };
     if (st.state === 'collected' && !s.pickup_id) throw new SetupError('collected_elsewhere', 'The hub says these keys were already collected, but not by this PC\'s setup. Ask the administrator to re-enrol this PC.');
     if (st.state === 'approved' && (!s.pickup_id || s.keys_written_for !== s.pickup_id)) {
       // At the standard level a pickup hands over session keys, and the platform store opens for any process of this user: the PC's user clicks first.
-      if (!pickupApproved(home, hubKey, s.request.id)) { requestPickup(home, hubKey, s.request.id, `session keys for the approved team request ${s.request.team_name ?? s.request.id}`); return { phase: 'waiting', pickup_click: true }; }
+      if (!pickupApproved(home, hubKey, s.request.id) && pickupDenied(home, hubKey, s.request.id)) return { phase: 'waiting', stage: 'allow', declined: true, note: 'Declined on this PC. The PC user can still allow it on the connector screen.' };
+      if (!pickupApproved(home, hubKey, s.request.id)) { requestPickup(home, hubKey, s.request.id, `session keys for the approved team request ${s.request.team_name ?? s.request.id}`, (st.agents ?? []).map((x) => ({ agent: x.label ?? x.folder, path: folderOf(s, x) }))); return { phase: 'waiting', stage: 'allow', pickup_click: true }; }
       const { section } = hubOf(home, hubKey);
       const taken = new Set(Object.keys(section.agents ?? {}));
       const p = await call(home, hubKey, 'POST', '/onboard/pickup', { request_id: s.request.id });
@@ -250,25 +274,31 @@ export function openWays(dir, a, team, win = WIN) {
 }
 
 /**
- * The agents' rows: each with its state (Waiting for approval, Ready to open, Connected, or Setup failed with the reason
- * and Retry), and the ways to open it. Connected comes from the hub (`/connector/v1/setup`), the rest from this PC.
+ * The agents' rows: each with its state (Waiting for approval, Ready to open, Connected, Key refused by the hub, or Setup
+ * failed with the reason and Retry), and the ways to open it. Connected and Key refused come from the hub
+ * (`/connector/v1/setup`), the rest from this PC. With no answer from the hub, no agent is shown as Connected.
  */
 export async function agentRows(home, hubKey, { win = WIN, env = process.env } = {}) {
   const s = loadSetup(home, hubIdOf(home, hubKey));
   let tl = null;
-  try { tl = await call(home, hubKey, 'GET', '/connector/v1/setup'); } catch { tl = null; }
+  let hub = null;
+  try { tl = await call(home, hubKey, 'GET', '/connector/v1/setup'); } catch (e) { tl = null; hub = e.status === 401 || e.status === 403 ? 'key_refused' : 'unreachable'; }
   const hubAgents = new Map((tl?.agents ?? []).filter((x) => x.agent_id).map((x) => [x.agent_id, x]));
   const git = gitState(home, { env, win, codex: isCodex(s.request?.client) });
   if (!s.agents.length) {
-    return { request: s.request, steps: tl?.steps ?? [], git, agents: (tl?.agents ?? []).map((x) => ({ label: x.label, state: x.state, text: AGENT_STATES[x.state] ?? x.state })) };
+    // Until the keys are written an agent is not "ready to open", whatever the hub says: it waits for the administrator, for this PC's Allow, or for the pickup.
+    const early = !!s.request && !s.confirmed;
+    const approved = early && s.request.state === 'approved';
+    const local = (x) => (!early || x.state === 'connected' || x.state === 'failed' || x.state === 'key_refused' ? x.state : !approved ? 'waiting_for_approval' : pickupApproved(home, hubKey, s.request.id) ? 'picking_up' : 'waiting_for_allow');
+    return { request: s.request, steps: tl?.steps ?? [], reachable: tl !== null, git, hub, agents: (tl?.agents ?? []).map((x) => { const st = local(x); return { label: x.label, state: st, text: AGENT_STATES[st] ?? st }; }) };
   }
   const agents = s.agents.map((a) => {
     const h = hubAgents.get(a.agent_id);
-    const state = !a.built ? (s.pickup_id ? 'failed' : 'waiting_for_approval') : h?.state === 'connected' ? 'connected' : 'ready_to_open';
+    const state = !a.built ? (s.pickup_id ? 'failed' : 'waiting_for_approval') : h?.state === 'key_refused' ? 'key_refused' : h?.state === 'connected' ? 'connected' : 'ready_to_open';
     const dir = a.dir ?? folderOf(s, a);
     return { label: a.label, role: a.role, team_role: a.team_role, state, text: AGENT_STATES[state], error: state === 'failed' ? a.error : null, folder: dir, open: a.built ? openWays(dir, a, s.request?.team_name, win) : null, codex: isCodex(a.client) };
   });
-  return { request: s.request, steps: tl?.steps ?? [], git, agents };
+  return { request: s.request, steps: tl?.steps ?? [], reachable: tl !== null, git, hub, agents };
 }
 
 /** Whether a Continue setup is waiting for this hub (a request filed and not finished). */
@@ -277,4 +307,4 @@ export function pending(home, hubId) {
   return !!s.request && !['denied', 'withdrawn', 'cancelled'].includes(s.request.state) && (!s.confirmed || s.agents.some((a) => !a.built));
 }
 
-export { SetupError, canonicalFolder };
+export { SetupError, canonicalFolder, call as hubCall, localLabel };

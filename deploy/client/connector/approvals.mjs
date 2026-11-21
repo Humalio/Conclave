@@ -14,7 +14,7 @@ import { join } from 'node:path';
 import { existsSync } from 'node:fs';
 import { keyFilePath } from './keyfile.mjs';
 import { readJson, atomicWrite, pathKey, canonicalFolder, folderIdentity } from './paths.mjs';
-import { allBindings, configHash, registryPath } from './registry.mjs';
+import { allBindings, configHash, registryPath, resolveFolder } from './registry.mjs';
 
 export const approvalsPath = (home) => join(home, 'approvals.json');
 export const pendingPath = (home) => join(home, 'pending.json');
@@ -26,38 +26,107 @@ export const PENDING_MS = 24 * 3600_000;
 /** True if this folder, as bound now (same agent, hub and filesystem identity), was allowed by the PC's user. */
 export function folderApproved(home, folder, binding) {
   const a = load(approvalsPath(home)).folders[pathKey(folder)];
-  return !!a && a.agent === binding.agent && a.hub_id === binding.hub_id && a.identity === (binding.identity ?? null);
+  if (!a || a.agent !== binding.agent || a.hub_id !== binding.hub_id || a.identity !== (binding.identity ?? null)) return false;
+  // An allowance that came with a pickup holds only while the folder's settings are as they were built.
+  if (a.by === 'pickup' && a.config_sha256 && configHash(canonicalFolder(folder) ?? folder) !== a.config_sha256) return false;
+  return true;
 }
 
 /** Records that a folder's chat waits for a click. Idempotent. */
 export function requestFolder(home, folder, binding) {
   const p = load(pendingPath(home));
   const k = pathKey(folder);
-  p.folders[k] = { folder, agent: binding.agent, hub_id: binding.hub_id, identity: binding.identity ?? null, at: p.folders[k]?.at ?? Date.now() };
+  // The row on the connector's screen shows which program asks, how long ago, and whether the folder's settings changed since it was registered.
+  p.folders[k] = { folder, agent: binding.agent, hub_id: binding.hub_id, identity: binding.identity ?? null, program: binding.provider === 'codex' ? 'codex' : 'claude', config_sha256: binding.config_sha256 ?? null, at: p.folders[k]?.at ?? Date.now() };
   atomicWrite(pendingPath(home), JSON.stringify(p, null, 2) + '\n');
 }
 
-/** What waits for a click now: `{folders: [{key, folder, agent, hub_id}], pickups: [{key, hub_key, request, what}]}`. */
+/** A deny is remembered for this long: the chat is told it was not allowed, and its row stays under "Denied" (where it can still be allowed). */
+export const DENY_MS = 10 * 60_000;
+const denied = (p) => (p.denied && typeof p.denied === 'object' ? p.denied : (p.denied = {}));
+const live = (d, now) => !!d && now - d.denied_at < DENY_MS;
+/** True if a folder's chat was denied within the last ten minutes (it is not asked about again until then). */
+export function folderDenied(home, folder, now = Date.now()) {
+  return live(denied(load(pendingPath(home)))[`f|${pathKey(folder)}`], now);
+}
+/** True if a key pickup (one request on one hub) was denied within the last ten minutes. */
+export function pickupDenied(home, hubKey, requestId, now = Date.now()) {
+  return live(denied(load(pendingPath(home)))[`p|${pickupKey(hubKey, requestId)}`], now);
+}
+
+/** True if the folder's settings differ from what was recorded when it was registered (or were held then). Unknown is not a warning. */
+function settingsChanged(w) {
+  if (!w.config_sha256) return false;
+  if (w.config_sha256 === 'held') return true;
+  const canon = canonicalFolder(w.folder);
+  return !!canon && configHash(canon) !== w.config_sha256;
+}
+const folderRow = (key, v) => ({ key, folder: v.folder, agent: v.agent, hub_id: v.hub_id, program: v.program ?? 'claude', at: v.at, config_changed: settingsChanged(v) });
+const pickupRow = (key, v) => ({ key, hub_key: v.hub_key, request: v.request, what: v.what, folders: v.folders ?? [], at: v.at });
+
+/**
+ * What waits for a click now, and what was denied in the last ten minutes:
+ * `{folders: [{key, folder, agent, hub_id, program, at, config_changed}], pickups: [{key, hub_key, request, what, at}], denied: [{kind, key, denied_at, ...the same fields}]}`.
+ */
 export function pendingList(home, now = Date.now()) {
   const p = load(pendingPath(home));
   return {
-    folders: Object.entries(p.folders).filter(([, v]) => now - v.at < PENDING_MS).map(([key, v]) => ({ key, folder: v.folder, agent: v.agent, hub_id: v.hub_id })),
-    pickups: Object.entries(p.pickups).filter(([, v]) => now - v.at < PENDING_MS).map(([key, v]) => ({ key, hub_key: v.hub_key, request: v.request, what: v.what })),
+    folders: Object.entries(p.folders).filter(([, v]) => now - v.at < PENDING_MS).map(([key, v]) => folderRow(key, v)),
+    pickups: Object.entries(p.pickups).filter(([, v]) => now - v.at < PENDING_MS).map(([key, v]) => pickupRow(key, v)),
+    denied: Object.values(denied(p)).filter((v) => live(v, now)).map((v) => (v.kind === 'pickup' ? { kind: 'pickup', ...pickupRow(v.key, v), denied_at: v.denied_at } : { kind: 'folder', ...folderRow(v.key, v), denied_at: v.denied_at })).sort((x, y) => y.denied_at - x.denied_at),
   };
 }
 
-/** The PC user's click on a waiting folder. Returns whether it was waiting (and is now allowed). */
+/** The PC user's click on a waiting (or just denied) folder. Returns whether it was waiting (and is now allowed). */
 export function approveFolder(home, key) {
-  const p = load(pendingPath(home)), w = p.folders[key];
+  const p = load(pendingPath(home)), d = denied(p), w = p.folders[key] ?? (d[`f|${key}`]?.kind === 'folder' ? d[`f|${key}`] : null);
   if (!w) return false;
   const canon = canonicalFolder(w.folder);
   if (!canon || pathKey(canon) !== key || folderIdentity(canon) !== w.identity && w.identity !== null) return false;
   const a = load(approvalsPath(home));
   a.folders[key] = { agent: w.agent, hub_id: w.hub_id, identity: w.identity, approved_at: Date.now() };
-  delete p.folders[key];
+  delete p.folders[key]; delete d[`f|${key}`];
   atomicWrite(approvalsPath(home), JSON.stringify(a, null, 2) + '\n');
   atomicWrite(pendingPath(home), JSON.stringify(p, null, 2) + '\n');
   return true;
+}
+
+/**
+ * The PC user's Deny on a waiting folder. The chat is told it was not allowed (broker, reason `denied`), the row moves to the
+ * "Denied" list for ten minutes, and the hub gets one audit entry (unreportedDenials). Returns whether it was waiting.
+ */
+export function denyFolder(home, key) {
+  const p = load(pendingPath(home)), w = p.folders[key];
+  if (!w) return false;
+  delete p.folders[key];
+  denied(p)[`f|${key}`] = { ...w, kind: 'folder', key, denied_at: Date.now(), reported: false };
+  atomicWrite(pendingPath(home), JSON.stringify(p, null, 2) + '\n');
+  return true;
+}
+/** Deny on a waiting key pickup: it is not made, and the hub is told it was declined on this PC. */
+export function denyPickup(home, key) {
+  const p = load(pendingPath(home)), w = p.pickups[key];
+  if (!w) return false;
+  delete p.pickups[key];
+  denied(p)[`p|${key}`] = { ...w, kind: 'pickup', key, denied_at: Date.now(), reported: false };
+  atomicWrite(pendingPath(home), JSON.stringify(p, null, 2) + '\n');
+  return true;
+}
+/** Denials the hub has not been told about: `[{id, kind, agent?, hub_id?, hub_key?, request?}]`. Kept (and tried again) until markDenialsReported. */
+export function unreportedDenials(home) {
+  return Object.entries(denied(load(pendingPath(home)))).filter(([, v]) => v.reported === false).map(([id, v]) => (v.kind === 'pickup' ? { id, kind: 'pickup', hub_key: v.hub_key, request: v.request } : { id, kind: 'folder', agent: v.agent, hub_id: v.hub_id }));
+}
+export function markDenialsReported(home, ids) {
+  const p = load(pendingPath(home)), d = denied(p);
+  for (const id of ids) if (d[id]) d[id].reported = true;
+  atomicWrite(pendingPath(home), JSON.stringify(p, null, 2) + '\n');
+}
+/** Forgets what is older than the deny memory (and was reported). */
+export function pruneDenied(home, now = Date.now()) {
+  const p = load(pendingPath(home)), d = denied(p);
+  let n = 0;
+  for (const [k, v] of Object.entries(d)) if (!live(v, now) && v.reported !== false) { delete d[k]; n++; }
+  if (n) atomicWrite(pendingPath(home), JSON.stringify(p, null, 2) + '\n');
 }
 
 /** The connector's own launcher starts a run it knows (the wake): it allows that folder without a click, because nothing self-asserted is involved. */
@@ -105,6 +174,36 @@ export function markAudited(home, keys) {
   atomicWrite(approvalsPath(home), JSON.stringify(a, null, 2) + '\n');
 }
 
+/**
+ * A folder the connector itself built and registered inside a key pickup or restore the PC user allowed counts as allowed for that agent on
+ * that hub: nothing self-asserted is involved (the same reason a run the connector starts needs no click). Called only after the folder is
+ * fully built and its registry entry saved; it records the folder's settings hash and identity as they are now, so a later change waits for
+ * a click (folderApproved). Returns whether it was recorded; a folder that is not bound to this agent and hub, or whose settings are held, is not.
+ * One audit entry on the hub, under its own name (unauditedPickupAllowed, markPickupAudited).
+ */
+export function allowWithPickup(home, folder, { agent, agent_id = null, hub_id, ref }) {
+  const canon = canonicalFolder(folder);
+  if (!canon || !agent || !hub_id) return false;
+  let r;
+  try { r = resolveFolder(home, canon); } catch { return false; }
+  if (!r?.ok || r.binding.agent !== agent || r.binding.hub_id !== hub_id) return false;
+  const hash = configHash(canon);
+  if (!hash || r.binding.config_sha256 === 'held') return false;
+  const a = load(approvalsPath(home));
+  a.folders[pathKey(canon)] = { agent, hub_id, identity: folderIdentity(canon), config_sha256: hash, approved_at: Date.now(), by: 'pickup', ref: String(ref ?? '').slice(0, 100), agent_id, audited: false };
+  atomicWrite(approvalsPath(home), JSON.stringify(a, null, 2) + '\n');
+  return true;
+}
+/** Allowances that came with a pickup whose audit entry the hub has not confirmed: `[{key, agent_id, ref}]`. */
+export function unauditedPickupAllowed(home, hubId) {
+  return Object.entries(load(approvalsPath(home)).folders).filter(([, v]) => v.by === 'pickup' && v.audited === false && v.hub_id === hubId && v.agent_id).map(([key, v]) => ({ key, agent_id: v.agent_id, ref: v.ref }));
+}
+export function markPickupAudited(home, keys) {
+  const a = load(approvalsPath(home));
+  for (const k of keys) if (a.folders[k]?.by === 'pickup') a.folders[k].audited = true;
+  atomicWrite(approvalsPath(home), JSON.stringify(a, null, 2) + '\n');
+}
+
 /** Withdraws an allowance (a folder that was unregistered, or an agent moved to another folder). */
 export function revokeFolder(home, folder) {
   const a = load(approvalsPath(home)), k = pathKey(folder);
@@ -118,17 +217,19 @@ const pickupKey = (hubKey, requestId) => `${hubKey}|${requestId}`;
 /** True once the PC user allowed this key pickup (one request on one hub). */
 export const pickupApproved = (home, hubKey, requestId) => !!load(approvalsPath(home)).pickups[pickupKey(hubKey, requestId)];
 /** Records that a pickup waits for a click. `what` says in plain words what is being picked up. */
-export function requestPickup(home, hubKey, requestId, what) {
+export function requestPickup(home, hubKey, requestId, what, folders = []) {
   const p = load(pendingPath(home)), k = pickupKey(hubKey, requestId);
-  p.pickups[k] = { hub_key: hubKey, request: requestId, what: String(what).slice(0, 120), at: p.pickups[k]?.at ?? Date.now() };
+  // `folders`: the agent folders this pickup builds, shown before the click: the click also allows the first chat in each.
+  const list = (Array.isArray(folders) ? folders : []).slice(0, 50).map((f) => ({ agent: String(f.agent ?? '').slice(0, 100), path: String(f.path ?? '').slice(0, 400) }));
+  p.pickups[k] = { hub_key: hubKey, request: requestId, what: String(what).slice(0, 120), folders: list, at: p.pickups[k]?.at ?? Date.now() };
   atomicWrite(pendingPath(home), JSON.stringify(p, null, 2) + '\n');
 }
 export function approvePickup(home, key) {
-  const p = load(pendingPath(home)), w = p.pickups[key];
+  const p = load(pendingPath(home)), d = denied(p), w = p.pickups[key] ?? (d[`p|${key}`]?.kind === 'pickup' ? d[`p|${key}`] : null);
   if (!w) return false;
   const a = load(approvalsPath(home));
   a.pickups[key] = { approved_at: Date.now() };
-  delete p.pickups[key];
+  delete p.pickups[key]; delete d[`p|${key}`];
   atomicWrite(approvalsPath(home), JSON.stringify(a, null, 2) + '\n');
   atomicWrite(pendingPath(home), JSON.stringify(p, null, 2) + '\n');
   return true;
@@ -139,4 +240,11 @@ export function spendPickup(home, hubKey, requestId) {
   if (!a.pickups[k]) return;
   delete a.pickups[k];
   atomicWrite(approvalsPath(home), JSON.stringify(a, null, 2) + '\n');
+}
+/** A pickup the hub no longer lists (cancelled, expired, skipped): its click and any waiting request go, so the click cannot be reused. */
+export function dropPickup(home, hubKey, requestId) {
+  const k = pickupKey(hubKey, requestId);
+  const a = load(approvalsPath(home)), p = load(pendingPath(home));
+  if (a.pickups[k]) { delete a.pickups[k]; atomicWrite(approvalsPath(home), JSON.stringify(a, null, 2) + '\n'); }
+  if (p.pickups[k]) { delete p.pickups[k]; atomicWrite(pendingPath(home), JSON.stringify(p, null, 2) + '\n'); }
 }

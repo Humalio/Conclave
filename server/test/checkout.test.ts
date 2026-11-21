@@ -88,6 +88,16 @@ describe('start', () => {
     expect(auditOf('checkout.start', v.id)).toHaveLength(1);
     expect(app.teams.team(t.id)!.status).toBe('running'); // the pause comes at ready, not at start (F5)
   });
+  it('the "stop taking new work" notice is current until the move starts and never reaches a restored agent', () => {
+    const t = team(1);
+    const v = app.checkouts.start(t.id, admin);
+    const a = t.all[0]!;
+    const cur = () => app.keys.recentNotices(a).find((n) => n.kind === 'checkout_requested')!.current;
+    expect(cur()).toBe(1);
+    app.db.prepare("UPDATE checkouts SET status='rendered' WHERE id=?").run(v.id);
+    expect(cur()).toBe(1);
+    for (const st of ['restoring', 'restored', 'cancelled']) { app.db.prepare('UPDATE checkouts SET status=? WHERE id=?').run(st, v.id); expect(cur(), st).toBe(0); }
+  });
   it('refuses a second open checkout for the team, and a team that is not running or paused', () => {
     const t = team();
     app.checkouts.start(t.id, admin);

@@ -265,8 +265,8 @@ export function summary(r) {
   }
   lines.push(`Project: ${r.project?.name} (${r.project?.existing ? 'existing' : 'new'}${r.project?.kind ? `, ${r.project.kind}` : ''})`);
   if ((r.kind ?? 'new_team') === 'new_team') {
-    const s = r.source, from = { existing: `an existing source: ${s?.ref}`, coordinator: 'the coordinator derives them', operator: 'you supply them later' }[s?.from];
-    lines.push(from ? `Requirements or brief come from ${from}.` : 'Warning: the request does not say where the requirements or the brief come from. Ask the user, and set `source`.');
+    const s = r.source, from = { existing: `The requirements or the brief come from an existing source: ${s?.ref}.`, coordinator: 'The coordinator derives the requirements or the brief.', operator: 'You supply the requirements or the brief later.' }[s?.from];
+    lines.push(from || 'Warning: the request does not say where the requirements or the brief come from. Ask the user, and set `source`.');
     lines.push(r.project?.more_teams ? 'More teams will join: this team gets its own Blueprint part.' : "One team for now: the project's whole Blueprint stays at project level.");
   }
   lines.push((r.kind ?? 'new_team') === 'add_agents' ? `Add agents to team ${r.team?.id}` : `Team: ${r.team?.name} · ${r.team?.delivery_mode ?? 'on_demand'}`);

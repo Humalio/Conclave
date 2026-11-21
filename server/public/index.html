@@ -105,7 +105,7 @@
     <span class="clock"><span class="dot pulse" id="liveDot"></span><span id="clock">--:--:--</span></span>
     <button class="btn bad lk hide-m" id="lk" data-go="lock" aria-label="Lockdown"><svg class="i"><use href="#i-lock"/></svg>Lockdown</button>
     <button class="btn join hide-m" id="joinBtn" aria-label="Add" title="Add: a new PC or a team"><svg class="i"><use href="#i-plus"/></svg>Add</button>
-    <button class="btn warn enrol hide-m" id="enrol2fa" data-go="account" hidden title="Your admin login has no second factor"><svg class="i"><use href="#i-shield"/></svg>Enrol 2FA</button>
+    <button class="btn warn enrol hide-m" id="enrol2fa" data-go="account" hidden title="Your admin login has no second factor. Set up 2FA in Account."><svg class="i"><use href="#i-warn"/></svg>No 2FA</button>
     <button class="ibtn show-m" id="moreBtn" aria-label="More" aria-haspopup="dialog"><svg class="i"><use href="#i-more"/></svg><i class="amb" id="moreDot" hidden></i></button>
   </header>
 
@@ -140,7 +140,6 @@
       <button data-go="users"><svg class="i"><use href="#i-user"/></svg>Users</button>
       <button data-go="req"><svg class="i"><use href="#i-clock"/></svg>Requests<i class="bdg" data-request-badge hidden></i></button>
       <button data-go="shares"><svg class="i"><use href="#i-link"/></svg>Shares</button>
-      <button data-go="reset"><svg class="i"><use href="#i-rot"/></svg>Reset</button>
       <button data-go="relays"><svg class="i"><use href="#i-pc"/></svg>Relays</button>
     </nav>
     <button type="button" class="btn sm ws-grant" data-sec-new aria-haspopup="true"><svg class="i"><use href="#i-plus"/></svg>New<svg class="i"><use href="#i-cdown"/></svg></button>
@@ -153,7 +152,6 @@
       <button type="button" role="tab" data-go="req">Requests<i class="bdg" data-request-badge hidden></i></button>
       <button type="button" role="tab" data-go="shares">Shares</button>
       <button type="button" role="tab" data-go="grant">Agent access</button>
-      <button type="button" role="tab" data-go="reset">Reset</button>
     </nav>
   </section>
   <section class="workspace-bar" id="vaultBar" aria-labelledby="vaultTitle" hidden>

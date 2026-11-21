@@ -154,7 +154,10 @@ export async function install({ embed = EMBED, from, home, service = true, scree
     const s = spawnSync(process.execPath, [launcher, 'service', 'install'], { env, stdio: 'inherit' });
     if (s.status !== 0) out('The logon service could not be installed; run `conclave service install` later. The connector works without it until then.');
   }
-  if (screen) spawnSync(process.execPath, [launcher, 'setup', ...(browser ? [] : ['--no-browser'])], { env, stdio: 'inherit' });
+  // A PC with no display has no browser: the screen would wait for one for an hour. Say how to open it and finish (exit 0).
+  const headless = process.platform === 'linux' && !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY;
+  if (screen && headless) out('This PC has no browser or display. Run `conclave setup` when you can open a browser on this PC (or on a machine that reaches it); it prints the link.');
+  else if (screen) spawnSync(process.execPath, [launcher, 'setup', ...(browser ? [] : ['--no-browser'])], { env, stdio: 'inherit' });
   return { ok: true, version: c.manifest.version, keyId: c.keyId, home };
 }
 

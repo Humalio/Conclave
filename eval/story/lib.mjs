@@ -167,9 +167,11 @@ export class Admin {
 export class Onboard {
   constructor(base, rec) { this.base = assertLocal(base); this.rec = rec; }
   async call(method, path, key, body) {
-    const res = await fetch(`${this.base}/onboard${path}`, { method, headers: { 'content-type': 'application/json', ...(key ? { authorization: `Bearer ${key}` } : {}) }, body: body === undefined ? undefined : JSON.stringify(body) });
+    // The connector routes (/connector/v1/...) sit beside the onboarding ones and take the same app key.
+    const url = path.startsWith('/connector/') ? path : `/onboard${path}`;
+    const res = await fetch(`${this.base}${url}`, { method, headers: { 'content-type': 'application/json', ...(key ? { authorization: `Bearer ${key}` } : {}) }, body: body === undefined ? undefined : JSON.stringify(body) });
     const json = await res.json().catch(() => ({}));
-    this.rec?.admin(method, `/onboard${path}`, res.status);
+    this.rec?.admin(method, url, res.status);
     return { status: res.status, json };
   }
   async ok(method, path, key, body) {

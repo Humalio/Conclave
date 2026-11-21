@@ -923,7 +923,7 @@ Known: ${known.id} – operator guidance (L0): ${known.guidance}`; extra = { ...
     checkoutSteps: deps.checkouts ? (teamId, agentId) => { const c = deps.checkouts!.openFor(teamId); return c ? `Checkout ${c.id} is ${c.status}: the administrator is moving this team. Call checkout_status. ${RECONNECT_HINT}\nCheckpoint steps (L0):\n${deps.checkouts!.stepsFor(c, agentId)}` : null; } : undefined });
   if (deps.checkouts) registerCheckoutTools(reg, { checkouts: deps.checkouts, ToolError });
   registerBlueprintTools(reg, { blueprint: deps.blueprint, teams: deps.teams, ToolError, messageBudget: charge, lockdown: deps.lockdown, sources: new Sources(db, vault), ownerScope: deps.ownerScope });
-  registerFileWriteTools(reg, { store: deps.store, vault, keys, teams: deps.teams, ToolError, ownerScope: deps.ownerScope, hint: (agentId, rel) => deps.graph.ext.editorHint(agentId, deps.store.fileByPath(rel)?.id) });
+  registerFileWriteTools(reg, { store: deps.store, vault, keys, teams: deps.teams, ToolError, audit, ownerScope: deps.ownerScope, hint: (agentId, rel) => deps.graph.ext.editorHint(agentId, deps.store.fileByPath(rel)?.id) });
   registerShareTools(reg, { db, shares: deps.shares, channels: deps.channels, store: deps.store, vault, keys, teams: deps.teams, msgr, ToolError, ownerScope: deps.ownerScope });
   registerGraphTools(reg, { graph: deps.graph, vault, store: deps.store, teams: deps.teams, ToolError });
   /** The canonical link if this session may read it now (a task of its team, a share it may read, a vault path it may read), else null. */

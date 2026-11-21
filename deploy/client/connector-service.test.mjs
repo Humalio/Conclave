@@ -17,7 +17,8 @@ import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { verifyManifest, packBundle, unpackBundle, releaseNames, keyIdOf, rolloverText, sha256, compareVersions, MANIFEST_FORMAT, platformId, loadTrust } from './connector/release.mjs';
-import { readBuilds, installVerified, activate, adoptRunning, rollback, intact, releaseFiles, launcherPath, LAUNCHER, confirm } from './connector/builds.mjs';
+import { readBuilds, installVerified, activate, adoptRunning, rollback, intact, releaseFiles, launcherPath, LAUNCHER, confirm, KEY_STORE_FILE } from './connector/builds.mjs';
+import { encrypt, isEncrypted } from './connector/keystore.mjs';
 import { updateTo, pickUpdate } from './connector/update.mjs';
 import { validateOrder, firstTime } from './connector/orders.mjs';
 import { serviceSpec, servicePlace, serviceTargets, installService, removeService, serviceStatus } from './connector/service.mjs';
@@ -27,7 +28,7 @@ import { usageOptIn, setUsageOptIn, recordUsageEvent, sessionsPath } from './con
 import { markRunning, runningAgents } from './connector/run.mjs';
 import { runWorker, runSupervisor, NO_HUBS, LOCKED } from './connector/worker.mjs';
 import { runningAs, processesPath, takeProcessLock, lockHolder } from './connector/processes.mjs';
-import { workerLockPath, servicePidPath, RESTART_COUNT, RESTART_INTERVAL_MIN, REVIVE_INTERVAL_MIN } from './connector/service.mjs';
+import { refreshService, workerLockPath, servicePidPath, RESTART_COUNT, RESTART_INTERVAL_MIN, REVIVE_INTERVAL_MIN } from './connector/service.mjs';
 import { markUp } from './connector/builds.mjs';
 import { writeState, readState, withLock, bakPath, atomicWrite, RENAME_TRIES } from './connector/paths.mjs';
 import { manifestPath } from './connector/manifest.mjs';
@@ -208,6 +209,85 @@ describe('update and rollback on a PC', () => {
   });
 });
 
+describe('going back after the new build encrypted the key file (docs/connector.md "Self-update")', () => {
+  const stub = (v, code, keyStore) => [
+    { path: 'deploy/client/conclave.mjs', data: Buffer.from(`console.log('build ${v} ' + process.argv.slice(2).join(' ')); process.exit(${code});\n`) },
+    ...(keyStore ? [{ path: KEY_STORE_FILE, data: Buffer.from('// the key store\n') }] : []),
+  ];
+  const KEYS = { version: 1, hubs: { 'hub-svc@abc': { origin: 'https://hub.test', app_key: 'APP-SECRET-ROLLBACK', agents: {} } } };
+  // The test keeps the key file's secret in a private file (no DPAPI, keychain or secret service on the test PC).
+  const encrypted = (home) => {
+    const was = process.env.CONCLAVE_KEY_STORE;
+    process.env.CONCLAVE_KEY_STORE = 'file';
+    try { writeFileSync(join(home, 'keys.json'), JSON.stringify(encrypt(home, KEYS)) + '\n', { mode: 0o600 }); } finally { if (was === undefined) delete process.env.CONCLAVE_KEY_STORE; else process.env.CONCLAVE_KEY_STORE = was; }
+  };
+  const keyFile = (home) => JSON.parse(readFileSync(join(home, 'keys.json'), 'utf8'));
+  const twoBuilds = (home, { oldKeyStore, newCode = 0 }) => {
+    installVerified(home, '1.0.0', stub('1.0.0', 0, oldKeyStore), 'a'.repeat(64)); activate(home, '1.0.0'); confirm(home);
+    installVerified(home, '1.1.0', stub('1.1.0', newCode, true), 'b'.repeat(64)); activate(home, '1.1.0');
+  };
+
+  test('conclave rollback to a build without the key store writes the key file back in plain form first', () => {
+    const home = mk();
+    twoBuilds(home, { oldKeyStore: false });
+    confirm(home);
+    encrypted(home);
+    assert.ok(isEncrypted(keyFile(home)));
+    assert.deepEqual(rollback(home), { ok: true, version: '1.0.0' });
+    assert.deepEqual(keyFile(home), KEYS, 'the previous build reads the plain file as it wrote it');
+    assert.equal(readBuilds(home).current, '1.0.0');
+  });
+  test('a rollback to a build that has the key store leaves the key file encrypted', () => {
+    const home = mk();
+    twoBuilds(home, { oldKeyStore: true });
+    confirm(home);
+    encrypted(home);
+    assert.deepEqual(rollback(home), { ok: true, version: '1.0.0' });
+    assert.ok(isEncrypted(keyFile(home)));
+  });
+  test('a key file that cannot be decrypted refuses the rollback, says why, and leaves both the build and the file', () => {
+    const home = mk();
+    twoBuilds(home, { oldKeyStore: false });
+    confirm(home);
+    encrypted(home);
+    const k = keyFile(home);
+    k.tag = Buffer.alloc(16).toString('base64');
+    writeFileSync(join(home, 'keys.json'), JSON.stringify(k) + '\n', { mode: 0o600 });
+    const before = readFileSync(join(home, 'keys.json'), 'utf8');
+    assert.deepEqual(rollback(home), { ok: false, reason: 'keys_unreadable', detail: 'keyfile_unreadable', version: '1.0.0' });
+    assert.equal(readBuilds(home).current, '1.1.0');
+    assert.equal(readFileSync(join(home, 'keys.json'), 'utf8'), before);
+  });
+  test('with no key file a rollback goes back as before', () => {
+    const home = mk();
+    twoBuilds(home, { oldKeyStore: false });
+    assert.deepEqual(rollback(home), { ok: true, version: '1.0.0' });
+    assert.ok(!existsSync(join(home, 'keys.json')));
+  });
+  test('when the launcher goes back on its own to a build without the key store, it says the key file is encrypted', () => {
+    const home = mk();
+    twoBuilds(home, { oldKeyStore: false, newCode: 1 });
+    encrypted(home);
+    const launch = () => spawnSync(process.execPath, [launcherPath(home), 'service', 'worker'], { encoding: 'utf8' });
+    for (let i = 0; i < 3; i++) assert.doesNotMatch(launch().stderr, /key file is encrypted/);
+    const r = launch();
+    assert.match(r.stdout, /build 1\.0\.0 service worker/);
+    assert.match(r.stderr, /the key file is encrypted and build 1\.0\.0 cannot read it/);
+    assert.ok(isEncrypted(keyFile(home)), 'the launcher cannot open the platform store and leaves the file');
+  });
+  test('the launcher says nothing about the key file when the build it goes back to has the key store', () => {
+    const home = mk();
+    installVerified(home, '1.0.0', stub('1.0.0', 0, true), 'a'.repeat(64)); activate(home, '1.0.0'); confirm(home);
+    installVerified(home, '1.1.0', stub('1.1.0', 0, true), 'b'.repeat(64)); activate(home, '1.1.0'); confirm(home);
+    encrypted(home);
+    writeFileSync(join(home, 'app', '1.1.0', 'deploy', 'client', 'conclave.mjs'), "console.log('changed');\n");
+    const r = spawnSync(process.execPath, [launcherPath(home), 'version'], { encoding: 'utf8' });
+    assert.match(r.stdout, /build 1\.0\.0 version/);
+    assert.match(r.stderr, /1\.1\.0 has a file that changed/);
+    assert.doesNotMatch(r.stderr, /key file is encrypted/);
+  });
+});
+
 describe('the launcher goes back after a new build fails to start', () => {
   const stub = (v, code) => [{ path: 'deploy/client/conclave.mjs', data: Buffer.from(`console.log('build ${v} ' + process.argv.slice(2).join(' ')); process.exit(${code});\n`) }];
   const launch = (home) => spawnSync(process.execPath, [launcherPath(home), 'service', 'worker'], { encoding: 'utf8' });
@@ -376,7 +456,39 @@ describe('crash safety: one worker, restarts, kept updates, state files', () => 
     assert.match(script, /-MultipleInstances IgnoreNew/);
     // The repeating trigger is the one the task is registered with.
     assert.ok(script.indexOf('$t.Repetition') < script.indexOf('Register-ScheduledTask'));
-    assert.match(script, /Register-ScheduledTask [^;]*-Trigger \$t /);
+    // A logon trigger's repetition starts only at the next logon, so a time trigger repeats from the moment of registration.
+    assert.match(script, new RegExp('\\$r = New-ScheduledTaskTrigger -Once -At \\(Get-Date\\) -RepetitionInterval \\(New-TimeSpan -Minutes ' + REVIVE_INTERVAL_MIN + '\\);'));
+    assert.match(script, /Register-ScheduledTask [^;]*-Trigger @\(\$t, \$r\) /);
+    assert.ok(script.indexOf('$r = ') < script.indexOf('Register-ScheduledTask'));
+  });
+
+  test('Windows: refreshService registers the current task only when it differs from the recorded one, and starts nothing', () => {
+    const home = mk(); const calls = [];
+    const exec = (cmd, args) => { calls.push(Buffer.from(args.at(-1), 'base64').toString('utf16le')); return { status: 0, stdout: 'Ready', stderr: '' }; };
+    assert.deepEqual(refreshService(home, { platform: 'win32', node: 'C:\\node.exe', exec }), { changed: true }); // an old task: no marker yet
+    const reg = calls.at(-1);
+    assert.match(reg, /-Trigger @\(\$t, \$r\)/);
+    assert.doesNotMatch(reg, /Start-ScheduledTask/);
+    const n = calls.length;
+    assert.deepEqual(refreshService(home, { platform: 'win32', node: 'C:\\node.exe', exec }), { changed: false }); // already current
+    assert.equal(calls.length, n);
+    assert.deepEqual(refreshService(home, { platform: 'win32', node: 'C:\\other.exe', exec }), { changed: true }); // the definition changed
+    assert.deepEqual(refreshService(home, { platform: 'linux', exec }), { changed: false });
+    assert.deepEqual(refreshService(mk(), { platform: 'win32', node: 'C:\\node.exe', exec: () => ({ status: 0, stdout: 'absent', stderr: '' }) }), { changed: false }); // no service installed
+  });
+
+  test('Windows: a registration that fails is reported, and not tried again for an hour', () => {
+    const home = mk(); let calls = 0, t = 1_000_000;
+    const o = { platform: 'win32', node: 'C:\\node.exe', now: () => t, exec: () => { calls++; return { status: 1, stdout: '', stderr: 'Access is denied\n' }; } };
+    // exec answers the status query too: make it report an installed task, and fail only the registration.
+    o.exec = (cmd, args) => { calls++; const s = Buffer.from(args.at(-1), 'base64').toString('utf16le'); return /Register-ScheduledTask/.test(s) ? { status: 1, stdout: '', stderr: 'Access is denied\n' } : { status: 0, stdout: 'Ready', stderr: '' }; };
+    assert.deepEqual(refreshService(home, o), { changed: false, error: 'Access is denied' });
+    const n = calls;
+    t += 59 * 60_000;
+    assert.deepEqual(refreshService(home, o), { changed: false });
+    assert.equal(calls, n); // nothing spawned inside the hour
+    t += 2 * 60_000;
+    assert.equal(refreshService(home, o).error, 'Access is denied'); // tried again after it
   });
 
   test('Windows: service remove unregisters the task before it stops the service, so nothing starts it again', () => {

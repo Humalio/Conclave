@@ -119,6 +119,7 @@ export function protectedFileReason(p) {
   if (name === '.mcp.json') return 'MCP server settings';
   if (name === 'config.toml' && parent === '.codex') return 'Codex settings';
   if (name === 'agents.override.md') return 'an override of agent instructions';
+  if (name === 'claude.md' || name === 'agents.md') return 'agent instructions (a role file)';
   return null;
 }
 const refuseProtected = (p) => {
@@ -418,11 +419,37 @@ async function sendJob(job, ctx) {
   log(`sent ${job.channel_id} (${plan.total} bytes): ${j.status}`);
 }
 
+/**
+ * A save into another agent's folder is refused: `foreignFolders(who)` lists the folders registered on this hub for every agent but
+ * the receiver, `who` being `{agent, agent_id}` from the job (the id decides where this PC knows it; the label is the fallback). With neither, every agent folder counts as foreign. Real paths count (a link or
+ * junction into another agent's folder is refused), and the target need not exist yet.
+ */
+export function foreignFoldersOf(bindings, who, idOf = () => null) {
+  return bindings.filter((b) => {
+    const id = b.agent_id ?? idOf(b);
+    // A job that names its receiver by id: a binding whose id is unknown is foreign (fails closed; labels can be shared by two teams).
+    if (who?.agent_id) return id ? id !== who.agent_id : true;
+    return b.agent !== who?.agent;
+  }).map((b) => b.path);
+}
+
+export async function foreignFolderRefusal(target, who, foreignFolders, os = platform()) {
+  const real = await realOrParent(target).catch(() => null);
+  for (const f of foreignFolders(who ?? {})) {
+    const r = await realOrParent(f).catch(() => null);
+    if (isInside(target, f, os) || (real && (isInside(real, f, os) || (r && isInside(real, r, os))))) return true;
+  }
+  return false;
+}
+
 async function receiveJob(job, ctx) {
   const { api, allowed, log, signal } = ctx;
   const raw = job.framing === 'raw';
   const target = job.save_to;
-  const check = (p) => requirePath(p, allowed);
+  const check = async (p) => {
+    await requirePath(p, allowed);
+    if (ctx.foreignFolders && await foreignFolderRefusal(p, { agent: job.agent, agent_id: job.agent_id }, ctx.foreignFolders)) throw new Fatal("refused: a received file may not be saved into another agent's folder");
+  };
   await check(target);
   if (raw) refuseProtected(target);
   const dir = raw ? path.dirname(target) : target;
@@ -649,7 +676,7 @@ function validJob(job) {
   return typeof job?.channel_id === 'string' && /^chn_[a-zA-Z0-9_-]{1,80}$/.test(job.channel_id) &&
     ['send', 'receive'].includes(job.kind) && job.id === `${job.channel_id}:${job.kind}` &&
     ['raw', 'tar'].includes(job.framing) &&
-    (job.kind === 'receive' ? typeof job.save_to === 'string' :
+    (job.kind === 'receive' ? typeof job.save_to === 'string' && (job.agent === undefined || (typeof job.agent === 'string' && AGENT_RE.test(job.agent))) && (job.agent_id === undefined || (typeof job.agent_id === 'string' && AGENT_RE.test(job.agent_id))) :
       (job.agent === undefined || (typeof job.agent === 'string' && AGENT_RE.test(job.agent))) &&
       (Array.isArray(job.local_paths) ? job.local_paths.length > 0 && job.local_paths.every((p) => typeof p === 'string') : typeof job.local_path === 'string'));
 }
@@ -660,7 +687,7 @@ function validJob(job) {
  * `agentFolders(label)`, the folders registered for that agent on this hub, and `refusedDirs`, its own folders: a send
  * then reads only from the sending agent's folder (agentPathRefusal).
  */
-export async function runLoop({ hub, key, signal, fetch: fetchImpl = fetch, log = logLine, agentFolders = null, refusedDirs = [] }) {
+export async function runLoop({ hub, key, signal, fetch: fetchImpl = fetch, log = logLine, agentFolders = null, foreignFolders = null, refusedDirs = [] }) {
   const cfg = { hub, bridge_key: key };
   let allowed = [];
   let failures = 0;
@@ -691,7 +718,7 @@ export async function runLoop({ hub, key, signal, fetch: fetchImpl = fetch, log 
         for (const job of data.jobs ?? []) {
           if (running.size >= 4) break;
           if (!validJob(job) || running.has(job.id)) continue;
-          const work = runJob(job, { api, allowed: () => allowed, log, signal, agentFolders, refusedDirs })
+          const work = runJob(job, { api, allowed: () => allowed, log, signal, agentFolders, foreignFolders, refusedDirs })
             .catch((e) => { if (!signal.aborted) log(`job ${job.id} crashed: ${e.message}`); })
             .finally(() => running.delete(job.id));
           running.set(job.id, work);

@@ -289,6 +289,10 @@ describe('same_user', () => {
     expect(app.db.prepare("SELECT COUNT(*) n FROM agent_notices WHERE agent_id=? AND kind IN ('permissions_changed','team_joined','key_rotated') AND created_at>=?").get(s.agents[1]!.id, app.checkouts.checkout(id)!.rendered_at!)).toEqual({ n: 0 });
     const hs = app.checkouts.handouts(id);
     expect(hs.every((h) => h.new_credential_id === memberKey(s.teamId, h.agent_id))).toBe(true);
+    // The moved key names the team's checkout in words, never the checkout id (operator walk-through finding 4).
+    const moved = app.keys.credential(memberKey(s.teamId, s.agents[1]!.id))!.label;
+    expect(moved).toContain(`(moved by the ${app.teams.team(s.teamId)!.name} checkout)`);
+    expect(moved).not.toContain(id);
     for (const h of hs) app.checkouts.consume(h.id, h.new_credential_id, sys);
     expect(app.checkouts.checkout(id)!.status).toBe('restored');
     for (const k of oldKeys) expect(app.keys.credential(k)).toMatchObject({ status: 'revoked', status_reason: 'superseded' });

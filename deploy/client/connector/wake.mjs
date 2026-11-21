@@ -149,12 +149,14 @@ export function createWake({ home, log = () => {}, broker = null, deps = {} }) {
   }
 
   /** The hub agent id's label on this PC, learned once per label: a turn token is issued with the agent's key and revoked at once. */
+  const keyRefused = new Map(); // hubKey → labels whose key the hub refused at the last try: the reason an agent stays unknown
   async function labelOf(ctx, agentId, d) {
     if (d.ids[agentId]) return d.ids[agentId];
-    const found = {};
+    const found = {}, refused = new Set();
     for (const [label, k] of Object.entries(ctx.section.agents ?? {})) {
       if (Object.values(d.ids).includes(label)) continue;
       const r = await req(ctx.hub, 'POST', '/connector/v1/turn-tokens', { body: { session_key: k.session_key, run: `id-${randomUUID().slice(0, 8)}` }, headers: ctx.auth }).catch(() => null);
+      if (r?.status === 401 || r?.status === 403) refused.add(label); // only a refusal, never a network error or a 5xx
       if (r?.status === 200 && r.json?.token) {
         found[r.json.agent_id] = label;
         await req(ctx.hub, 'POST', '/connector/v1/turn-tokens/revoke', { body: { token: r.json.token }, headers: ctx.auth }).catch(() => {});
@@ -164,6 +166,7 @@ export function createWake({ home, log = () => {}, broker = null, deps = {} }) {
     const fresh = load(home, ctx.hubKey);
     Object.assign(fresh.ids, found);
     save(home, ctx.hubKey, fresh);
+    keyRefused.set(ctx.hubKey, refused);
     return fresh.ids[agentId] ?? null;
   }
 
@@ -277,6 +280,17 @@ export function createWake({ home, log = () => {}, broker = null, deps = {} }) {
     if (!bind) return;
     const until = pausedUntil(d, profileOf(home, bind.path));
     if (until) { await report(ctx, agentId, a, 'paused_usage', { resumes_at: until }); return; }
+    // A person opened this agent's chat while the item waited behind a turn: a chat they have open is never taken over (connector.md, "The wake"). Every waiting item is held as chat_in_use: kept for the prompt hook and the screen, its order reported failed.
+    if (runningAgents(home, ctx.hubKey).some((r) => r.agent_id === agentId)) {
+      const held = a.queue.splice(0);
+      save(home, ctx.hubKey, d);
+      for (const w of held) {
+        recordDelivery(home, ctx.hubKey, { payload: { agent_id: agentId, items: w.items?.length ? w.items : [{ notice: 'message' }] } });
+        if (w.order) await sendResult({ home, hubKey: ctx.hubKey, hub: ctx.hub, auth: ctx.auth, request: req, log }, w.order, 'failed', { reason: ORDER_REASONS.chat_in_use, code: 'chat_in_use' });
+      }
+      log(`wake: ${a.label}: a chat is open, so ${held.length} waiting item${held.length === 1 ? '' : 's'} were held and no run started`);
+      return;
+    }
     const next = a.queue.shift();
     if (await startTurn(ctx, d, agentId, a, next)) {
       if (next.order) await sendResult({ home, hubKey: ctx.hubKey, hub: ctx.hub, auth: ctx.auth, request: req, log }, next.order, 'done', null);
@@ -298,7 +312,9 @@ export function createWake({ home, log = () => {}, broker = null, deps = {} }) {
       const p = order.payload, agentId = p.agent_id;
       const label = await labelOf(ctx, agentId, load(home, ctx.hubKey));
       const d = load(home, ctx.hubKey); // after the await
-      if (!label || !folderOf(ctx, label)) return held(ctx.hubKey, order, 'agent_unknown', reasons.agent_unknown);
+      // No label: the agent's key on this PC is not one the hub accepts (replaced or revoked), or it was never set up here. Say which.
+      if (!label) return held(ctx.hubKey, order, 'agent_unknown', keyRefused.get(ctx.hubKey)?.size ? reasons.agent_key_refused : reasons.agent_unknown);
+      if (!folderOf(ctx, label)) return held(ctx.hubKey, order, 'agent_unknown', reasons.agent_unknown);
       const a = agentOf(d, agentId, label);
       a.label = label;
       if (!wakeEnabled(home, label)) return held(ctx.hubKey, order, 'wake_held', reasons.wake_held);

@@ -15,6 +15,27 @@ export class VaultError extends Error {
   constructor(public readonly code: 'invalid_path' | 'denied' | 'too_large' | 'invalid_argument' | 'conflict' | 'not_found' | 'lockdown' | 'patch_failed' | 'binary', message: string, public readonly extra?: Record<string, unknown>) { super(message); }
 }
 
+/** Longest name the file systems under a vault hold (bytes of UTF-8 on Linux; Windows counts UTF-16 units, never more). */
+export const MAX_NAME_BYTES = 255;
+const LONE_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
+/** Bidirectional embedding, override and isolate controls: a name using them reads differently from how it is stored. */
+const BIDI_NAME = /[\u202a-\u202e\u2066-\u2069]/;
+/** Embedding and override controls only: the isolates (U+2066 to U+2069) are what right-to-left text is properly written with. */
+const BIDI_TEXT = /[\u202a-\u202e]/;
+
+/**
+ * Why a text an agent writes cannot be stored as it is, or null. Each case would otherwise be stored silently changed
+ * (an unpaired surrogate becomes U+FFFD in UTF-8), unreadable as text (NUL) or able to make text read differently from
+ * how it is stored (a bidirectional override).
+ */
+export function textProblem(text: string): string | null {
+  const lone = text.search(LONE_SURROGATE);
+  if (lone >= 0) return `The text contains an unpaired surrogate at character ${lone} (not valid Unicode; stored as UTF-8 it would silently become U+FFFD). Remove or replace it.`;
+  if (text.includes('\u0000')) return 'The text contains a NUL character (U+0000). A file with NUL is binary, and file_read could not show it as text. Remove it.';
+  if (BIDI_TEXT.test(text)) return 'The text contains a bidirectional embedding or override character (U+202A to U+202E), which can make text read differently from how it is stored. Remove it.';
+  return null;
+}
+
 export interface Entry { name: string; path: string; type: 'file' | 'folder'; size: number | null; modified: number; }
 
 export class Vault {
@@ -34,6 +55,7 @@ export class Vault {
     if (segs[0] !== this.alias) throw new VaultError('invalid_path', `paths start with /${this.alias}/`);
     const rel = segs.slice(1);
     for (const s of rel) {
+      if (Buffer.byteLength(s, 'utf8') > MAX_NAME_BYTES) throw new VaultError('invalid_path', `a name is at most ${MAX_NAME_BYTES} bytes of UTF-8 (this one is ${Buffer.byteLength(s, 'utf8')}): shorten it`);
       if (s === '..') throw new VaultError('invalid_path', '".." is not allowed');
       if (/^[a-zA-Z]:$/.test(s) || s.includes(':')) throw new VaultError('invalid_path', 'drive letters and ":" are not allowed');
       // Windows drops trailing dots and spaces, so ".obsidian." or "secret.md " would reach ".obsidian" or "secret.md"
@@ -42,6 +64,17 @@ export class Vault {
       if (this.isHidden(s)) throw new VaultError('denied', 'not allowed, or does not exist');
     }
     return { path: '/' + [this.alias, ...rel].join('/'), rel };
+  }
+
+  /**
+   * Names a NEW file or folder may not have: an unpaired surrogate (the disk would store U+FFFD) or a bidirectional control (spoofing).
+   * Checked where a path is created, never where an existing one is read, so a file that already has such a name stays reachable.
+   */
+  assertNewName(rel: string[]): void {
+    for (const s of rel) {
+      if (LONE_SURROGATE.test(s)) throw new VaultError('invalid_path', 'a name cannot contain an unpaired surrogate (not valid Unicode: the disk would store a different name)');
+      if (BIDI_NAME.test(s)) throw new VaultError('invalid_path', 'a name cannot contain bidirectional control characters (U+202A to U+202E, U+2066 to U+2069): the name would read differently from how it is stored');
+    }
   }
 
   /** Hidden from agents: configured names, hub temp files, and names ending in a dot or space (unreachable by path, see normalise). */

@@ -34,7 +34,7 @@ export function addSync(home, rec) {
     const d = load(home);
     if (Object.values(d.syncs).some((x) => x.name.toLowerCase() === rec.name.toLowerCase())) throw Object.assign(new Error(`a sync named "${rec.name}" exists`), { reason: 'name_taken' });
     const id = rec.id ?? randomBytes(4).toString('hex');
-    const full = { id, state: 'active', created_at: new Date().toISOString(), cursor: null, last_full_at: null, last_run_at: null, files: 0, bytes: 0, local_edits: 0, warnings: [], refused: [], last_error: null, ...rec };
+    const full = { id, state: 'active', created_at: new Date().toISOString(), cursor: null, last_full_at: null, last_run_at: null, files: 0, bytes: 0, local_edits: 0, local_new: 0, warnings: [], refused: [], last_error: null, ...rec };
     d.syncs[id] = full;
     writeState(syncsPath(home), JSON.stringify(d, null, 2));
     return full;

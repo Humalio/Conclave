@@ -229,6 +229,13 @@ describe('registry', () => {
     writeFileSync(join(c, '.mcp.json'), JSON.stringify({ mcpServers: { conclave: { command: 'x', args: [] } } }));
     assert.equal(resolveFolder(home, c).reason, 'not_registered');
   });
+  test('the hub agent id is kept with the binding, and a re-registration without one keeps it', () => {
+    const base = mk(), home = join(base, 'h'), f = join(base, 'a');
+    mkdirSync(f);
+    assert.equal(bindFolder(home, f, { ...H, agentId: 'agt_abc123' }).agent_id, 'agt_abc123');
+    assert.equal(bindFolder(home, f, H).agent_id, 'agt_abc123');
+    assert.equal(bindFolder(home, f, { ...H, agentId: 'bad id/..' }).agent_id, 'agt_abc123'); // a malformed id is not stored
+  });
   test('a recorded path whose folder is no longer the same one is identity_changed', () => {
     const base = mk(), home = join(base, 'h'), f = join(base, 'a');
     mkdirSync(f);
@@ -759,7 +766,7 @@ describe('register, repair and check', { concurrency: false }, () => {
       assert.equal((await runCheck(s.home, s.folder, { claudeJson: s.claudeJson, win: WIN, probe: true })).reason, 'connector_not_running');
       assert.equal((await runCheck(s.home, join(s.base, 'nowhere'), { claudeJson: s.claudeJson })).reason, 'not_registered');
       for (const r of ORDER) assert.ok(REASONS[r], `${r} has a fixed sentence`);
-      for (const r of Object.keys(REASONS)) { assert.ok(!/ah_(app|ses)_/.test(line(r))); assert.match(line(r), /Run: conclave /); }
+      for (const r of Object.keys(REASONS)) { assert.ok(!/ah_(app|ses)_/.test(line(r))); if (r !== 'denied') assert.match(line(r), /Run: conclave /); }
     } finally { await hub.close(); }
   }, 30000);
   test('check reports the first reason that applies: no key, a stale entry, withdrawn trust, a changed folder', tlsOpts, async () => {

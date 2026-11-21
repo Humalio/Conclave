@@ -130,9 +130,12 @@ describe('pairing through a relay', () => {
     const add = (await api('POST', '/pcs/add', { name: 'pc-relay', relay_id: r.relay.id })).body;
     expect(add.pairing).toMatchObject({ code: add.code, hub_origin: 'https://10.0.0.8:8443', relay: { id: r.relay.id, name: 'pair-b', release_base: 'https://10.0.0.8:8443/connector/v1/release' } });
     expect(add.connector_prompt).toContain('through relay "pair-b"');
-    expect(add.prompt.text).toContain(relayCa);
-    expect(add.prompt.text).not.toContain(hubCa);
-    expect(add.prompt.text).toContain('https://10.0.0.8:8443/connector/v1/release');
+    // The hub check the PC user types is the relay's CA, never the hub's; there is no legacy prompt beside it.
+    const check = (sha: string) => sha.slice(0, 16).match(/.{4}/g)!.join(' ');
+    expect(add.pairing.ca_check).toBe(check(relayCa));
+    expect(add.pairing.ca_check).not.toBe(check(hubCa));
+    expect(add.connector_unavailable).toBeNull();
+    expect(add).not.toHaveProperty('prompt');
     const body = { pairing_code: add.code, hub_origin: 'https://10.0.0.8:8443', hub_ca_sha256: relayCa, platform: 'win32-x64', version: '1.0.0' };
     // Without the secret the relay's origin is not this hub's: refused (and the code is voided, so the next attempt needs a new one).
     expect((await via('POST', '/connector/v1/pair', { body, client: freshIp() })).status).toBe(401);

@@ -8,7 +8,7 @@ import { ONLINE_MS } from './connector.js';
 
 /** The fixed words for task_turns.delivery_reason. */
 export const DELIVERY_WORDS: Record<string, string> = {
-  pc_offline: 'Not delivered: waiting for the PC', chat_in_use: 'Not delivered: chat in use', wake_held: 'Not delivered: wake held on this platform', agent_unknown: 'Not delivered: no session to wake',
+  pc_offline: 'Not delivered: waiting for the PC', chat_in_use: 'Not delivered: chat in use', wake_held: 'Not delivered: waking is off for this agent on its PC', agent_unknown: 'Not delivered: this PC has no folder for the agent',
   connector_too_old: 'Not delivered: connector too old',
 };
 

@@ -148,7 +148,7 @@ describe('the stream against a stub hub over HTTPS', { skip: OPENSSL ? false : '
     assert.ok(await waitFor(() => s.results.length === 1), 'the order was fetched and answered');
     assert.equal(s.results[0].id, 'pca_ev1');
     assert.equal(s.results[0].state, 'failed');
-    assert.match(s.results[0].result.reason, /no folder for that agent/); // this stub PC has no folder for the agent, so no turn starts
+    assert.match(s.results[0].result.reason, /no folder registered for that agent/); // this stub PC has no folder for the agent, so no turn starts
     const hubKey = `hub-stream@${caFingerprint(pki.ca)}`;
     assert.equal(waiting(home, hubKey)['agent-live1'].length, 1); // kept for the screen and the prompt hook
     // The same id again (a replay) does nothing.

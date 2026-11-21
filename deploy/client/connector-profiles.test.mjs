@@ -198,7 +198,7 @@ describe('account profiles', () => {
       const r = await at(`/?t=${new URL(scr.url).searchParams.get('t')}`);
       const cookie = r.headers.get('set-cookie').split(';')[0];
       const page = await (await at('/', { headers: { cookie } })).text();
-      assert.match(page, /<b>Builders<\/b><span class="muted">Team, 3 agents<\/span>/);
+      assert.match(page, /Builders<\/span><\/b><span class="muted">Team, 3 agents<\/span>/);
       assert.match(page, /Bind team<\/button>/);
       const post = await at('/profile-bind-team', { method: 'POST', headers: { cookie, origin: `http://127.0.0.1:${scr.port}`, 'content-type': 'application/x-www-form-urlencoded' }, body: 'team=team_build&profile=work' });
       assert.equal(post.status, 303);

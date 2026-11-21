@@ -84,7 +84,7 @@ async function prepareCollaborator(c, project, team) {
   }
 }
 
-async function prepareKeyCollection(c) {
+async function prepareKeyHandover(c) {
   const label = 'Watch Console', name = 'pc-watch-console';
   const pc = (await c.op.post('/api/pcs', { name, description: 'Fictional standby console for the Tern-9 watch.' })).pc;
   const app = await c.op.post('/api/keys', { kind: 'app_key', machine_id: pc.id, app_name: 'codex', label: 'Codex on the watch console' });
@@ -96,18 +96,17 @@ async function prepareKeyCollection(c) {
   await c.connectPc('watch');
   await c.login(label);
 
-  const path = `/api/keys/${session.key.id}`;
-  const { offer: { session_var } } = await c.op.get(`${path}/collect`);
-  const instance_id = 'early-echo-watch-console';
-  await c.ob.ok('POST', '/key-collect/poll', app.secret, { instance_id, session_var });
-  const { key } = await c.op.post(`${path}/rotate`, { reason: 'routine', delivery: 'collect' });
-  const { collect_ids: [collect_id] } = await c.ob.ok('POST', '/key-collect/poll', app.secret, { instance_id, session_var });
-  const pickup = await c.ob.ok('POST', '/key-pickup', app.secret, { collect_id, instance_id });
-  await c.ob.ok('POST', '/key-collect/confirm', app.secret, { collect_id, instance_id, ok: true });
-  c.keys[label] = { id: key.id, secret: pickup.secret };
+  // A routine rotation goes to the watch console by key handover: its connector checks in, picks the new key up once the
+  // PC user allowed it on the screen, and confirms. The old key works until the confirm.
+  await c.ob.ok('POST', '/connector/v1/check-in', app.secret, { version: '0.9.6' });
+  const { key, handover } = await c.op.post(`/api/keys/${session.key.id}/rotate`, { reason: 'routine' });
+  c.expect(handover?.pc?.id === pc.id, 'the rotation is sent to the watch console');
+  const pickup = await c.ob.ok('POST', '/pickup', app.secret, { request_id: handover.id });
+  await c.ob.ok('POST', '/pickup/confirm', app.secret, { pickup_id: pickup.pickup_id, written: pickup.agents.map((a) => a.session_var) });
+  c.keys[label] = { id: key.id, secret: pickup.agents[0].secret };
   await c.login(label);
-  const status = await c.op.get(`/api/keys/${key.id}/collect`);
-  c.expect(status.collection?.status === 'signed_in', 'the watch console completed routine collection');
+  const status = await c.op.get(`/api/keys/${key.id}/handover`);
+  c.expect(status.confirmed?.key, 'the watch console confirmed the handover');
 }
 
 export async function seedDemoHandoff(c, setAside) {
@@ -121,8 +120,8 @@ export async function seedDemoHandoff(c, setAside) {
   c.rec.begin('demo.collaborator', 'Give Ellis access to the case');
   await prepareCollaborator(c, project, team);
   c.signal?.throwIfAborted();
-  c.rec.begin('demo.collection', 'Collect the watch console’s replacement key');
-  await prepareKeyCollection(c);
+  c.rec.begin('demo.handover', 'Send the watch console its replacement key');
+  await prepareKeyHandover(c);
   c.signal?.throwIfAborted();
 
   c.rec.begin('demo.handoff', 'Leave the live questions, clearance and pause');

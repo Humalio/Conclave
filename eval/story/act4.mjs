@@ -314,7 +314,7 @@ export default [
 
   s('4.16', 'The operator adds pc-night-choir', async (c) => {
     const r = await c.op.post('/api/pcs/add', { name: 'pc-night-choir', description: 'The Night Choir, amateur listeners: the Q-9 capture dish' });
-    c.expect(r.code && JSON.stringify(r.prompt).includes(r.code) && !JSON.stringify(r.prompt).includes('ah_app'), 'the prompt carries the code and no app key');
+    c.expect(r.code && !('prompt' in r) && !String(r.connector_prompt ?? '').includes(r.code) && !JSON.stringify(r).includes('ah_app'), 'the code comes back once; no legacy prompt, and no app key anywhere');
     c.pcs.lab = { pc: r.pc, appKey: null, bound: true };
     c.S.labCode = r.code;
   }, { rows: ['onboarding'] }),

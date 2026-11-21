@@ -249,6 +249,16 @@ describe('when a turn ends', () => {
   });
 });
 
+describe('an agent whose key the hub refuses', () => {
+  test('is reported as a refused key, not as a missing folder', async () => {
+    const w = world({ hub: { request: async (_h, _m, path) => (path === '/connector/v1/turn-tokens' ? { status: 401, json: { error: 'key_inactive' } } : { status: 200, json: {} }) } });
+    const r = await w.wake.onDeliver(w.ctx, w.order(1, 'agent-dev', [item(TASK_A)]), ORDER_REASONS);
+    assert.deepEqual([r.state, r.code], ['failed', 'agent_unknown']);
+    assert.equal(r.reason, ORDER_REASONS.agent_key_refused);
+    assert.match(r.reason, /no longer accepts the key/);
+  });
+});
+
 describe('what keeps a turn from starting', () => {
   test('a chat in use, a wake that is off, and an agent with no folder each say why, and keep the item for the prompt hook', async () => {
     const w = world();
@@ -273,6 +283,40 @@ describe('what keeps a turn from starting', () => {
       assert.ok(waiting(w.home, 'hk')['agent-dev']);
       assert.equal(existsSync(join(w.home, 'args.log')), false);
     } finally { un(); }
+  });
+
+  test('an item that waited behind a turn is held when a person opened the chat meanwhile: no run, the order fails as chat_in_use, the item is kept', async () => {
+    const w = world({ mode: 'hang' });
+    const { markRunning } = await import('./connector/run.mjs');
+    await w.wake.onDeliver(w.ctx, w.order(1, 'agent-dev', [item(TASK_A)]), ORDER_REASONS);
+    await w.until(() => w.started().length === 1);
+    assert.equal((await w.wake.onDeliver(w.ctx, w.order(2, 'agent-dev', [item(TASK_B)]), ORDER_REASONS)).state, 'open', 'queued behind task A');
+    const un = markRunning(w.home, 'hk', 'dev', 'agent-dev'); // a person opens the chat while it waits
+    try {
+      w.state.mode = 'quick';
+      assert.equal(await w.wake.stop(w.ctx, 'agent-dev'), true);
+      await w.wake.tick(w.ctx); await w.wake.finishAll();
+      assert.equal(w.started().length, 1, 'no second run was started');
+      assert.equal(w.wake.state('hk').agents['agent-dev'].queue.length, 0, 'the queue is emptied, not retried');
+      const res = w.sent('/orders/pca_2/result').find((c) => c.body.state === 'failed');
+      assert.equal(res?.body.result.code, 'chat_in_use', 'the order says why');
+      assert.ok(waiting(w.home, 'hk')['agent-dev'], 'kept for the prompt hook');
+    } finally { un(); }
+  });
+
+  test('the wake\'s own run is not a chat in use once it ended: its marker (the broker writes it under the run\'s pid) is gone, so the waiting item starts', async () => {
+    const w = world({ mode: 'hang' });
+    const { markRunning } = await import('./connector/run.mjs');
+    await w.wake.onDeliver(w.ctx, w.order(1, 'agent-dev', [item(TASK_A)]), ORDER_REASONS);
+    await w.until(() => w.started().length === 1);
+    assert.equal((await w.wake.onDeliver(w.ctx, w.order(2, 'agent-dev', [item(TASK_B)]), ORDER_REASONS)).state, 'open');
+    const pid = w.wake.state('hk').agents['agent-dev'].run.pid;
+    markRunning(w.home, 'hk', 'dev', 'agent-dev', pid); // as the broker does when the run asks for its turn token; never unmarked here
+    w.state.mode = 'quick';
+    assert.equal(await w.wake.stop(w.ctx, 'agent-dev'), true);
+    await w.wake.tick(w.ctx); await w.wake.finishAll();
+    await w.until(() => w.started().length === 2);
+    assert.equal(w.sent('/orders/pca_2/result').some((c) => c.body.state === 'failed'), false, 'not held as chat_in_use');
   });
 
   test('agent messages are off by default, and when on, one wake per agent per 10 minutes', async () => {

@@ -1,6 +1,6 @@
 /**
  * Connector pairing on the hub (docs/connector.md, "Add PC: download and pairing"): one stable hub id; Add PC answers the
- * pairing block and a prompt with no code; the code pairs once, within 30 minutes, only for this hub's origin and CA; a
+ * pairing block and a prompt with no code, or the reason there is none (no CA, no HTTPS origin), never the legacy prompt; the code pairs once, within 30 minutes, only for this hub's origin and CA; a
  * wrong binding voids it; a checkout's code is refused; every refusal is the same 401 sentence; the PC reads its own
  * setup timeline with its app key, Paired done from the moment the code was redeemed.
  */
@@ -73,9 +73,40 @@ describe('Add PC and Re-enrol', () => {
     expect(r.connector_prompt).toContain('conclave setup request --file <path> --check');
     expect(r.connector_prompt).not.toContain(r.code);
     expect(r.connector_prompt).not.toMatch(/cnv_/);
+    expect(r.connector_unavailable).toBeNull();
+    expect(r).not.toHaveProperty('prompt'); // no legacy setup.mjs prompt beside it
+    expect(r.connector_version).toBeNull(); // no approved version yet: the console says conclave-install-<version>.mjs
     const re = (await api('POST', `/pcs/${r.pc.id}/re-enrol`)).body;
     expect(re.pairing.code).toBe(re.code);
     expect(re.code).not.toBe(r.code);
+    expect(re.connector_prompt).toContain('conclave setup request');
+    expect(re).not.toHaveProperty('prompt');
+  });
+  it('say no_origin, with no prompt at all, on a hub whose public address is not HTTPS', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ahpair-http-'));
+    mkdirSync(join(dir, 'vault'), { recursive: true });
+    writeFileSync(join(dir, 'ca.pem'), testCa().caPem);
+    const plain = await buildApp(testConfig(dir, { publicUrl: 'http://hub.test', caCertFile: join(dir, 'ca.pem'), maintenanceSeconds: undefined }));
+    try {
+      await plain.store.ready;
+      await plain.fastify.listen({ port: 0, host: '127.0.0.1' });
+      const at = `http://127.0.0.1:${(plain.fastify.server.address() as { port: number }).port}`, s = await adminLogin(at);
+      const post = async (path: string) => (await fetch(`${at}/api${path}`, { method: 'POST', headers: { 'content-type': 'application/json', cookie: s.cookie, 'x-csrf-token': s.csrf }, body: JSON.stringify({ name: 'plain-pc' }) })).json() as Promise<any>;
+      const r = await post('/pcs/add');
+      expect(r).toMatchObject({ pairing: null, connector_prompt: null, connector_unavailable: 'no_origin' });
+      expect(r).not.toHaveProperty('prompt');
+      expect(await post(`/pcs/${r.pc.id}/re-enrol`)).toMatchObject({ pairing: null, connector_prompt: null, connector_unavailable: 'no_origin' });
+    } finally { await plain.close(); }
+  });
+});
+
+describe('Add PC names the installer version', () => {
+  it('is the newest approved connector version, never a pending or refused one', async () => {
+    for (const v of ['0.9.4', '0.9.5', '0.9.6']) expect((await api('POST', '/connector/versions', { version: v })).status).toBe(200);
+    expect((await api('POST', '/connector/versions/0.9.4/approve')).status).toBe(200);
+    expect((await api('POST', '/connector/versions/0.9.5/approve')).status).toBe(200);
+    expect((await api('POST', '/connector/versions/0.9.6/refuse')).status).toBe(200);
+    expect((await api('POST', '/pcs/add', { name: 'pair-ver' })).body.connector_version).toBe('0.9.5');
   });
 });
 

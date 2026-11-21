@@ -10,6 +10,7 @@ export const REASONS = {
   broker_unverified: { why: "Something answered at the connector's local address but could not prove it is this PC's connector, so this session did not trust it.", run: 'conclave service status' },
   connector_not_running: { why: "The Conclave connector is not running on this PC, so this session cannot get its turn token.", run: 'conclave service status' },
   needs_click: { why: "This is the first Conclave chat in this folder: the PC's user has to allow it once on the connector's screen.", run: 'conclave setup' },
+  denied: { why: 'This chat was not allowed on this PC. If you opened it, ask the PC user to allow it on the connector screen.', run: null },
   vault_unavailable: { why: "The Conclave key service of this PC (hardened isolation) is not running or cannot be reached.", run: 'conclave check' },
   keyfile_unsafe: { why: "This PC's Conclave key file can be read by other users.", run: 'conclave check' },
   not_registered: { why: "This folder isn't registered with Conclave on this PC (it may be a copy or a clone).", run: 'conclave check' },
@@ -38,5 +39,5 @@ export const ORDER = ['old_layout', 'keyfile_unreadable', 'keystore_unavailable'
 export function line(code) {
   const r = REASONS[code];
   if (!r) return 'Conclave could not sign this folder in. Run: conclave check';
-  return `${r.why} Run: ${r.run} (in this folder)`;
+  return r.run ? `${r.why} Run: ${r.run} (in this folder)` : r.why;
 }

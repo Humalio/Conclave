@@ -29,7 +29,15 @@ bridge routes, and the hub writes them into the task's brief or submission files
   outside it, or a link pointing outside it, fails the upload with a message saying where files may come from.
 - **Refused:** `.git` and `.codex` folders, the role file at the folder's root (`CLAUDE.md`, `AGENTS.md`,
   `AGENTS.override.md`) and the connector's own folders. The hub refuses these names at once; the connector checks the real
-  path again. A folder upload skips `.git`, `.codex` and `node_modules`.
+  path again. A folder upload skips `.git`, `.codex` and `node_modules`. A file received for one agent is also refused
+  when its `save_to` (or the real path behind a link or junction) lies inside the folder of another agent registered on
+  this PC for the same hub. The receive job carries the receiving agent's id and label. The PC tells agents apart by id: each
+  binding records the hub's agent id at setup or restore (or the id its relay recorded), so two teams on one PC that each have a
+  Coordinator, or an agent the PC labelled `Coordinator-2` after a clash, are never confused. A binding whose id this PC does not know (made
+  before ids were recorded, and no relay has run) counts as another agent's folder for a job that names its receiver by id, so
+  the receiver's own old folder is refused until it is registered again, which records the id (safe: labels can be shared by
+  two teams). Labels decide only for a job with no agent id (an older hub); a job with neither fails closed: every agent folder
+  counts as foreign. Hub and connector go out together in 0.9.6. `CLAUDE.md` and `AGENTS.md` are refused by name in any folder, in any letter case.
 - **Checks:** the inline rules apply as the files land: names, types sniffed from the bytes, one file at most 8 MB, an HTML
   mockup at most 2 MB, and the set, task and team limits. Text goes through the leak guard. The task is checked again before
   each chunk and as the files land: it has not ended, the agent may still change that set, no lockdown and no pause.

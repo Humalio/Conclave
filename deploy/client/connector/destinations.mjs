@@ -5,7 +5,7 @@
  */
 import { join, basename } from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { readJson, atomicWrite, canonicalFolder, oneLine } from './paths.mjs';
+import { readJson, atomicWrite, canonicalFolder, oneLine, folderIdentity } from './paths.mjs';
 
 export const DESTINATION_RE = /^dst_[a-z0-9]{6,32}$/;
 export const MAX_DESTINATIONS = 20;
@@ -18,8 +18,15 @@ export function listDestinations(home) {
   return list.filter((d) => d && DESTINATION_RE.test(String(d.id)) && typeof d.path === 'string' && d.path && typeof d.label === 'string');
 }
 
-/** What a check-in reports: an id and a label each, never the path. */
-export const reportDestinations = (home) => listDestinations(home).map((d) => ({ id: d.id, label: d.label }));
+/**
+ * True when the folder at an approved destination's path is not the folder the user approved: it was replaced (a junction or link put at
+ * the same path, the folder removed and made again). The approval recorded its filesystem identity; one made before that has none and
+ * is not checked. The user approves it again with `conclave destinations add`.
+ */
+export const destinationChanged = (d) => typeof d.identity === 'string' && folderIdentity(d.path) !== d.identity;
+
+/** What a check-in reports: an id and a label each, never the path. A destination whose folder changed is not reported: it needs the user's approval again. */
+export const reportDestinations = (home) => listDestinations(home).filter((d) => !destinationChanged(d)).map((d) => ({ id: d.id, label: d.label }));
 
 /** The destination an order names, or null. */
 export const resolveDestination = (home, id) => listDestinations(home).find((d) => d.id === id) ?? null;
@@ -30,9 +37,15 @@ export function addDestination(home, folderArg, label) {
   if (!folder) return { ok: false, reason: 'the folder does not exist' };
   const list = listDestinations(home);
   const have = list.find((d) => d.path === folder);
-  if (have) return { ok: true, destination: have, existed: true };
+  if (have && !destinationChanged(have)) return { ok: true, destination: have, existed: true };
+  // A destination whose folder was swapped is approved again here: it keeps its id and gets the folder's identity as it is now.
+  if (have) {
+    const renewed = { ...have, identity: folderIdentity(folder) };
+    atomicWrite(destinationsPath(home), JSON.stringify({ version: 1, destinations: list.map((d) => (d.id === have.id ? renewed : d)) }, null, 2) + '\n');
+    return { ok: true, destination: renewed, reapproved: true };
+  }
   if (list.length >= MAX_DESTINATIONS) return { ok: false, reason: `at most ${MAX_DESTINATIONS} destinations` };
-  const d = { id: `dst_${randomBytes(6).toString('hex')}`, label: oneLine(label || basename(folder) || folder).slice(0, 80) || 'Destination', path: folder };
+  const d = { id: `dst_${randomBytes(6).toString('hex')}`, label: oneLine(label || basename(folder) || folder).slice(0, 80) || 'Destination', path: folder, identity: folderIdentity(folder) };
   atomicWrite(destinationsPath(home), JSON.stringify({ version: 1, destinations: [...list, d] }, null, 2) + '\n');
   return { ok: true, destination: d };
 }

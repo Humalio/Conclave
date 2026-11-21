@@ -308,5 +308,26 @@ export function createEngine({ home, rec: rec0, api, log = () => {}, os = proces
     return n;
   }
 
-  return { runOnce, countLocalEdits, pruneTrash, get rec() { return rec; } };
+  /**
+   * How many files in the mirror folder the mirror did not write and the hub does not have (created here by a person or a tool).
+   * They are never uploaded and never touched; the count is for the warning. The trash folder is not looked at. A look only.
+   */
+  async function countLocalNew() {
+    const mf = loadManifest(home, id);
+    let n = 0, seen = 0;
+    const walk = async (dir, rel) => {
+      for (const e of await fs.readdir(fsPath(dir, os), { withFileTypes: true }).catch(() => [])) {
+        if (++seen > 50_000) return;
+        const r = rel ? `${rel}/${e.name}` : e.name;
+        if (!rel && e.name === TRASH) continue;
+        if (e.isDirectory()) await walk(path.join(dir, e.name), r);
+        else if (e.isFile() && !mf.files[r]) n++;
+      }
+    };
+    await walk(root, '');
+    sv({ local_new: n });
+    return n;
+  }
+
+  return { runOnce, countLocalEdits, countLocalNew, pruneTrash, get rec() { return rec; } };
 }

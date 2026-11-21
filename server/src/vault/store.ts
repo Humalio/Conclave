@@ -293,6 +293,10 @@ export class VaultStore {
     const id = newId.revision();
     this.db.prepare('INSERT INTO file_revisions(id,file_id,revision,parent_revision,path_at_revision,op,origin,recovered,agent_id,credential_id,admin_id,author_kind,user_id,size,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
       .run(id, f.fileId, f.revision, f.parent, f.path, f.op, f.origin, f.recovered ? 1 : 0, f.who?.agentId ?? null, f.who?.credentialId ?? null, f.who?.adminId ?? null, f.who?.person?.kind ?? null, f.who?.person?.userId ?? null, f.size, Date.now());
+    // A write that lands closes the stale-base records this same agent left on the file: it lost a race, re-read and wrote, so
+    // nothing is waiting on anyone. One it never recovered from stays open.
+    if (f.who?.agentId) this.db.prepare("UPDATE file_conflicts SET status='resolved', resolution=?, resolved_at=? WHERE file_id=? AND source='platform_cas' AND status='open' AND agent_id=?")
+      .run(JSON.stringify({ auto: 'superseded', by_revision: f.revision }), Date.now(), f.fileId, f.who.agentId);
     return id;
   }
 
@@ -525,7 +529,7 @@ export class VaultStore {
   /** A stale base. Recorded as a platform_cas conflict for agents; a person's console save records none, because the
    *  editor itself shows the change and asks (docs/filesystem-consistency.md). */
   private conflict(fileId: string | null, current: string, base: string, extra?: { revision: string; role: string }[], exists = false, who?: Who): VaultError {
-    const id = fileId && !exists && !who?.person ? this.recordConflict(fileId, 'platform_cas', base, [{ revision: current, role: 'current' }, { revision: base, role: 'base' }, ...(extra ?? [])]) : null;
+    const id = fileId && !exists && !who?.person ? this.recordConflict(fileId, 'platform_cas', base, [{ revision: current, role: 'current' }, { revision: base, role: 'base' }, ...(extra ?? [])], who) : null;
     return new VaultError('conflict', exists ? 'The file already exists.' : 'The file changed since base_revision. Re-read it and apply your change to current_revision.',
       { current_revision: current, base_revision: base, ...(id ? { conflict_id: id } : {}) });
   }
@@ -539,6 +543,7 @@ export class VaultStore {
       if (bytes.length > MAX_CONTENT && op !== 'restore' && !(who.allowLarge && bytes.length <= MAX_BLOB)) throw new VaultError('too_large', `content is larger than ${MAX_CONTENT} bytes`);
       const { abs, st } = await this.safeAbs(rel);
       if (st && !st.isFile()) throw new VaultError('invalid_argument', 'this is a folder');
+      if (!st) this.vault.assertNewName(rel);
       if (st) await this.refuseCaseAlias(rel);
       let curBytes: Buffer | null = null;
       if (st) {
@@ -550,14 +555,14 @@ export class VaultStore {
       const file = this.fileByPath(path, true);
       if (op === 'create') {
         if (cur !== 'absent' || await this.clash(abs)) throw this.conflict(file?.id ?? null, cur, base, undefined, true);
-      } else if (cur !== base) throw this.conflict(file?.id ?? null, cur, base, undefined, false, who);
+      } else if (cur !== base) throw this.conflict(sha(bytes) === cur ? null : file?.id ?? null, cur, base, undefined, false, who); // a write of what is already there loses nothing: no record
       const newHash = sha(bytes);
       if (curBytes && op !== 'create' && op !== 'restore' && !isText(curBytes)) throw new VaultError('binary', 'the existing file is binary; it cannot be replaced with text');
       if (curBytes && newHash === cur && op !== 'create') return { revision: cur, previous_revision: cur, path };
       if (curBytes) await this.putBlob(curBytes);             // pre-image: never lose it
       await this.putBlob(bytes);
       await fs.mkdir(dirname(abs), { recursive: true });
-      const tmpName = `.${basename(abs)}.${newId.intent()}.hub-tmp`;
+      const tmpName = `.${newId.intent()}.hub-tmp`; // no part of the file's name: a name of 255 bytes must still fit
       const tmp = join(dirname(abs), tmpName);
       const intent = newId.intent();
       this.db.prepare('INSERT INTO write_intents(id,op,path,base_revision,new_revision,tmp_name,agent_id,credential_id,author_kind,user_id,revision_op,origin,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)')
@@ -636,7 +641,8 @@ export class VaultStore {
     });
   }
 
-  rename(from: string[], to: string[], base: string, who: Who): Promise<{ revision: string; path: string }> {
+  /** `base` null: move the file whatever its content is now (a rename does not change content; editors cannot starve it). */
+  rename(from: string[], to: string[], base: string | null, who: Who): Promise<{ revision: string; path: string }> {
     const a = VaultStore.key(from), b = VaultStore.key(to);
     if (a === b) return Promise.reject(new VaultError('invalid_argument', 'from and to are the same path'));
     return this.lockAll([a, b], async () => {
@@ -650,11 +656,12 @@ export class VaultStore {
       const cur = sha(bytes);
       await this.observeLocked(from, { bytes, st: src.st });
       const file = this.fileByPath(a)!;
-      if (cur !== base) throw this.conflict(file.id, cur, base, undefined, false, who);
+      if (base !== null && cur !== base) throw this.conflict(file.id, cur, base, undefined, false, who);
       const dst = await this.safeAbs(to);
       const caseOnly = dirname(src.abs) === dirname(dst.abs) && basename(src.abs).toLowerCase() === basename(dst.abs).toLowerCase();
       // On a case-insensitive file system the destination of a case-only rename is the source itself; observing it
       // under the new name would record a second active row for the same file.
+      if (!dst.st && !caseOnly) this.vault.assertNewName(to);
       if (!caseOnly) await this.observeLocked(to);
       if ((dst.st && !caseOnly) || await this.clash(dst.abs, caseOnly ? basename(src.abs) : undefined)) {
         throw new VaultError('conflict', 'The destination already exists.', { reason: 'destination_exists' });
@@ -667,7 +674,7 @@ export class VaultStore {
         const again = await fs.readFile(src.abs).catch(() => null);
         if (!again || sha(again) !== cur) {
           await this.observeLocked(from, again ? { bytes: again, st: await fs.stat(src.abs) } : undefined, 'external_observed');
-          throw new VaultError('conflict', 'The file was changed by someone else while renaming. Nothing was renamed.', { current_revision: again ? sha(again) : 'absent', base_revision: base });
+          throw new VaultError('conflict', 'The file was changed by someone else while renaming. Nothing was renamed.', { current_revision: again ? sha(again) : 'absent', base_revision: base ?? cur });
         }
         who.recheck?.(); this.assertWritable(); await this.assertConfined(from); await this.assertConfined(to);
         await fs.rename(src.abs, dst.abs);

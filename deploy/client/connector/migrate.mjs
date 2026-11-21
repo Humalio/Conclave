@@ -514,18 +514,22 @@ export const defaultUserEnv = {
  */
 export function finish(home, { removeLegacyCa = false, userEnv = defaultUserEnv } = {}) {
   const data = readJson(stateFile(home), null);
-  if (!data || data.status !== 'applied') return { ok: false, reason: 'nothing_to_finish', lines: [] };
+  // A move that is already finished can still have the old CA setting removed, when the user asks for it.
+  const again = !!data && data.status === 'finished' && removeLegacyCa;
+  if (!data || (data.status !== 'applied' && !again)) return { ok: false, reason: 'nothing_to_finish', lines: [] };
   // A retired agent the move skipped still holds the old entry: --finish waits until its folder is removed (or its old
   // agent-hub entry is), because the rollback copies are the only way back to the old shared pieces it still uses.
-  const left = (data.skipped ?? []).filter((s) => { const f = canonicalFolder(s.folder); return f && hasLegacyEntry(f); });
+  const left = again ? [] : (data.skipped ?? []).filter((s) => { const f = canonicalFolder(s.folder); return f && hasLegacyEntry(f); });
   if (left.length) return { ok: false, reason: 'retired_agents_remain', lines: [`these retired agents were skipped and their folders are still on this PC: ${left.map((s) => `${s.label} (${s.folder})`).join('; ')}`, 'remove those folders (they have no live key), then run `conclave migrate --finish` again'] };
   const lines = [];
-  data.status = 'finished'; data.finished_at = new Date().toISOString();
-  // every run's copies go, an interrupted run's kept ones too
-  rmSync(backupDir(home, data), { recursive: true, force: true });
-  rmSync(join(home, 'migration', 'backups'), { recursive: true, force: true });
-  atomicWrite(stateFile(home), JSON.stringify(data, null, 2) + '\n');
-  lines.push('the rollback copies were removed; the move can no longer be undone');
+  if (!again) {
+    data.status = 'finished'; data.finished_at = new Date().toISOString();
+    // every run's copies go, an interrupted run's kept ones too
+    rmSync(backupDir(home, data), { recursive: true, force: true });
+    rmSync(join(home, 'migration', 'backups'), { recursive: true, force: true });
+    atomicWrite(stateFile(home), JSON.stringify(data, null, 2) + '\n');
+    lines.push('the rollback copies were removed; the move can no longer be undone');
+  }
   const val = userEnv.get('NODE_EXTRA_CA_CERTS');
   const caFile = join(home, 'hub-ca.pem');
   if (!val) lines.push('no NODE_EXTRA_CA_CERTS setting found');
@@ -542,3 +546,25 @@ export function finish(home, { removeLegacyCa = false, userEnv = defaultUserEnv 
 
 export const migrationState = (home) => readJson(stateFile(home), null);
 export { hubKeyOf };
+
+/**
+ * Whether this PC still holds pieces of the old setup that `conclave migrate --finish` (with `--remove-legacy-ca`) would clear:
+ * the rollback copies of a move that is not finished, or NODE_EXTRA_CA_CERTS still naming the old setup's `hub-ca.pem`. It
+ * answers yes or no and never a path (the check-in carries only this flag). A user environment read that fails counts as no.
+ */
+export function legacyLeftovers(home, userEnv = defaultUserEnv) {
+  const data = readJson(stateFile(home), null);
+  if (data && (data.status === 'applied' || data.status === 'applying')) return true;
+  try { const v = userEnv.get('NODE_EXTRA_CA_CERTS'); if (v && pathKey(v) === pathKey(join(home, 'hub-ca.pem'))) return true; } catch { /* unreadable: not reported */ }
+  return false;
+}
+
+/** What `conclave check` says about the leftovers, in plain words, or null when there are none. It only offers the command; it never runs it. */
+export function leftoversOffer(home, userEnv = defaultUserEnv) {
+  if (!legacyLeftovers(home, userEnv)) return null;
+  const data = readJson(stateFile(home), null);
+  if (data?.status === 'applying') return 'A move to the connector on this PC was interrupted. Run `conclave migrate --apply` again to complete it, or `conclave migrate --rollback` to undo it. Afterwards `conclave migrate --finish --remove-legacy-ca` clears the old setup\'s leftovers; Conclave never runs it for you.';
+  return data?.status === 'applied'
+    ? 'This PC still keeps the old setup\'s rollback copies, and may still set the old CA environment variable (NODE_EXTRA_CA_CERTS). Once everything has worked for a while, `conclave migrate --finish --remove-legacy-ca` deletes the copies (you can no longer undo the move) and removes that variable if the old setup wrote it. Conclave never runs it for you.'
+    : 'The old setup\'s CA environment variable (NODE_EXTRA_CA_CERTS) still points at its old certificate file. `conclave migrate --finish --remove-legacy-ca` removes it if the old setup wrote it. Conclave never runs it for you.';
+}

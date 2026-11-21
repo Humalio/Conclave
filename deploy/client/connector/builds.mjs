@@ -15,6 +15,11 @@ import { mkdirSync, writeFileSync, readFileSync, renameSync, rmSync, existsSync,
 import { randomBytes } from 'node:crypto';
 import { readState, writeState, atomicWrite, withLock } from './paths.mjs';
 import { sha256, VERSION_RE, RELEASE_ROOTS } from './release.mjs';
+import { decryptInPlace } from './keyfile.mjs';
+
+/** A build that carries this file reads an encrypted key file; one without it (an older connector) reads only a plain one. */
+export const KEY_STORE_FILE = 'deploy/client/connector/keystore.mjs';
+const readsEncryptedKeys = (b, version) => !!b.builds[version]?.files?.[KEY_STORE_FILE];
 
 export const appDir = (home) => join(home, 'app');
 export const buildsPath = (home) => join(home, 'app', 'builds.json');
@@ -154,12 +159,20 @@ export function markUp(home, version) {
   });
 }
 
-/** `conclave rollback`: back to the previous build, only if it was verified and is intact. `{ok, version}` or `{ok: false, reason}`. */
+/**
+ * `conclave rollback`: back to the previous build, only if it was verified and is intact. `{ok, version}` or `{ok: false, reason}`.
+ * A previous build that cannot read an encrypted key file gets it back in plain form first; when it cannot be decrypted
+ * the rollback is refused (`keys_unreadable`, with the key file's own reason) and the PC stays where it is.
+ */
 export function rollback(home) { return locked(home, () => rollbackNow(home)); }
 function rollbackNow(home) {
   const b = readBuilds(home);
   if (!b.previous) return { ok: false, reason: 'no_previous_build' };
   if (!intact(home, b.previous)) return { ok: false, reason: 'previous_not_verified' };
+  if (!readsEncryptedKeys(b, b.previous)) {
+    const k = decryptInPlace(home);
+    if (!k.ok) return { ok: false, reason: 'keys_unreadable', detail: k.reason, version: b.previous };
+  }
   const from = b.current;
   b.current = b.previous; b.previous = null; b.pending = null; b.rolled_back = from;
   if (from && !b.failed.includes(from)) b.failed.push(from);
@@ -174,6 +187,7 @@ function rollbackNow(home) {
  * back once it has run a minute (`markUp`), so only starts that crash early stay counted. After more than three of those
  * it goes back to the previous build, but only to one verified at install whose files still match (the same rule as
  * `rollback`, repeated here because the launcher must not depend on the build it is judging).
+ * It cannot open the platform store, so when the build it goes back to cannot read an encrypted key file it says so.
  */
 export const LAUNCHER = `#!/usr/bin/env node
 // Conclave connector launcher. Written by the connector; do not edit. It runs the current build named in app/builds.json.
@@ -192,12 +206,17 @@ const read = (p) => JSON.parse(readFileSync(p, 'utf8'));
 const unchanged = (b, v) => { const e = b.builds && b.builds[v]; if (!V.test(String(v)) || !e || !e.files || !Object.keys(e.files).length) return false;
   try { return Object.entries(e.files).every(([p, h]) => createHash('sha256').update(readFileSync(join(app, v, ...p.split('/')))).digest('hex') === h); } catch { return false; } };
 const intact = (b, v) => unchanged(b, v) && b.builds[v].verified === true;
+// After going back: a build without the key store cannot read a key file the newer build encrypted, so say why.
+const keysNote = (v) => { let k; try { k = read(join(dirname(app), 'keys.json')); } catch { return; }
+  if (k && k.format === 'conclave-keys-enc' && !(b.builds[v] && b.builds[v].files && b.builds[v].files['${KEY_STORE_FILE}']))
+    process.stderr.write('conclave: the key file is encrypted and build ' + v + ' cannot read it, so it finds no keys. The keys are still in the file: install the newer connector again to use them.\\n'); };
 let b;
 try { b = read(file); } catch { try { b = read(file + '.bak'); } catch { fail(); } }
 if (process.argv[2] === 'service' && process.argv[3] === 'worker' && b.pending && b.pending.version === b.current) {
   b.pending.boots = (b.pending.boots || 0) + 1;
   if (b.pending.boots > 3 && b.previous && intact(b, b.previous)) {
     b.failed = [...(b.failed || []), b.current]; b.rolled_back = b.current; b.current = b.previous; b.previous = null; b.pending = null;
+    keysNote(b.current);
   }
   save(b);
   // A worker that stops only because this PC has no hub yet (exit 76, e.g. before \`conclave migrate\`), or because another
@@ -215,6 +234,7 @@ if (!unchanged(b, b.current)) {
   b.failed = [...(b.failed || []).filter((x) => x !== bad), bad]; b.rolled_back = bad; b.current = b.previous; b.previous = null; b.pending = null;
   save(b);
   process.stderr.write('conclave: the connector build ' + bad + ' has a file that changed since it was installed; running ' + b.current + ' instead.\\n');
+  keysNote(b.current);
 }
 // The build serves the installation this launcher sits in, whatever the environment it was started from says.
 process.env.CONCLAVE_HOME = dirname(app);

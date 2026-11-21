@@ -25,7 +25,7 @@ import { brokerAddress, brokerSecretPath, brokerProof, proofMatches } from './br
 import { resolveContext } from './context.mjs';
 import { request } from './hubclient.mjs';
 import { alive, markRunning } from './run.mjs';
-import { folderApproved, requestFolder } from './approvals.mjs';
+import { folderApproved, requestFolder, folderDenied } from './approvals.mjs';
 import { scanTranscript } from './leak.mjs';
 import { lineForLocal } from './hook.mjs';
 import { readIsolation } from './isolation.mjs';
@@ -103,6 +103,8 @@ export async function startBroker({ home, log = () => {}, deps = {} }) {
     if (!ctx.ok) return { ok: false, reason: ctx.reason };
     const bound = ctx.binding;
     if (!launcherRuns.has(pathKey(ctx.folder)) && !folderApproved(home, ctx.folder, bound)) {
+      // A chat the PC user denied is told so for ten minutes and is not put back on the screen; after that it asks again.
+      if (folderDenied(home, ctx.folder)) return { ok: false, reason: 'denied' };
       requestFolder(home, ctx.folder, bound);
       return { ok: false, reason: 'needs_click' };
     }

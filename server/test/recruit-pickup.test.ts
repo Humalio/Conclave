@@ -1,7 +1,7 @@
 /**
  * Recruits get their key through onboarding's pickup (docs/onboarding.md#recruits-from-a-coordinator): team_recruit and
  * the operator's approval of a recruit request create the agent and an approved pickup on the coordinator's PC, and never
- * return a key. The PC's setup client picks it up, writes it to keys.env and confirms; then the recruit joins the team.
+ * return a key. The PC's connector, once its user allows it, picks it up, writes it to its key file and confirms; then the recruit joins the team.
  * No recruit result, log line, audit event, alert or notice may contain key material.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
@@ -22,7 +22,7 @@ const api = async (method: string, path: string, body?: unknown) => {
   const r = await fetch(`${base}/api${path}`, { method, headers: { 'content-type': 'application/json', cookie: admin.cookie, 'x-csrf-token': admin.csrf }, body: body === undefined ? undefined : JSON.stringify(body) });
   return { status: r.status, body: (await r.json().catch(() => ({}))) as any, text: '' };
 };
-/** The setup client's calls, with the PC's app key. */
+/** The connector's pickup calls, with the PC's app key. */
 const ob = async (path: string, body: unknown) => {
   const r = await fetch(`${base}/onboard${path}`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${pcKey}` }, body: JSON.stringify(body) });
   return { status: r.status, body: (await r.json()) as any };
@@ -99,10 +99,12 @@ describe('a recruit\'s key goes to the coordinator\'s PC through a pickup', () =
     });
     expect(r.status, JSON.stringify(r)).toBe('created');
     expect(r.pickup).toMatchObject({ pc: { id: pcId, name: 'coordinator-pc' }, folder: 'second-reader' });
-    expect(r.pickup.command).toBe(`node ~/.config/conclave/setup.mjs wait --request ${r.pickup.request_id}`);
+    expect(r.pickup.command).toBeUndefined();
+    expect(r.pickup.expires_at).toBeGreaterThan(Date.now());
     expect(r.pickup.session_var).toMatch(/_SECOND_READER_SESSION_KEY$/);
     expect(text).toContain('coordinator-pc');
-    expect(text).toContain(r.pickup.command);
+    expect(text).toContain("allows the new agent on the connector's screen");
+    expect(text).not.toContain('setup.mjs');
     // No key anywhere: not in the result, not in the log, not in what the hub recorded or told anyone.
     expect(JSON.stringify(r) + text).not.toMatch(KEY_RE);
     expect(log).toContain('/mcp'); // the capture saw the hub's request log
@@ -116,7 +118,7 @@ describe('a recruit\'s key goes to the coordinator\'s PC through a pickup', () =
     // The operator sees it as an approved request of the PC.
     const req = app.onboarding.request(r.pickup.request_id)!;
     expect(req).toMatchObject({ machine_id: pcId, kind: 'add_agents', state: 'approved', team_id: X.tid });
-    // The setup client's pickup: the only answer that carries the key, and only to the PC's own app key.
+    // The connector's pickup: the only answer that carries the key, and only to the PC's own app key.
     let p: any, c: any;
     const log2 = await logged(async () => {
       p = await ob('/pickup', { request_id: r.pickup.request_id });
@@ -155,7 +157,7 @@ describe('a recruit\'s key goes to the coordinator\'s PC through a pickup', () =
     expect(ap.body.pickup.pc.id).toBe(pcId);
     const notes = (await X.C('session_whoami')).structuredContent.notices as { kind: string; body: string }[];
     const d = notes.find((x) => x.kind === 'recruit_decision')!;
-    expect(d.body).toContain(ap.body.pickup.command);
+    expect(d.body).toContain("allows the new agent on the connector's screen");
     expect(JSON.stringify(notes)).not.toMatch(KEY_RE);
     expect(records()).not.toMatch(KEY_RE);
   });

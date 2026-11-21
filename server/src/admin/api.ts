@@ -8,7 +8,7 @@ import type { Keys, Credential } from '../keys/keys.js';
 import { KeyError } from '../keys/keys.js';
 import { registerAttachmentApi } from './attachmentApi.js';
 import type { TaskAttachments } from '../shares/taskAttachments.js';
-import { LIVE_STATUSES, type KeyCollections } from '../keys/keyCollect.js';
+import type { Handovers } from '../keys/handover.js';
 import type { Audit, Actor } from '../audit/audit.js';
 import type { Vault } from '../vault/vault.js';
 import type { Config } from '../config.js';
@@ -53,6 +53,7 @@ import { registerGraphAdmin } from './graphApi.js';
 import type { Graph } from '../graph/graph.js';
 import type { Phase5Deps } from './phase5.js';
 import { registerOnboardingApi } from './onboardingApi.js';
+import { PAIRING_MS, caCheck } from '../connector/identity.js';
 import { registerConnectorApi } from './connectorApi.js';
 import { through, type Relays, type ThroughRelay } from '../relay/relays.js';
 import { registerRelayApi } from './relayApi.js';
@@ -67,7 +68,7 @@ import type { Checkouts } from '../checkout/checkout.js';
 import type { CheckoutKeys } from '../checkout/render.js';
 import type { Onboarding } from '../onboarding/onboarding.js';
 import type { ClientFiles } from '../onboarding/http.js';
-import { pickupPrompt, secretPrompt, toolsLine, clientOf } from '../keys/keyPrompt.js';
+import { secretPrompt, toolsLine, clientOf } from '../keys/keyPrompt.js';
 import { NeedsYou, NEEDS_PAGE_MAX, sourceReply, type Viewer, type CheckoutNeeds } from './needsYou.js';
 import { Users, registerUsersApi, type UserRow } from './users.js';
 import { scopeOf, MEMBER_LIVE, MEMBER_READY, BEFORE_TOTP, ADMIN_ONLY } from './scopes.js';
@@ -80,7 +81,7 @@ import { ownedAgents } from './accountView.js';
 const COOKIE = 'ah_admin';
 const SESSION_MS = 12 * 60 * 60 * 1000;
 
-export interface AdminDeps { users: Users; routing: Routing; demo?: DemoController; db: Db; keys: Keys; audit: Audit; vault: Vault; store: VaultStore; config: Config; loginLimit: RateLimit; setup: Setup; links: Links; messaging: Messaging; teams: Teams; phase5: Omit<Phase5Deps, 'db' | 'keys' | 'audit'>; graph: Graph; feedback: Feedback; hardware: Hardware; decisions: Decisions; directives: Directives; onboarding: Onboarding; clientFiles: ClientFiles; blueprint: Blueprint; checkouts?: Checkouts; checkoutKeys?: CheckoutKeys; delegations?: Delegations; mirror?: Mirror; ownerScope?: OwnerScope; keyCollections?: KeyCollections; taskAttachments?: TaskAttachments; connector?: Connector; vaultSync?: VaultSync; relays?: Relays }
+export interface AdminDeps { users: Users; routing: Routing; demo?: DemoController; db: Db; keys: Keys; audit: Audit; vault: Vault; store: VaultStore; config: Config; loginLimit: RateLimit; setup: Setup; links: Links; messaging: Messaging; teams: Teams; phase5: Omit<Phase5Deps, 'db' | 'keys' | 'audit'>; graph: Graph; feedback: Feedback; hardware: Hardware; decisions: Decisions; directives: Directives; onboarding: Onboarding; clientFiles: ClientFiles; blueprint: Blueprint; checkouts?: Checkouts; checkoutKeys?: CheckoutKeys; delegations?: Delegations; mirror?: Mirror; ownerScope?: OwnerScope; handovers?: Handovers; taskAttachments?: TaskAttachments; connector?: Connector; vaultSync?: VaultSync; relays?: Relays }
 interface AdminCtx { id: string; username: string; csrf: string; totp: boolean; role: 'admin' | 'member'; user: UserRow }
 declare module 'fastify' { interface FastifyRequest { admin?: AdminCtx; member?: MemberScope } }
 
@@ -223,6 +224,13 @@ export function registerAdminApi(f: FastifyInstance, d: AdminDeps): string[] {
       // A user who must enrol 2FA signs in to a session that reaches only /api/me, /api/totp/* and /api/logout;
       // setup_needed says so (the console's two-factor gate). The password is always set: the hub generates it.
       return { username: b.username, csrf, totp_enrolled: u!.totp_secret !== null, role: u!.role, totp_required: users.totpRequired(u!), setup_needed: !users.ready(u!) };
+    });
+    // Public: whether this browser holds a live session, and nothing else. The console asks it first, so a signed-out start
+    // shows the login page without a refused /api/me in the browser's log.
+    api.get('/api/session', async (req) => {
+      const sid = req.cookies[COOKIE];
+      const row = sid ? db.prepare('SELECT s.expires_at, u.status FROM admin_sessions s JOIN admin_users u ON u.id=s.admin_id WHERE s.id_hash=?').get(Buffer.from(sha256Hex(sid), 'hex')) as { expires_at: number; status: string } | undefined : undefined;
+      return { signed_in: !!row && row.expires_at >= Date.now() && row.status === 'active' };
     });
     api.get('/api/me', async (req) => {
       const u = req.admin!.user;
@@ -477,11 +485,17 @@ export function registerAdminApi(f: FastifyInstance, d: AdminDeps): string[] {
       if (b.machine_id && !pc) throw new KeyError('not_found', 'PC not found');
       if (pc?.status === 'retired') throw new KeyError('invalid_state', 'a key cannot be bound to a retired PC');
       const agentId = b.agent_id ?? keys.createAgent(b.new_agent!.label, b.new_agent!.project ?? null, actor(req), b.new_agent!.owner_id ?? null).id;
-      return tx(db, () => keyPrompt(keys.createSessionKey({ agentId, label: b.label, expiresAt: b.expires_at, templateId: b.template_id, machineId: b.machine_id ?? null }, actor(req)), 'new', actor(req)));
+      return tx(db, () => {
+        const r = keys.createSessionKey({ agentId, label: b.label, expiresAt: b.expires_at, templateId: b.template_id, machineId: b.machine_id ?? null }, actor(req));
+        // A key for a PC that runs the connector reaches it by key handover: its secret is never shown, and it works from confirm on.
+        const h = d.handovers?.rotate(r.credential.id, actor(req), null) ?? null;
+        if (h) { keys.blankSecret(r.credential.id, 'handover'); return { key: view(keys.credential(r.credential.id)!), handover: h }; }
+        return keyPrompt(r, 'new', actor(req));
+      });
     });
     api.get('/api/keys/:id', async (req) => {
       const c = cred(idOf(req));
-      return { key: view(c), policy_version: keys.policyVersion(c.policy_id), logins: keys.liveLogins({ credentialId: c.id }) };
+      return { key: view(c), policy_version: keys.policyVersion(c.policy_id), logins: keys.liveLogins({ credentialId: c.id }), handover: d.handovers?.open(c.id) ?? null };
     });
     for (const [path, fn] of [
       ['suspend', (id: string, a: Actor) => keys.setStatus(id, 'suspended', 'admin', a)],
@@ -491,49 +505,37 @@ export function registerAdminApi(f: FastifyInstance, d: AdminDeps): string[] {
       api.post(`/api/keys/:id/${path}`, async (req) => ({ key: view(fn(idOf(req), actor(req))) }));
     }
     api.post('/api/keys/:id/rotate', async (req) => {
-      // Rotate secret, and Make a new prompt for a key that never logged in: the same act, audited as key.rotate.
-      // reason: could the key have leaked; delivery: a key prompt, or Collect on the key's PC by its Codex wake, offered only for
-      // a routine rotation of a key that has logged in (docs/onboarding.md#collect-on-a-pc-the-codex-wake-picks-up-a-routine-rotation).
-      const b = body(z.object({ reason: z.enum(['routine', 'suspected_leak']).optional(), delivery: z.enum(['prompt', 'collect']).optional(), relay_id: z.string().nullable().optional() }), req);
+      // Rotate secret, and Make a new prompt for a key that never logged in: the same act. A session key whose PC runs the
+      // connector is rotated by key handover (docs/onboarding.md#key-handover-a-rotated-key-or-a-recruit-reaches-a-connector-pc):
+      // nothing changes until the PC confirms, and the answer is the open handover. Any other key is rotated now and its raw
+      // key shown once. reason: could the key have leaked.
+      const b = body(z.object({ reason: z.enum(['routine', 'suspected_leak']).optional(), relay_id: z.string().nullable().optional() }), req);
       const old = cred(idOf(req));
-      const relay = relayOf(b.relay_id);
-      const delivery = b.delivery ?? 'prompt';
-      let offer: ReturnType<KeyCollections['offer']> | null = null;
-      if (delivery === 'collect') {
-        if (old.kind !== 'session_key' || !d.keyCollections) throw new KeyError('invalid_argument', 'Only a session key can be collected.');
-        if (b.reason !== 'routine') throw new KeyError('invalid_state', 'Collect is only for a routine rotation. After a suspected leak, rotate the PC\'s app key too (or re-enrol the PC), then use a key prompt.');
-        offer = d.keyCollections.offer(old.id);
-        if (!offer.ok) throw new KeyError('invalid_state', offer.message ?? 'Collect is not offered for this key.', { reason: offer.reason });
-      }
       return tx(db, () => {
-        const r = keys.rotate(old.id, actor(req), { reason: b.reason ?? null, delivery });
-        if (offer) return { key: view(keys.credential(r.credential.id)!), collection: d.keyCollections!.arm(r.credential.id, offer, actor(req)) };
-        return r.credential.kind === 'session_key' ? keyPrompt(r, old.first_used_at ? 'rotated' : 'reissued', actor(req), relay) : { key: view(r.credential), secret: r.secret };
+        const h = old.kind === 'session_key' ? d.handovers?.rotate(old.id, actor(req), b.reason ?? null) ?? null : null;
+        if (h) {
+          // After a possible leak the PC's connector app key was replaced: its new pairing code is answered here once.
+          const { pairing: p, ...ho } = h;
+          const ca = d.clientFiles?.ca(), hub = d.onboarding.hubInfo();
+          return { key: view(keys.credential(old.id)!), handover: ho, ...(p ? { pairing: { code: p.code, code_expires_at: Date.now() + PAIRING_MS, ca_check: ca ? caCheck(ca.sha256) : null, hub_origin: hub.origin ?? null, pc: ho.pc } } : {}) };
+        }
+        const r = keys.rotate(old.id, actor(req), { reason: b.reason ?? null, delivery: old.kind === 'session_key' ? 'shown' : 'prompt' });
+        return r.credential.kind === 'session_key' ? keyPrompt(r, old.first_used_at ? 'rotated' : 'reissued', actor(req)) : { key: view(r.credential), secret: r.secret };
       });
     });
-    // The key page's collection line and whether Collect would be offered for the next rotation.
-    api.get('/api/keys/:id/collect', async (req) => {
+    // The key's handover for its page: the open one (Waiting for the PC user), the PC a rotation would go to (target: null
+    // means the raw key is shown once), and a rotation confirmed in the last 24 hours.
+    api.get('/api/keys/:id/handover', async (req) => {
       const c = cred(idOf(req));
-      if (!d.keyCollections || c.kind !== 'session_key') return { offer: null, collection: null };
-      return { offer: d.keyCollections.offer(c.id), collection: d.keyCollections.latest(c.id) };
+      return { handover: d.handovers?.open(c.id) ?? null, target: d.handovers?.target(c.id) ?? null, confirmed: d.handovers?.confirmed(c.id) ?? null, not_on_pc: d.handovers?.notOnPc(c.id) ?? null, leak_unfinished: d.handovers?.leakUnfinished(c.id) ?? false };
     });
-    // Cancel: the open collection is void and the key keeps no usable secret.
-    api.post('/api/keys/:id/collect/cancel', async (req) => {
+    // Cancel: nothing changes on the key; the old key goes on working.
+    api.post('/api/keys/:id/handover/cancel', async (req) => {
       const c = cred(idOf(req));
-      if (!d.keyCollections) throw new KeyError('invalid_state', 'This key has no open collection.');
-      return { collection: d.keyCollections.cancel(c.id, actor(req)) };
-    });
-    // Show a key prompt instead: the open collection is void and today's key prompt is made for the same key.
-    api.post('/api/keys/:id/collect/prompt', async (req) => {
-      const c = cred(idOf(req));
-      if (!d.keyCollections) throw new KeyError('invalid_state', 'This key has no open collection.');
-      const relay = relayOf(body(z.object({ relay_id: z.string().nullable().optional() }), req).relay_id);
-      return tx(db, () => {
-        // A collection that has not ended (open, picked up, confirmed, signed in) is ended first, so it cannot later blank
-        // the prompt's key; after it ended (expired, failed, a conflict) the prompt is made directly.
-        if (LIVE_STATUSES.includes(d.keyCollections!.latest(c.id)?.status ?? '')) d.keyCollections!.cancel(c.id, actor(req), 'prompt_instead');
-        return keyPrompt(keys.reissueSecret(c.id, 'pickup'), 'rotated', actor(req), relay);
-      });
+      const h = d.handovers?.open(c.id) ?? null;
+      if (!h) throw new KeyError('invalid_state', 'This key has no open handover.');
+      d.handovers!.cancel(h.id, 'operator', actor(req));
+      return { key: view(keys.credential(c.id)!), handover: null };
     });
     api.post('/api/keys/:id/end-logins', async (req) => ({ ended: keys.endLogins(idOf(req), actor(req)) }));
     // PC binding: {machine_id} binds a session key to that PC, {machine_id: null} makes it free.
@@ -596,7 +598,7 @@ export function registerAdminApi(f: FastifyInstance, d: AdminDeps): string[] {
      * single-use pickup code and the key's secret is made at pickup, so it never leaves the hub here; a free key with no PC
      * gets its raw key, the one accepted exception. `handoff` is the prompt text, for the screens that only show text.
      */
-    function keyPrompt(r: { credential: Credential; secret: string }, reason: 'new' | 'rotated' | 'reissued', a: Actor, relay: ThroughRelay | null = null) {
+    function keyPrompt(r: { credential: Credential; secret: string }, reason: 'new' | 'rotated' | 'reissued', _a: Actor) {
       const t = keys.keyTarget(r.credential.id), c = keys.credential(r.credential.id)!;
       const agent = keys.agent(c.agent_id!)?.label ?? c.label;
       // The login and work-loop tools every session has are left out: the line says what the rules decide, for this key on
@@ -608,12 +610,6 @@ export function registerAdminApi(f: FastifyInstance, d: AdminDeps): string[] {
       const rules = keys.rulesFor(c.id), cap = withCeilings(c, capApp ? keys.rulesFor(capApp.id) : []);
       const tools = toolsLine([...DEFAULT_TOOLS, ...GRANTED_TOOLS, 'task_list'].map((tool) => ({ tool,
         allowed: (DEFAULT_TOOLS as readonly string[]).includes(tool) ? !explicitlyDenied(rules, cap, 'tool.invoke', `tool:${tool}`) : authorize(rules, cap, 'tool.invoke', `tool:${tool}`).allowed })));
-      if (t.pc && t.session_var) {
-        const p = keys.armPickup(c.id, t.pc.id, t.session_var, a);
-        const text = pickupPrompt({ ...(relay ? { relay } : {}), hubUrl: relay ? relay.origin : config.publicUrl, setupSha256: d.clientFiles.file('setup.mjs')?.sha256 ?? null, code: p.code, expiresAt: p.expires_at, pc: t.pc.name,
-          sessionVar: t.session_var, agent, client: clientOf(t.client_app), folder: t.folder, tools, reason });
-        return { key: view(keys.credential(c.id)!), prompt: { text, mode: 'pickup' as const, pc: t.pc.name, session_var: t.session_var, client: clientOf(t.client_app), expires_at: p.expires_at, note: t.note }, handoff: text };
-      }
       const text = secretPrompt({ secret: r.secret, agent, tools, reason });
       return { key: view(c), secret: r.secret, prompt: { text, mode: 'secret' as const, pc: null, session_var: t.session_var, client: clientOf(t.client_app) }, handoff: text };
     }

@@ -856,7 +856,7 @@ describe('recruiting: a coordinator adds agents within the envelope', () => {
     await pickup(ok.body.pickup);
     expect((await api('GET', `/teams/${X.tid}`)).body.team.members.some((m: any) => m.agent_id === ok.body.agent.id && m.role === 'stakeholder')).toBe(true);
     const notices = (await X.C('session_whoami')).structuredContent.notices as { kind: string; body: string }[];
-    expect(notices.some((x) => x.kind === 'recruit_decision' && x.body.includes('approved') && x.body.includes(ok.body.pickup.command))).toBe(true);
+    expect(notices.some((x) => x.kind === 'recruit_decision' && x.body.includes('approved') && x.body.includes("connector's screen"))).toBe(true);
     const r2 = (await X.C('team_recruit', { team_id: X.tid, label: 'Other', role: 'worker', purpose: 'p' })).structuredContent;
     expect((await api('POST', `/recruits/${r2.request_id}/deny`, { note: 'not now' })).body.denied).toBe(true);
     expect((await api('POST', `/recruits/${r2.request_id}/approve`)).status).toBe(409);
@@ -1059,10 +1059,9 @@ describe('code review fixes (10 Nov)', () => {
     expect(rot.status).toBe(200);
     const extra = mk('late');
     expect((await api('POST', `/teams/${X.tid}/members`, { agent_id: extra.id, role: 'worker' })).status).toBeLessThan(300);
-    // The key logged in through appKey's PC, so its prompt carries a pickup code for that PC (docs/onboarding.md#key-prompts-a-new-rotated-or-reissued-session-key).
-    expect(rot.body.prompt.mode).toBe('pickup');
-    const code = /cnv_key_[a-z2-7]{26}/.exec(rot.body.prompt.text)![0];
-    const secret = app.keys.redeemPickup(app.keys.verifyKey(appKey, 'app_key'), code).secret;
+    // The key's PC runs no connector here, so the rotated key is shown once (docs/onboarding.md#key-handover-a-rotated-key-or-a-recruit-reaches-a-connector-pc).
+    expect(rot.body.prompt.mode).toBe('secret');
+    const secret = rot.body.secret as string;
     const W1 = await loginWith(appKey, secret);
     expect((await W1('task_list', { team_id: X.tid })).isError).toBeFalsy();
   });

@@ -34,8 +34,9 @@
  *                                         check the request, then file it (no key or code passes through the agent)
  *   conclave setup continue [--wait <s>] [--hub <hub id>]
  *                                         one step of setup: wait for approval, pick up, build and register folders
- *   conclave setup status [--json] [--hub <hub id>]    each agent: Waiting for approval, Ready to open, Connected
+ *   conclave setup status [--json] [--hub <hub id>]    each agent: Waiting for approval, Ready to open, Connected, Key refused
  *   conclave setup retry <agent> [--hub <hub id>]      rebuild one agent's folder
+ *   conclave setup withdraw [--hub <hub id>]           withdraw this PC's request (also one a Re-enrol reopened)
  *   conclave pair --hub <https origin> --check <hub check>
  *                                         pair without the screen; the code is read from stdin, never the command line
  *   conclave uninstall [--json]           removes what the connector created or changed, for every hub, then the
@@ -67,7 +68,7 @@ import { readFileSync } from 'node:fs';
 
 const home = confDir();
 const claudeJson = process.env.CLAUDE_CONFIG_DIR ? join(process.env.CLAUDE_CONFIG_DIR, '.claude.json') : join(homedir(), '.claude.json');
-const usage = (m) => { process.stderr.write(`conclave: ${m}\nusage: conclave mcp <folder> | check [--folder f] [--probe] [--json] | repair [--folder f] [--grant-trust] [--accept-folder-changes] | register --folder f --hub-id id --ca-sha256 hex --agent label | usage [on|off] [--json] [--days n] | destinations [add folder|remove id] | restores | hardware [on|off] | service install|remove|status|run | install-service | uninstall-service | check --hardened | update [--check] | rollback | settings [switch on|off] | setup [schema|request|continue|status|retry] | pair --hub url --check hex | version | uninstall [--json] | disconnect --hub-id id --ca-sha256 hex [--json]\n`); process.exit(2); };
+const usage = (m) => { process.stderr.write(`conclave: ${m}\nusage: conclave mcp <folder> | check [--folder f] [--probe] [--json] | repair [--folder f] [--grant-trust] [--accept-folder-changes] | register --folder f --hub-id id --ca-sha256 hex --agent label | usage [on|off] [--json] [--days n] | destinations [add folder|remove id] | restores | hardware [on|off] | service install|remove|status|run | install-service | uninstall-service | check --hardened | update [--check] | rollback | settings [switch on|off] | setup [schema|request|continue|status|retry|withdraw] | pair --hub url --check hex | version | uninstall [--json] | disconnect --hub-id id --ca-sha256 hex [--json]\n`); process.exit(2); };
 
 function flags(argv, valued, bool) {
   const out = { _: [] };
@@ -121,7 +122,7 @@ if (cmd === 'mcp') {
   }
   const r = await runCheck(home, resolve(f.folder ?? '.'), { claudeJson, probe: !!f.probe });
   if (f.json) process.stdout.write(JSON.stringify(r) + '\n');
-  else { process.stdout.write(`${r.ok ? 'OK' : 'PROBLEM'}: ${r.line}\n`); for (const s of r.steps) process.stdout.write(`  ${s.ok ? 'ok ' : 'FAIL'} ${s.step}\n`); }
+  else { process.stdout.write(`${r.ok ? 'OK' : 'PROBLEM'}: ${r.line}\n`); for (const s of r.steps) process.stdout.write(`  ${s.offer ? 'tip ' : s.ok ? 'ok ' : 'FAIL'} ${s.step}\n`); }
   process.exit(r.ok ? 0 : 1);
 } else if (cmd === 'repair') {
   const f = flags(rest, ['--folder'], ['--grant-trust', '--accept-folder-changes']);
@@ -166,6 +167,7 @@ if (cmd === 'mcp') {
         say(`${s.name}  [${s.state}]  ${s.folder}`);
         say(`  hub ${s.hub_id} · ${s.files} files · ${(s.bytes / 1048576).toFixed(1)} MiB · ${s.last_run_at ? `last run ${s.last_run_at}` : 'not run yet'}`);
         if (s.local_edits) say(`  WARNING: ${s.local_edits} file${s.local_edits === 1 ? ' holds a local edit' : 's hold local edits'}; the next hub change keeps the edit in .conclave-trash and replaces the file`);
+        if (s.local_new) say(`  WARNING: ${s.local_new} file${s.local_new === 1 ? ' was' : 's were'} created here and ${s.local_new === 1 ? 'is' : 'are'} not on the hub; ${s.local_new === 1 ? 'it is' : 'they are'} never uploaded and stay as they are (a hub file with the same name would replace ${s.local_new === 1 ? 'it' : 'one'}, keeping yours in .conclave-trash)`);
         for (const w of s.warnings ?? []) say(`  WARNING: ${w}`);
         for (const x of (s.refused ?? []).slice(0, 10)) say(`  refused: ${x.path} (${x.reason})`);
         if (s.last_error) say(`  ${s.last_error}`);
@@ -284,6 +286,8 @@ if (cmd === 'mcp') {
     process.exit(s.installed ? 0 : 1);
   } else if (sub === 'run') {
     const { runSupervisor, holderText, LOCKED } = await import('./connector/worker.mjs');
+    try { const rf = svc.refreshService(home); if (rf.error) process.stderr.write(`conclave: the service task was not updated: ${rf.error}
+`); } catch { /* the service runs on the task it has */ }
     const r = await runSupervisor({ home });
     if (r.locked) { process.stderr.write(`conclave: the connector service is already running (${holderText(r.locked)}); this one stops.\n`); process.exit(LOCKED); }
     process.exit(0);
@@ -291,6 +295,9 @@ if (cmd === 'mcp') {
     const { runWorker, holderText, RESTART, NO_HUBS, LOCKED } = await import('./connector/worker.mjs');
     const ac = new AbortController();
     for (const s of ['SIGINT', 'SIGTERM']) process.once(s, () => ac.abort());
+    // The worker starts through the launcher on the newest build, so this is where an update's new task definition is applied.
+    try { const rf = svc.refreshService(home); if (rf.error) process.stderr.write(`conclave: the service task was not updated: ${rf.error}
+`); } catch { /* the service runs on the task it has */ }
     const why = await runWorker({ home, signal: ac.signal, claudeJson });
     if (why === 'locked') {
       const { lockHolder } = await import('./connector/processes.mjs');
@@ -323,7 +330,7 @@ if (cmd === 'mcp') {
 } else if (cmd === 'rollback') {
   const { rollback } = await import('./connector/builds.mjs');
   const r = rollback(home);
-  if (!r.ok) { process.stderr.write(r.reason === 'no_previous_build' ? 'conclave: there is no previous build on this PC.\n' : 'conclave: the previous build was never verified, or its files changed, so it is not used.\n'); process.exit(1); }
+  if (!r.ok) { process.stderr.write(r.reason === 'no_previous_build' ? 'conclave: there is no previous build on this PC.\n' : r.reason === 'keys_unreadable' ? `conclave: version ${r.version} cannot read an encrypted key file, and this one cannot be decrypted (${r.detail}), so the PC stays on this version.\n` : 'conclave: the previous build was never verified, or its files changed, so it is not used.\n'); process.exit(1); }
   process.stdout.write(`Back on version ${r.version}.\n`);
 } else if (cmd === 'settings') {
   const { readSettings, setSwitch, SWITCHES } = await import('./connector/settings.mjs');
@@ -425,16 +432,24 @@ async function setupCmd(cmd, argv) {
   try {
     if (sub === 'continue') {
       const r = await ob.advance(home, hubKey, { waitS: Number(f.wait ?? 0) || 0, claudeJson });
-      process.stdout.write(`${r.phase === 'waiting' ? 'Waiting for your administrator to approve the request.' : r.phase === 'changes' ? `Changes asked by your administrator (their words): ${r.note ?? ''}` : r.phase === 'closed' ? `The request was ${r.state}.` : r.phase === 'no_request' ? 'No team request yet: file one with conclave setup request --file <path>.' : `Set up: ${r.built.join(', ') || 'none'}.${r.failed.length ? ` Not set up: ${r.failed.map((x) => `${x.label} (${x.error})`).join('; ')}.` : ''}`}\n`);
+      process.stdout.write(`${r.phase === 'waiting' ? (r.declined ? 'The key pickup was declined on this PC. The PC user can still allow it on the connector screen (conclave setup).' : r.stage === 'allow' ? 'Approved. Waiting for the PC user to press Allow on the connector screen (conclave setup) before the keys are picked up.' : 'Waiting for your administrator to approve the request.') : r.phase === 'changes' ? `Changes asked by your administrator (their words): ${r.note ?? ''}` : r.phase === 'closed' ? `The request was ${r.state}.` : r.phase === 'no_request' ? 'No team request yet: file one with conclave setup request --file <path>.' : `Set up: ${r.built.join(', ') || 'none'}.${r.failed.length ? ` Not set up: ${r.failed.map((x) => `${x.label} (${x.error})`).join('; ')}.` : ''}`}\n`);
       return r.phase === 'set_up' ? (r.failed.length ? 1 : 0) : r.phase === 'waiting' ? 3 : 1;
     }
     if (sub === 'status') {
       const r = await ob.agentRows(home, hubKey);
       if (f.json) { process.stdout.write(JSON.stringify(r.agents) + '\n'); return 0; }
+      if (r.hub === 'key_refused') process.stdout.write('The hub refused this PC\'s key: no agent here can be shown as connected. Pair again with the code your administrator gives you (conclave pair).\n');
+      else if (r.hub === 'unreachable') process.stdout.write('The hub cannot be reached from this PC: the states below are this PC\'s own.\n');
       if (!r.agents.length) process.stdout.write(r.request ? `Request ${r.request.id}: ${r.request.state}.\n` : 'No team request yet.\n');
       for (const a of r.agents) process.stdout.write(`${a.label}: ${a.text}${a.error ? ` (${a.error})` : ''}${a.open && a.state !== 'connected' ? `\n  folder: ${a.open.desktop.folder}\n  terminal: ${a.open.terminal}${a.codex ? `\n  codex: ${a.open.codex}` : ''}` : ''}\n`);
       if (r.git.state !== 'ok') process.stdout.write(`${r.git.line}\n`);
       if (r.git.codex) process.stdout.write(`${r.git.codex}\n`);
+      return 0;
+    }
+    if (sub === 'withdraw') {
+      const r = await ob.withdrawRequest(home, hubKey);
+      if (!r.ok) { process.stdout.write('No team request on this PC for this hub.\n'); return 1; }
+      process.stdout.write(r.already ? `Request ${r.request_id} was already ${r.state}.\n` : `Withdrew request ${r.request_id}. Agents that already joined their team stay. You can file a new request with conclave setup request --file <path>.\n`);
       return 0;
     }
     if (sub === 'retry') {
@@ -444,7 +459,7 @@ async function setupCmd(cmd, argv) {
       return r.ok ? 0 : 1;
     }
   } catch (e) { process.stderr.write(`conclave: ${e.message}\n`); return 1; }
-  usage('setup takes schema, request, continue, status or retry');
+  usage('setup takes schema, request, continue, status, retry or withdraw');
 }
 
 function REASON_FOR(code) { return code === 'entry_foreign' ? 'this folder has its own MCP entry named conclave; it was left alone.' : line(code).replace(/ Run: .*$/, ''); }

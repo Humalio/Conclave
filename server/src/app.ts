@@ -10,10 +10,10 @@ import { openDb } from './db/db.js';
 import { RateLimit } from './db/rateLimit.js';
 import { Audit } from './audit/audit.js';
 import { Keys, KeyError } from './keys/keys.js';
-import { KeyCollections } from './keys/keyCollect.js';
+import { Handovers } from './keys/handover.js';
 import { LeakGuard } from './guard/leakGuard.js';
 import { Vault, VaultError } from './vault/vault.js';
-import { VaultStore } from './vault/store.js';
+import { VaultStore, MAX_CONTENT } from './vault/store.js';
 import { builtinTemplates } from './policy/catalogue.js';
 import { buildMcpServer, removedToolAnswer, compactHeader, clientHint } from './mcp/tools.js';
 import { Setup } from './setup/setup.js';
@@ -55,6 +55,9 @@ import { MIRROR_FOLDER } from './mirror/folder.js';
 import { setReserved } from './policy/engine.js';
 import { ClientFiles, findClientDir, registerOnboarding } from './onboarding/http.js';
 
+/** The body limit of the /mcp route: the vault's 2 MiB text limit plus 64 KiB for the JSON around it (the figure docs/relay.md gives for the largest body a hub route takes). */
+const MCP_BODY_LIMIT = MAX_CONTENT + 64 * 1024;
+
 const STATUS: Record<string, number> = { not_found: 404, conflict: 409, already_clear: 409, lockdown: 423, too_large: 413, binary: 400, patch_failed: 409, invalid_state: 409, paused: 409, invalid_argument: 400, invalid_path: 400, denied: 404, gone: 410, admin_only: 403, totp_required: 403, export_denied: 403, read_only: 403, board_denied: 403, not_decider: 403,
   checkout_open: 409, checkpoint_incomplete: 409, handout_consumed: 409, handout_changed: 409, repo_no_remote: 409, unmerged_work: 409, restore_unavailable: 409, scan_pending: 409, rate_limited: 429,
   // Delegate one agent (docs/checkout.md §9 F1).
@@ -77,7 +80,8 @@ export async function buildApp(config: Config, extras: { demo?: import('./demo/d
   const db = openDb(config.dbFile);
   const audit = new Audit(db);
   const keys = new Keys(db, config.pepper, audit);
-  const keyCollections = new KeyCollections(db, keys, audit); // sets keys.collectGuard
+  // Key handovers (docs/onboarding.md#key-handover-a-rotated-key-or-a-recruit-reaches-a-connector-pc): sets keys.handoverCancel.
+  const handovers = new Handovers(db, keys, audit);
   const vault = new Vault(config.vaultDir, config.vaultAlias);
   const store = new VaultStore(db, vault, audit, config.dataDir);
   // The vault folder "99 Conclave/" (docs/vault.md): only the hub writes it; agent walks (search, backlinks) skip it.
@@ -91,6 +95,8 @@ export async function buildApp(config: Config, extras: { demo?: import('./demo/d
   const links = new Links(db, keys, audit);
   const connector = new Connector(db, keys, audit, config.pepper, config.connectorPrices ?? {});
   connector.guard = guard;
+  connector.handovers = handovers;
+  handovers.hint = (pc) => connector.streams.handovers(pc);
   // Delivery (docs/connector.md, "Delivery orders"): a notice that needs a turn makes one order for its agent's PC; a closed access closes the stream.
   // The connector's result for a delivery order reaches the items: a task's open turn, and the agent's answered decisions (docs/connector.md, "Delivery orders").
   connector.onDelivery = (agentId, items, o) => {
@@ -173,9 +179,9 @@ export async function buildApp(config: Config, extras: { demo?: import('./demo/d
     return paused ? { code: 'paused', message: 'The team is paused: the turn token ends, and the run with it after its current call.' } : null;
   };
   connector.locked = (pc) => lockdown.pc(pc);
+  connector.handoversLocked = (pc) => lockdown.writes() || lockdown.pc(pc);
   lockdown.onSet = (kind, id) => { if (kind === 'pc' && id) connector.accessEnded(id); };
   lockdown.onLift = (kind, id, since) => teams.holdLifted(kind, id, since); // the sweep skipped held members: restart their leases
-  keyCollections.lockdown = lockdown;
   taskAttachments.lockdown = lockdown;
   const feedback = new Feedback(db, keys, audit, teams);
   const hardware = new Hardware(db, keys, audit, guard);
@@ -200,7 +206,7 @@ export async function buildApp(config: Config, extras: { demo?: import('./demo/d
   // Move team with no one at the keyboard (docs/connector.md, "Reason orders"): once the target PC restored the agents, each moved one is woken to resume.
   connector.onRestored = (checkoutId) => { for (const h of checkouts.handouts(checkoutId)) if (h.new_credential_id && h.status !== 'consumed') connector.deliverReason(h.agent_id, 'resume'); };
   checkouts.seedRepoHosts = config.repoHosts ?? null; // the repo host allowlist until the operator saves one (§8)
-  const onboarding = new Onboarding({ db, keys, teams, audit, vault, guard, lockdown, pepper: config.pepper, hubUrl: config.publicUrl, collections: keyCollections });
+  const onboarding = new Onboarding({ db, keys, teams, audit, vault, guard, lockdown, pepper: config.pepper, hubUrl: config.publicUrl, handovers });
   // A new team's part, or for a project's only team (FR-PLAN-12) the project-level module or line its kept records go in.
   onboarding.onTeamApproved = (teamId, actor, o) => blueprint.openTeamPart(teamId, { kind: 'operator', id: actor.id }, o) ?? blueprint.projectLevelHome(teamId);
   // The requirements and research records kept at approval: one linked proposal (docs/onboarding.md#content-from-onboarding).
@@ -230,7 +236,7 @@ export async function buildApp(config: Config, extras: { demo?: import('./demo/d
   const alerts = new Alerts(db, audit, keys, vault, config.alerts ? { ...DEFAULT_ALERT_OPTS, ...config.alerts } : DEFAULT_ALERT_OPTS);
   const maintenance = new Maintenance(db, store, access, alerts, config.retention ? { ...DEFAULT_RETENTION, ...config.retention } : DEFAULT_RETENTION);
   if (config.maintenanceSeconds !== 0) maintenance.start((config.maintenanceSeconds ?? 60) * 1000);
-  const upkeep = setInterval(() => { try { teams.tick(true); channels.sweep(); users.sweepExpired(); routing.escalate(); hardware.sweepAll(); keyCollections.sweep(); taskAttachments.sweep(); connector.tick(); } catch (e) { fastify.log.error(e); } }, 30_000);
+  const upkeep = setInterval(() => { try { teams.tick(true); channels.sweep(); users.sweepExpired(); routing.escalate(); hardware.sweepAll(); handovers.sweep(); taskAttachments.sweep(); connector.tick(); } catch (e) { fastify.log.error(e); } }, 30_000);
   upkeep.unref();
   const pairLimit = new RateLimit(db, 10, 10 * 60 * 1000);
   const sys = { kind: 'system' as const, id: null };
@@ -248,10 +254,18 @@ export async function buildApp(config: Config, extras: { demo?: import('./demo/d
     try { done(null, JSON.parse(body as string)); } catch { done(Object.assign(new Error('invalid JSON'), { statusCode: 400 }), undefined); }
   });
 
-  fastify.setErrorHandler((err, _req, reply) => {
+  fastify.setErrorHandler((err, req, reply) => {
     if (err instanceof ZodError) return reply.code(400).send({ error: 'invalid_argument', message: err.issues.map((i) => `${i.path.join('.') || 'body'}: ${i.message}`).join('; ') });
     if (err instanceof KeyError || err instanceof VaultError) return reply.code(STATUS[err.code] ?? 400).send({ error: err.code, message: err.message, ...(err instanceof KeyError ? err.extra ?? {} : {}) });
-    const e = err as { statusCode?: number; message: string };
+    const e = err as { statusCode?: number; message: string; code?: string };
+    // A body over the limit: say what the limit is and what to do, instead of a bare refusal.
+    // An MCP client reads a JSON-RPC error, not our {error, message}: for /mcp the reason (size and limit) goes in that shape, so the agent is told.
+    if (e.statusCode === 413 && req.url.split('?')[0] === '/mcp') {
+      const sent = Number(req.headers['content-length']);
+      const size = Number.isFinite(sent) && sent > 0 ? ` The request was ${sent} bytes.` : '';
+      return reply.code(413).type('application/json').send({ jsonrpc: '2.0', id: null, error: { code: -32600, message: `too_large: the request is too large; this hub takes at most ${MCP_BODY_LIMIT} bytes (a 2 MiB text plus 64 KiB of JSON around it) in one call.${size} A vault text write takes at most ${MAX_CONTENT} bytes (2 MiB) of UTF-8 text; split larger text into several files.`, data: { error: 'too_large', limit_bytes: MCP_BODY_LIMIT, text_limit_bytes: MAX_CONTENT, ...(size ? { size_bytes: sent } : {}) } } });
+    }
+    if (e.statusCode === 413) return reply.code(413).send({ error: 'too_large', message: `The request body is too large for this route. A vault text write takes at most ${MAX_CONTENT} bytes (2 MiB) of UTF-8 text; split larger text into several files.` });
     if (e.statusCode && e.statusCode < 500) return reply.code(e.statusCode).send({ error: 'bad_request', message: e.message });
     fastify.log.error(err);
     return reply.code(500).send({ error: 'internal_error', message: 'Internal error.' });
@@ -329,7 +343,7 @@ export async function buildApp(config: Config, extras: { demo?: import('./demo/d
     return reply.type(ext === 'woff2' ? 'font/woff2' : ext === 'woff' ? 'font/woff' : 'font/ttf').header('cache-control', 'public, max-age=86400').send(body);
   });
 
-  const adminRoutes = registerAdminApi(fastify, { ownerScope, users, routing, demo: extras.demo, db, keys, audit, vault, store, config, loginLimit, setup, links, messaging, teams, phase5: { access, lockdown, alerts, shares, channels, maintenance }, graph, feedback, hardware, decisions, directives, onboarding, clientFiles, blueprint, checkouts, checkoutKeys, delegations, mirror, keyCollections, taskAttachments, connector, vaultSync, relays });
+  const adminRoutes = registerAdminApi(fastify, { ownerScope, users, routing, demo: extras.demo, db, keys, audit, vault, store, config, loginLimit, setup, links, messaging, teams, phase5: { access, lockdown, alerts, shares, channels, maintenance }, graph, feedback, hardware, decisions, directives, onboarding, clientFiles, blueprint, checkouts, checkoutKeys, delegations, mirror, handovers, taskAttachments, connector, vaultSync, relays });
   registerOnboarding(fastify, onboarding, clientFiles, config.connectorReleaseDir);
   registerConnector(fastify, db, connector, keys, setup, directives, hardware);
   registerVaultSync(fastify, { db, keys, audit, sync: vaultSync, vault, store });
@@ -353,7 +367,8 @@ export async function buildApp(config: Config, extras: { demo?: import('./demo/d
     authNoise.set(k, n);
     if (n <= 20) audit.auth(row);
   };
-  fastify.post('/mcp', async (req, reply) => {
+  // A 2 MiB text arrives inside a JSON body that is larger than the text itself (quotes, escapes, the other arguments).
+  fastify.post('/mcp', { bodyLimit: MCP_BODY_LIMIT }, async (req, reply) => {
     if (!originOk(req)) return reply.code(403).send({ error: 'forbidden_origin', message: 'Origin not allowed.' });
     const h = req.headers.authorization;
     const m = typeof h === 'string' ? /^Bearer\s+(\S+)$/i.exec(h) : null;
@@ -395,6 +410,6 @@ export async function buildApp(config: Config, extras: { demo?: import('./demo/d
   fastify.get('/mcp', notAllowed);
   fastify.delete('/mcp', notAllowed);
 
-  return { fastify, relays, guard, users, routing, adminRoutes, connector, onboarding, keyCollections, taskAttachments, checkouts, checkoutKeys, delegations, clientFiles, db, keys, audit, vault, store, config, setup, links, messaging, teams, blueprint, shares, channels, access, lockdown, alerts, maintenance, graph, feedback, hardware, decisions, directives, mirror, close: async () => { await fastify.close(); await mirror.stop(); await store.stop(); db.close(); } };
+  return { fastify, relays, guard, users, routing, adminRoutes, connector, onboarding, handovers, taskAttachments, checkouts, checkoutKeys, delegations, clientFiles, db, keys, audit, vault, store, config, setup, links, messaging, teams, blueprint, shares, channels, access, lockdown, alerts, maintenance, graph, feedback, hardware, decisions, directives, mirror, close: async () => { await fastify.close(); await mirror.stop(); await store.stop(); db.close(); } };
 }
 export type App = Awaited<ReturnType<typeof buildApp>>;

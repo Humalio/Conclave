@@ -8,6 +8,8 @@ import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { mkdtempSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { buildApp, type App } from '../src/app.js';
 import type { Config } from '../src/config.js';
 import { testConfig, adminLogin } from './hub.js';
@@ -53,7 +55,7 @@ describe('check-in and PC status', () => {
     expect(before).toMatchObject({ online: false, status: 'never', version: null, node: null, git: null, clients: [], remote_cleanup: null, version_status: null });
     expect((await pcOf(pc.id)).disconnect).toBeNull();
     const r = await cn('POST', '/check-in', pc.key, report);
-    expect(r).toEqual({ status: 200, body: { ok: true, orders: 0, ignored_agents: 0 } });
+    expect(r).toEqual({ status: 200, body: { ok: true, orders: 0, handovers: 0, ignored_agents: 0 } });
     const after = (await pcOf(pc.id)).connector;
     expect(after).toMatchObject({ online: true, status: 'online', version: '1.4.0', node: '22.11.0', git: '2.47.1', auto_update: true, remote_cleanup: true, usage_opt_in: null, version_status: 'pending' });
     expect(after.clients).toEqual([{ client: 'claude_code', version: '2.0.31' }]);
@@ -241,7 +243,8 @@ describe('PC actions', () => {
     expect((await cn('POST', '/check-in', pc.key, { ...report, destinations: [{ id: 'C:/Users/x', label: 'x' }] })).status).toBe(400);
     expect((await cn('POST', '/check-in', pc.key, { ...report, destinations: [{ id: 'dst_home01', label: 'a' }, { id: 'dst_home01', label: 'b' }] })).status).toBe(400);
     expect((await cn('POST', '/check-in', pc.key, { ...report, destinations: [{ id: 'dst_home01', label: 'Projects on D:', path: 'D:/p' }] })).status).toBe(400);
-    // The PC's user approved one destination: the console sees its id and label.
+    // The PC's user approved one destination: the console sees its id and label. (Not rendered at this check-in: a rendered checkout gets its Restore from it, see team-start.test.ts.)
+    app.db.prepare("UPDATE checkouts SET status='ready' WHERE id=?").run(cko);
     expect((await cn('POST', '/check-in', pc.key, { ...report, destinations: [{ id: 'dst_home01', label: 'Projects on D:' }] })).status).toBe(200);
     expect((await pcOf(pc.id)).connector.destinations).toEqual([{ id: 'dst_home01', label: 'Projects on D:' }]);
     expect((await restore()).status).toBe(409); // no destination named
@@ -249,6 +252,7 @@ describe('PC actions', () => {
     // Another PC's approved destination does not count for this PC.
     await cn('POST', '/check-in', other.key, { ...report, destinations: [{ id: 'dst_away001', label: 'Elsewhere' }] });
     expect((await restore('dst_away001')).status).toBe(409);
+    app.db.prepare("UPDATE checkouts SET status='rendered' WHERE id=?").run(cko);
     const ok = await restore('dst_home01');
     expect(ok.status).toBe(200);
     expect(ok.body.action).toMatchObject({ kind: 'restore', state: 'queued', payload: { checkout_id: cko, destination_id: 'dst_home01' } });
@@ -263,8 +267,9 @@ describe('PC actions', () => {
     app.keys.createSessionKey({ agentId: lead.id, label: 'lead' }, sys);
     const team = app.teams.create({ name: 'Restore life team', goal: 'Move house', members: [{ agent_id: lead.id, role: 'coordinator' }] }, sys);
     const now = Date.now(), cko = 'cko_restorelife1';
-    app.db.prepare("INSERT INTO checkouts(id,team_id,status,target_machine_id,created_at,updated_at,expires_at) VALUES (?,?,'rendered',?,?,?,?)").run(cko, team.id, pc.id, now, now, now + 86400_000);
+    app.db.prepare("INSERT INTO checkouts(id,team_id,status,target_machine_id,created_at,updated_at,expires_at) VALUES (?,?,'ready',?,?,?,?)").run(cko, team.id, pc.id, now, now, now + 86400_000);
     await cn('POST', '/check-in', pc.key, { ...report, destinations: [{ id: 'dst_life0001', label: 'Life' }] });
+    app.db.prepare("UPDATE checkouts SET status='rendered' WHERE id=?").run(cko);
     const o = (await api('POST', `/pcs/${pc.id}/actions`, { kind: 'restore', checkout_id: cko, destination_id: 'dst_life0001' })).body.action;
     expect((await cn('GET', '/orders', pc.key)).body.orders.map((x: { id: string }) => x.id)).toEqual([o.id]);
     expect((await cn('POST', `/orders/${o.id}/progress`, pc.key, { note: 'Waiting for the PC user to approve the folder.' })).status).toBe(200);
@@ -537,10 +542,34 @@ describe('setup timeline and Add PC', () => {
     expect(t2.steps[2]).toMatchObject({ state: 'waiting', next: { who: 'pc_user' } });
     expect((await api('GET', '/pcs/pc-nope/setup-timeline')).status).toBe(404);
   });
+  it('a PC whose agents work through its app key, without the connector, reads as set up (operator walk-through finding 2)', async () => {
+    const pc = await newPc('conn-tl-appkey');
+    const before = (await api('GET', `/pcs/${pc.id}/setup-timeline`)).body;
+    expect(before.steps[1]).toMatchObject({ step: 'paired', state: 'waiting' }); // nothing ran through it yet
+    // An agent logs in through the PC's app key and calls a tool, as the older helper does.
+    const a = app.keys.createAgent('tl-worker', null, sys);
+    const sk = app.keys.createSessionKey({ agentId: a.id, label: 'tl-worker key' }, sys);
+    app.keys.setRules(sk.credential.policy_id, [{ effect: 'allow', actions: ['tool.invoke'], resource: 'tool:*' }], 'test', sys);
+    const c = new Client({ name: 't', version: '1' });
+    await c.connect(new StreamableHTTPClientTransport(new URL(`${base}/mcp`), { requestInit: { headers: { Authorization: `Bearer ${pc.key}` } } }));
+    const token = (await c.callTool({ name: 'session_login', arguments: { session_key: sk.secret } })).structuredContent!.session_token;
+    await c.callTool({ name: 'task_list', arguments: { session_token: token } });
+    await c.close();
+    const t = (await api('GET', `/pcs/${pc.id}/setup-timeline`)).body;
+    expect(t.steps.map((s: any) => s.step)).toEqual(['added', 'app_key', 'agents_connected']);
+    expect(t.steps[1]).toMatchObject({ state: 'done', next: null });
+    expect(t.steps[1].reason).toContain('the connector is not paired');
+    expect(t.steps[2]).toMatchObject({ state: 'done', reason: '1 agent has worked through this PC.' });
+    expect(t.steps.some((s: any) => s.state === 'waiting')).toBe(false);
+    // Once the connector checks in, the PC follows the connector's own steps again.
+    await cn('POST', '/check-in', pc.key, report);
+    expect((await api('GET', `/pcs/${pc.id}/setup-timeline`)).body.steps[1]).toMatchObject({ step: 'paired', state: 'done' });
+  });
   it('Add PC answers the download link (unset here) and no pairing block when the hub serves no CA', async () => {
     const r = (await api('POST', '/pcs/add', { name: 'conn-add' })).body;
     expect(r.download_url).toBeNull();
     expect(r.pairing).toBeNull();
     expect(r.connector_prompt).toBeNull();
+    expect(r.connector_unavailable).toBe('no_ca');
   });
 });

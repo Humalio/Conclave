@@ -109,6 +109,24 @@ export function encryptInPlace(home) {
   write(home, r.data);
   return true;
 }); }
+/**
+ * Writes an encrypted key file back in plain form, for a rollback to a build that cannot read an encrypted one
+ * (docs/connector.md "Self-update"). `{ok: true, changed}`, or `{ok: false, reason}` when it cannot be decrypted; the
+ * hardened level's view is not the user's file and is left alone.
+ */
+export function decryptInPlace(home) {
+  if (readIsolation(home).level === 'hardened') return { ok: true, changed: false };
+  const first = readJson(keyFilePath(home), undefined);
+  if (!first || !isEncrypted(first)) return { ok: true, changed: false };
+  return locked(home, () => {
+    const raw = readJson(keyFilePath(home), undefined);
+    if (!raw || !isEncrypted(raw)) return { ok: true, changed: false };
+    const r = readKeyFile(home);
+    if (!r.ok) return { ok: false, reason: r.reason };
+    writeState(keyFilePath(home), JSON.stringify(r.data) + '\n', true);
+    return { ok: true, changed: true };
+  });
+}
 function load(home) {
   const r = readKeyFile(home);
   if (!r.ok) throw Object.assign(new Error(`the key file cannot be used (${r.reason})`), { reason: r.reason });
@@ -133,7 +151,7 @@ export function putHub(home, { hubId, origin, caPem, appKey }) {
   return locked(home, () => {
     const data = load(home);
     const k = hubKeyOf(hubId, ca_sha256);
-    data.hubs[k] = { hub_id: hubId, origin: o, ca_sha256, ca_pem, app_key: appKey, agents: data.hubs[k]?.agents ?? {} };
+    data.hubs[k] = { hub_id: hubId, origin: o, ca_sha256, ca_pem, app_key: appKey, agents: data.hubs[k]?.agents ?? {}, ...(data.hubs[k]?.staged ? { staged: data.hubs[k].staged } : {}) };
     write(home, data);
     return k;
   });
@@ -150,6 +168,62 @@ export function putAgentKey(home, hubKey, label, sessionKey) {
     data.hubs[hubKey].agents[label] = { session_key: sessionKey };
     write(home, data);
   });
+}
+
+/**
+ * A rotated key waits beside the old one until the hub confirms the handover (docs/connector.md, "Receiving a rotated key
+ * or a recruit"): `staged[<handover id>][<label>]` in the hub's section. The old key goes on working; the public view never
+ * shows a staged key. `commitStaged` swaps them in after the hub's 200, `discardStaged` drops them after a refusal.
+ */
+export function stageAgentKey(home, hubKey, handoverId, label, sessionKey) {
+  if (!LABEL_RE.test(String(label))) throw new Error('agent label: letters, digits, dash and underscore only');
+  if (!HUB_ID_RE.test(String(handoverId))) throw new Error('handover id: letters, digits, dot, dash and underscore only');
+  if (typeof sessionKey !== 'string' || !sessionKey) throw new Error('a session key is required');
+  if (readIsolation(home).level === 'hardened') { vaultCallSync(home, 'stage_agent', { hubKey, handoverId, label, sessionKey }); return; }
+  locked(home, () => {
+    const data = load(home);
+    const s = data.hubs[hubKey];
+    if (!s) throw new Error('no such hub section');
+    ((s.staged ??= {})[handoverId] ??= {})[label] = sessionKey;
+    write(home, data);
+  });
+}
+/** Swaps a handover's staged keys in under their labels. Returns how many it swapped (0: nothing was staged, e.g. already swapped). */
+export function commitStaged(home, hubKey, handoverId) {
+  if (readIsolation(home).level === 'hardened') return vaultCallSync(home, 'commit_staged', { hubKey, handoverId }).committed ?? 0;
+  return locked(home, () => {
+    const data = load(home);
+    const s = data.hubs[hubKey], st = s?.staged?.[handoverId];
+    if (!st) return 0;
+    for (const [label, key] of Object.entries(st)) (s.agents ??= {})[label] = { session_key: key };
+    delete s.staged[handoverId];
+    if (!Object.keys(s.staged).length) delete s.staged;
+    write(home, data);
+    return Object.keys(st).length;
+  });
+}
+/** Drops a handover's staged keys; the old keys stay. Returns whether anything was dropped. */
+export function discardStaged(home, hubKey, handoverId) {
+  if (readIsolation(home).level === 'hardened') return vaultCallSync(home, 'discard_staged', { hubKey, handoverId }).discarded === true;
+  return locked(home, () => {
+    const data = load(home);
+    const s = data.hubs[hubKey];
+    if (!s?.staged?.[handoverId]) return false;
+    delete s.staged[handoverId];
+    if (!Object.keys(s.staged).length) delete s.staged;
+    write(home, data);
+    return true;
+  });
+}
+/** The label whose session key carries this public key id (a session key reads `ah_ses_<key id>_…`), or null. Never the key. */
+export function labelHoldingKey(home, hubKey, keyId) {
+  if (typeof keyId !== 'string' || !/^[A-Za-z0-9_-]{4,64}$/.test(keyId)) return null;
+  if (readIsolation(home).level === 'hardened') return vaultCallSync(home, 'label_for_key', { hubKey, keyId }).label ?? null;
+  return labelIn(load(home).hubs[hubKey], keyId);
+}
+export function labelIn(section, keyId) {
+  for (const [label, v] of Object.entries(section?.agents ?? {})) if (typeof v?.session_key === 'string' && v.session_key.startsWith(`ah_ses_${keyId}_`)) return label;
+  return null;
 }
 
 /** Removes one agent's key, or a whole hub's section (disconnect). Returns whether anything was removed. */

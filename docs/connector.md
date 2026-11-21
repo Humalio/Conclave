@@ -55,13 +55,14 @@ start, an update or a check:
   "agents": [{ "agent_id": "agent-…", "state": "open" | "repair_connection" | "chat_in_use",
                "profile"?: "work", "profile_hidden"?: true }],  // a run on an account profile: its name, or only that it is hidden
   "destinations": [{ "id": "dst_…", "label": "Projects on D:" }],  // restore destinations the PC's user approved there
+  "legacy_leftovers": true | false,  // the old setup's pieces are still on the PC (see "Old setup left on the PC")
   "context": [{ "agent_id": "agent-…", "source": "connector" | "chat", "client": "claude_code" | "codex", "model": "claude-sonnet-4-5-…",
     "context_tokens": 62000, "window": 200000 | null, "percent": 31 | null, "turn_tokens": 120000,
     "compacted_at": 1763… | null, "compacts": 0, "at": 1763… | null }] }   // only while usage_opt_in is true; see Context size
 ```
-Answer: `{ "ok": true, "orders": n, "ignored_agents": n, "measure_only"?: true }` (`measure_only` only for a PC with a
+Answer: `{ "ok": true, "orders": n, "handovers": n, "ignored_agents": n, "measure_only"?: true }` (`measure_only` only for a PC with a
 compute role, see [Measure-only mode](#measure-only-mode)), where `orders` is the number of orders waiting (fetched with
-`GET /connector/v1/orders`).
+`GET /connector/v1/orders`) and `handovers` the number of [key handovers](#receiving-a-rotated-key-or-a-recruit) open for this app key.
 
 Every field is checked: a version is `^\d+\.\d+\.\d+(-[a-z0-9.]+)?$` and at most 40 characters; an unknown key, client
 or state is refused with `invalid_argument`. The PC reports only what it sees for its own agents: an `agent_id` whose
@@ -73,6 +74,8 @@ latest check-in.
 an id (`dst_` and 6 to 32 lowercase letters or digits, unique) and a plain label of at most 80 characters. It never
 holds a path: the connector keeps each destination's folder, identity and agent config in its own record, and the
 label is display text that passes the leak guard. A check-in without `destinations` makes them Unknown again (`null`).
+
+**Old setup left on the PC.** `legacy_leftovers` is one yes or no: `true` while the PC still holds pieces of the old setup that `conclave migrate --finish --remove-legacy-ca` clears, `false` when it holds none, absent (Unknown, `null`) from a connector that does not report it. It is `true` while a move to the connector is not finished (the rollback copies are kept until `--finish`, or an interrupted move waits) and while the user's `NODE_EXTRA_CA_CERTS` still names this connector home's `hub-ca.pem`. The flag never carries a path, a folder or a name (a path or a list is refused with 400); the connector reads it at most once a minute. `conclave check` says the same in words, as a `tip` line after the checks that passed, and offers the command: it never runs it and the check still passes. The console lists the PCs with leftovers (the PCs page filter **Old setup left**, a flag on the row, and the **Old setup** row of the PC's Connector card).
 
 **Online** means a check-in within the last 90 seconds; otherwise the PC is **Offline since** its latest check-in, or
 **Never connected** when there is none. This is the PC's state only: agents have no Online or Offline.
@@ -86,6 +89,7 @@ label is display text that passes the leak guard. A check-in without `destinatio
   "version", "platform", "node", "git", "clients": [...],
   "auto_update", "remote_cleanup", "remove_connector_with_last_hub", "usage_opt_in", "hardware_opt_in",
   "destinations": [{ id, label }] | null,
+  "legacy_leftovers": bool | null,
   "version_status": "approved" | "pending" | "refused" | null,     // of the version it runs
   "update_available": "1.5.0" | null }                            // the newest approved version above it
 ```
@@ -101,17 +105,21 @@ console never shows "Offline since" for a suspended or disconnected PC.
               "state": "done" | "waiting" | "failed" | "not_yet", "at": ms | null,
               "reason": "plain sentence" | null,
               "next": { "action": "plain sentence", "who": "you" | "pc_user" | "agent" } | null }],
-  "agents": [{ "agent_id" | null, "label", "team_id", "state": "waiting_for_approval" | "ready_to_open" | "connected",
+  "agents": [{ "agent_id" | null, "label", "team_id", "state": "waiting_for_approval" | "ready_to_open" | "connected" | "key_refused",
                "next": { "action", "who" } | null,
                "connected_at": ms | null, "last_active_at": ms | null,
                "pc_reported": "open" | "repair_connection" | "chat_in_use" | null }] }
 ```
-The three agent states of review v2 §3:
+The agent states (review v2 §3, and Key refused):
 - **Waiting for approval:** the agent is in a team request the operator has not approved (it has no agent id yet).
 - **Ready to open:** approved, and it has made no call of its own yet. While its keys are not collected on the PC, its
   next action is "Continue setup on the PC" (the PC's user); once they are, "Open the agent on the PC".
 - **Connected:** its first authenticated call from its own client (`agents.connected_at`). A setup login or a check-in does
   not count. **Last active** is its latest call.
+- **Key refused:** its keys were collected, and the hub accepts none of its session keys any more (revoked or suspended).
+  It is never shown as Connected, the `agents_connected` step fails with "The hub no longer accepts the key of …", and the
+  next action is yours: give the agent a new key. The connector's screen and `conclave setup status` say **Key refused by
+  the hub**; when the hub refuses the PC's own app key, `setup status` says so and shows no agent as Connected.
 
 Each step that waits or failed has one next action and names who takes it. For example: "Enter the pairing code on the
 PC" (the PC's user), "Approve the team request" (you), "Open the agent on the PC" (the PC's user).
@@ -280,17 +288,23 @@ then reads Unknown, not zero. `days` is 1 to 90.
 
 ## Add PC: download and pairing
 
-`POST /api/pcs/add` keeps its answer and adds:
+`POST /api/pcs/add` answers the PC, its key and the code, and:
 ```
 { "download_url": "https://github.com/…/releases/latest" | null,
+  "connector_version": "0.9.5" | null,
   "pairing": { "code", "code_expires_at": ms, "ca_check": "ab12 cd34 ef56 7890", "hub_origin" } | null,
-  "connector_prompt": "…" | null }
+  "connector_prompt": "…" | null,
+  "connector_unavailable": "no_ca" | "no_origin" | null }
 ```
+There is no other prompt: the legacy `setup.mjs` prompt is gone, and the console shows only `connector_prompt`. When it is
+`null`, `connector_unavailable` says why (no CA certificate, or no HTTPS public address) and the console says so too.
 The download link is the GitHub Releases page set in the hub's config (`CONNECTOR_RELEASE_URL`, https only); `null` when
-it is not set. The code is in this answer once and is never written to the audit or a log; **Make a new code**
+it is not set. `connector_version` is the newest version the operator approved (Connector versions), so the console
+names the installer to run, `node conclave-install-<version>.mjs`; it is `null` while none is approved, and the console
+then says `conclave-install-<version>.mjs`. The code is in this answer once and is never written to the audit or a log; **Make a new code**
 (`POST /api/pcs/:id/re-enrol`) voids the old one.
 
-**Pairing.** The connector redeems the code on its local pairing screen ([onboarding.md](onboarding.md#pairing)). Add PC and Re-enrol PC answer `pairing: {code, code_expires_at, ca_check, hub_origin}` next to today's `code` and `prompt`, which stay for one release for PCs without the connector; `connector_prompt` is the prompt for a connector PC, with no code in it. The code is the same single code: `/onboard/enrol` (`setup.mjs`) keeps today's rules, and `/connector/v1/pair` adds the 30 minutes and the binding below. `pairing` is `null` when the hub serves no CA (`CA_CERT_FILE`) or has no HTTPS public origin, because then nothing can be pinned.
+**Pairing.** The connector redeems the code on its local pairing screen ([onboarding.md](onboarding.md#pairing)). Add PC and Re-enrol PC answer `pairing: {code, code_expires_at, ca_check, hub_origin}` next to `code`; `connector_prompt` is the prompt for the PC, with no code in it. The code is the same single code: `/onboard/enrol` (`setup.mjs`) keeps today's rules, and `/connector/v1/pair` adds the 30 minutes and the binding below. `pairing` is `null` when the hub serves no CA (`CA_CERT_FILE`) or has no HTTPS public origin, because then nothing can be pinned; `connector_unavailable` is then `no_ca` or `no_origin`.
 
 **The hub's identity.** Each hub has one stable id, `hub-` and 12 base32 characters, made the first time it is asked for and kept in its settings. `GET /connector/v1/hub` (no key) answers `{hub_id, origin}`, so the connector learns the identity over the CA-checked connection before it sends a code. The key file's section for the hub is `<hub id>@<CA sha256>`.
 
@@ -380,15 +394,31 @@ No session ever loads a long-lived key. A session (a hand-opened chat, a woken r
 - **The broker and its sessions prove themselves to each other.** At each start the broker writes a new random secret to `run/broker.secret`, readable by this OS user only, once it has taken its address (a second start that cannot take it leaves the running broker's secret alone). Every request carries a fresh nonce and a proof made with that secret; a request without a valid proof gets `bad_request` and nothing else (no token, no address, no CA). Every answer carries the broker's own proof for that nonce, and a session believes nothing without it: something else listening at the broker's address (for example a process of another user that took the address while the connector restarted) is refused with `broker_unverified`. A session also pins the hub from the folder's registry binding, never from the broker's answer: the binding records the hub's CA fingerprint and, since this change, its origin, and a broker answer naming another origin is refused (`ca_changed`); a binding from an older connector, with no origin yet, uses the verified broker's. On Linux and macOS the socket is `run/broker.sock`; when the connector folder's path is too long for a socket it is in the user's own `XDG_RUNTIME_DIR`, and with neither the broker does not start and the service log says why. It never falls back to a shared folder such as `/tmp`.
 - **The turn token** is a hub session token with scope `turn`. It covers that one agent's tools, minus keys and access: it cannot call `session_login`, `setup_pc`, `setup_status` or `access_request`, so it can never ask for another token or change what the agent may do, and the key-pickup routes need the PC's app key, which a session never has. A call uses it but does not extend it: only the connector renews it (`POST /connector/v1/turn-tokens/renew`, every 5 minutes while the run's process lives, 15 minutes of life each time), so a turn of any length keeps its token and a run that is gone loses it within 15 minutes at most. A renewal the hub refuses (paused team, lockdown, a suspended key or PC) ends the run; a checkout's own pause is not one of them, so the resume run it starts keeps its token: its next call is refused with `login_required`.
 - **The end of a turn.** The connector revokes the token (`POST /connector/v1/turn-tokens/revoke`) when the session says it is over or its process is gone, and a token used afterwards is refused. First it **scans the run's transcript** (the hook tells the broker where it is) for a long-lived key: text shaped like a Conclave key, or the agent's own keys. A hit revokes with the reason `leak_found` and raises a critical alert, `key_in_transcript`, on the PC, **whatever the token's state**: a token that already expired or was ended still had a key in its transcript, so the alert says which (`turn`: `ended_now`, `ended_before` or `unknown`) and names the agent when the hub knows the token. It reports where, never what.
-- **Binding is for routing and audit, not for separating agents.** A folder is bound to an agent in the connector's registry. A hand-opened chat's **first registration in a folder waits for the PC user's click** on the connector screen (`pending.json`, `approvals.json`; once per folder, as that agent on that hub), because registration is self-asserted. A run the connector started itself needs no click. Two live runs of one agent raise the alert `agent_two_live_bindings`. The hub looks when a run renews its token (every 5 minutes), so it may come up to 5 minutes after the second run starts, and it counts only a token of **another run** issued more than a minute earlier: `conclave check --probe` issues a token and revokes it at once, so it never counts. One alert per agent; each pair of runs joins it once (as a short hash), so the renewals do not repeat it. **Neither level separates two live agents of one OS user:** a process running as the same user can ask the broker for another folder's token, read the same files and listen on the same pipe. What the levels do is keep keys out of sessions, transcripts, logs and backups, and make anything else visible.
+- **Binding is for routing and audit, not for separating agents.** A folder is bound to an agent in the connector's registry. A hand-opened chat's **first registration in a folder waits for the PC user's click** on the connector screen (`pending.json`, `approvals.json`; once per folder, as that agent on that hub), because registration is self-asserted. A run the connector started itself needs no click, and neither does the first chat in a folder the connector built itself inside a key pickup or restore the PC user allowed (below, "Folders allowed with a pickup"). Two live runs of one agent raise the alert `agent_two_live_bindings`. The hub looks when a run renews its token (every 5 minutes), so it may come up to 5 minutes after the second run starts, and it counts only a token of **another run** issued more than a minute earlier: `conclave check --probe` issues a token and revokes it at once, so it never counts. One alert per agent; each pair of runs joins it once (as a short hash), so the renewals do not repeat it. **Neither level separates two live agents of one OS user:** a process running as the same user can ask the broker for another folder's token, read the same files and listen on the same pipe. What the levels do is keep keys out of sessions, transcripts, logs and backups, and make anything else visible.
 
 ### Standard isolation (no admin, the default)
 
-- **The key file is encrypted at rest** (`keys.json`, AES-256-GCM). Its 32-byte secret is held by the platform: Windows DPAPI (current user), the macOS login keychain, the Linux secret service (`secret-tool`) when the session has one, otherwise a 0600 file (`keys.master`) next to it. A platform store that fails falls back to that file. `conclave check` says which, and the check-in reports it (`key_store`). A plain key file from an older connector is read as it is and encrypted after this version's first check-in is confirmed, never before, so a rollback to the build before it can still read the file. Setting `CONCLAVE_KEY_STORE=file` forces the file.
+- **The key file is encrypted at rest** (`keys.json`, AES-256-GCM). Its 32-byte secret is held by the platform: Windows DPAPI (current user), the macOS login keychain, the Linux secret service (`secret-tool`) when the session has one, otherwise a 0600 file (`keys.master`) next to it. A platform store that fails falls back to that file. `conclave check` says which, and the check-in reports it (`key_store`). A plain key file from an older connector is read as it is and encrypted after this version's first check-in is confirmed, never before, so a rollback to the build before it can still read the file. Once it is encrypted, a way back to a build that cannot read an encrypted key file (one without the key store) is handled as in [Self-update](#self-update): `conclave rollback` first writes the key file back in plain form, and the launcher, which cannot open the platform store, says why the build it went back to finds no keys. Setting `CONCLAVE_KEY_STORE=file` forces the file.
 - **What this protects, and what it does not.** It protects against a key leaking: into a transcript, a log, a backup, a paste, a synced folder. It does not stop a determined agent running as the PC's user: the platform store opens for any process of that user, so such a process could ask it and read the key file. The local screen says so in those words. The hardened level closes it.
-- **Folders that were already registered.** When a connector first starts with turn tokens, a folder registered before that, whose settings still hash as they did at registration and whose filesystem identity is unchanged, is allowed without a click (once per PC, never run again). It gets one line in `connector.log` and one audit entry on the hub (`connector.folder_grandfathered`, sent at the next check-in and retried until the hub takes it). A folder whose settings changed or are held, and every folder registered after the upgrade, waits for its click.
-- **Clicks.** A key pickup (a team's approved setup, a restore) waits for the PC user's click on the connector screen, once per request, because a pickup hands over session keys. Nothing is picked up before it; the setup and restore steps answer "waiting" with that reason until it is clicked.
+- **Folders that were already registered.** When a connector first starts with turn tokens, a folder registered before that, whose settings still hash as they did at registration and whose filesystem identity is unchanged, is allowed without a click (once per PC, never run again). It gets one line in `connector.log` and one audit entry on the hub (`connector.folder_grandfathered`, sent at the next check-in and retried until the hub takes it). A folder whose settings changed or are held, and every folder registered after the upgrade, waits for its click, except a folder the connector built itself inside an allowed pickup or restore (next-but-one bullet, "Folders allowed with a pickup").
+- **Clicks.** A key pickup (a team's approved setup, a restore) waits for the PC user's click on the connector screen, once per request, because a pickup hands over session keys. Before the click, the row lists each folder the connector will build, with its agent, and says that Allow also allows the first chat in these folders. Nothing is picked up before it; the setup and restore steps answer "waiting" with that reason until it is clicked.
+- **Folders allowed with a pickup.** A folder the connector builds and registers itself inside a pickup or restore the PC user allowed counts as allowed for that agent on that hub, with no second click: nothing in it is self-asserted (the same reason a run the connector starts needs no click). It applies only to a folder that was new or empty when built (setup) or that the PC user approved on the restore screen (restore); an existing folder that is merely registered, or a restore folder still waiting for its trust, waits for its own click. The allowance is written after the folder is fully built and its registry entry is saved, with the folder's settings hash and filesystem identity as they are then (`approvals.json`, `by: pickup`); a crash before that costs one click later. It is bound to that agent, that hub and that folder: another agent or hub, a moved folder, or a changed hash or identity waits for a click again (this includes a later change to the folder's settings, for example a hub instruction update: it lapses to a normal click, which is not a fault), and `revokeFolder` withdraws it. Each one is reported at the next check-in to `POST /connector/v1/folders-allowed-with-pickup` (`{allowed: [{agent_id, ref}]}`, `ref` the pickup id) and audited on the hub as `connector.folder_allowed_with_pickup`, not as a grandfathered folder. Deny stays per row.
 - **The wake** is turned on per agent, with that agent's level shown beside it.
+
+### The connector's screen
+
+One page, `conclave setup`, top to bottom. It opens on a one-time link, answers only to this PC's own address and the cookie that link sets, rejects a cross-origin form, loads nothing from outside, and closes after an hour idle.
+
+- **Status line**: "Conclave on this PC", the connector's version and whether it is running, whether each hub answers, the isolation level, and "Closes after 1 h idle" on the right.
+- **Needs you**: a warning card, shown only while something waits. Each row has **Deny** and **Allow**, one by one: there is no "Allow all". A folder row shows the full folder path, the program (claude or codex), how long ago it asked, the hub when this PC has more than one, and a warning when the folder's settings changed since the agent was registered (the settings hash, kept with the request). The card says: Allow only chats you opened yourself.
+- **Teams**: one card each, collapsed except the first. The chips (ready, waiting, error) are also written as text when collapsed. Each agent is a compact row: label, role, wake on or off with its isolation level, a state chip, and Open; the terminal and Codex commands are behind Open. Delivered and restore notes sit inside the team.
+- **Settings**: one-line summaries that open on a click: Wake, Isolation, Account profiles, Restore folders, Pair with another hub.
+- Names and texts the hub supplied are escaped and marked on the screen as coming from the hub.
+- **Real phase.** Until an agent's keys are written, its row (and `conclave setup continue` / `status`) says what it waits for: **Waiting for your administrator** (the request is not approved), **Waiting for your Allow** (approved; the key pickup waits for the PC user's click), **Picking up keys**; **Ready to open** shows only once the keys are written.
+- **Refresh.** While something waits (a click, a team that is not connected yet) the page reloads itself every 5 seconds (`/?r=1`); those reloads do not count as a visit for the idle close, and are skipped while a field has focus or holds text the person typed.
+- **No browser.** On a PC with no browser program or display, `conclave setup` prints the link instead of opening it, and the installer says how to open the screen later and finishes with exit 0.
+
+**Deny.** The chat gets the fixed line "This chat was not allowed on this PC. If you opened it, ask the PC user to allow it on the connector screen." (reason `denied`) and the folder is not asked about again. The connector remembers the deny for **10 minutes**, in `pending.json`; the row stays under **Denied** and can still be allowed. A denied key pickup is not made and its step answers "declined on this PC". The next check-in reports each deny once to `POST /connector/v1/folders-denied` (`{denied: [{what: 'folder', agent} | {what: 'pickup', request}]}`, up to 50, app key): the hub writes the audit entry `connector.folder_denied` (or `connector.pickup_declined`) and raises the warning alert `connector_folder_denied_repeat` when one agent is denied 3 times within an hour.
 - The standard gate records proof G6(a) (a process of the same user cannot read the key) as **expected to fail**.
 
 ### Hardened isolation (admin, optional)
@@ -517,6 +547,19 @@ hook adds the line as context (`hookSpecificOutput.additionalContext`).
   by absolute path, with forward slashes in double quotes; a path that cannot be carried (a quote, `$`, a backtick, `%` or a
   line break) leaves the folder registered without the hook. `conclave repair` puts it back when it is gone or names a moved
   Node or connector.
+
+## Folders
+
+A PC with only the connector (no `setup_pc`) still needs approved folders to receive file transfers. At each check-in the connector sends the folders of its bound agents to `POST /connector/v1/folders` (app key; body `{folders: [{agent, path}]}`, at most 200). It sends again only when the list changes, and retries at the next check-in after an error.
+
+The hub stores each new path as a `proposed` row in `machine_folders`, the same row `setup_pc` makes; the operator approves or rejects it with the usual folder approval. Nothing is approved by the connector. A path is refused when:
+
+- its agent is not one bound to this PC;
+- it is not a normalised absolute path (a drive path or one starting with `/`; no `.` or `..` parts);
+- it is a root or a top-level folder (fewer than two parts below the root);
+- the PC already has 500 folder rows.
+
+A known row (proposed, approved or rejected) is left as it is. The answer is `{proposed, known, refused}`, and refusals are audited as `connector.folder_refused`, proposals as `connector.folder_proposed`. Transfers into a PC check approved rows only.
 
 ## Folder trust
 
@@ -712,7 +755,7 @@ it handled, so a replayed id does nothing.
 
 The hub tells the connector in seconds, not at the next check-in. `GET /connector/v1/stream` (the app key, over the same pinned
 HTTPS connection as every other call) is a Server-Sent Events stream that **only says "orders waiting"**: `event: orders`,
-sent at once when the stream opens and each time an order is queued, and a comment line every 20 seconds so no proxy ends
+sent at once when the stream opens and each time an order is queued, and `event: handovers` when the hub makes a [key handover](#receiving-a-rotated-key-or-a-recruit) for this PC, and a comment line every 20 seconds so no proxy ends
 it for being idle. The orders themselves stay the record: after every open and every event the connector fetches
 `GET /connector/v1/orders`, so a stream that dropped loses nothing and an order runs once (its id is remembered).
 
@@ -725,7 +768,7 @@ it for being idle. The orders themselves stay the record: after every open and e
 - **The hub ends it when access ends.** Suspending or revoking the app key, Disconnect, retiring the PC and a lockdown of the
   PC close the stream at once, and the hub checks again at each heartbeat.
   A locked-down PC gets no orders either (the list answers empty, the stream `423`), and its queued orders wait, without expiring, until the lockdown ends.
-- **Where the hub takes a client address from.** `X-Forwarded-For` is trusted only from a proxy on the hub host (`TRUST_PROXY` defaults to `loopback`). The HTTPS compose profile fixes Caddy at `172.29.0.2` and sets `TRUST_PROXY` to that address; any other address keeps its own.
+- **Where the hub takes a client address from.** `X-Forwarded-For` is trusted only from a proxy on the hub host (`TRUST_PROXY` defaults to `loopback`). The HTTPS compose profile fixes Caddy at `172.29.0.2` and sets `TRUST_PROXY` to that address; any other address keeps its own. Behind a proxy, set `TRUST_PROXY` to the proxy's Docker subnet in the hub `.env`, or connector pairing fails with "hub cannot be reached" (the hub answers `426` on `/connector/v1/hub`). This holds for every hub behind Caddy, not only the HTTPS compose profile.
 - **Long-poll fallback.** If the stream cannot open (a proxy that holds it back, a hub without it) the connector asks
   `GET /connector/v1/orders?wait=25`: the same orders, answered as soon as one is queued. It tries the stream again every
   five minutes.
@@ -798,7 +841,7 @@ notices (re-plan, blueprint proposal, status request, overdue, released) still m
 - The connector's one result: `done` means a session started a turn on the item (the hub records the time as
   `delivered_at`); `failed` carries the fixed reason that none started (`chat_in_use`, `wake_held` on this platform) as `code`, with its sentence as `reason`.
 - **The failure codes** the hub accepts, in the console's words: `pc_offline` (**Waiting for the PC**), `chat_in_use`
-  (**Chat in use**), `wake_held` (**Wake held on this platform**) and `agent_unknown` (**No session to wake**). The hub
+  (**Chat in use**), `wake_held` (**Waking is off for this agent on its PC**) and `agent_unknown` (**This PC has no folder for the agent**). The hub
   records `connector_too_old` (**Connector too old**) itself, never from a PC. Today's
   connector reports `chat_in_use` and `wake_held`; `pc_offline` and `agent_unknown` are reserved for the wake and are not
   sent yet. A reset has its own codes, such as `reset_by_hand` ([Reset](#reset)). Any other code is refused.
@@ -933,7 +976,7 @@ updates by itself nor runs an `update` order, and its check-in reports `auto_upd
 **Rollback.** The previous build stays on the PC. If the new build fails to start more than three times in a row, or the user runs
 `conclave rollback`, the launcher goes back to the previous build, and only to one it verified at install, after
 checking every file of it against the hashes it recorded then. A build that was never verified (a developer copy) is
-never a rollback target, and nothing is fetched again for a rollback. At every start, the launcher also checks the current build's files against the hashes recorded when it was installed. A build with a changed file is never run: the launcher goes back to the previous verified build (and says so), or, with none, stops and says to reinstall. Only starts that crash early count: a worker that has run a minute takes its start back, so a PC that is offline, restarts or sleeps keeps a good update. A worker that stops because the PC has no hub yet (exit 76, as on a PC that has not run `conclave migrate`), or because another worker of the installation runs (exit 77), is not counted as a failed start either; the installer says to migrate first on a PC that still has the old setup. Only the current and the previous build are kept.
+never a rollback target, and nothing is fetched again for a rollback. At every start, the launcher also checks the current build's files against the hashes recorded when it was installed. A build with a changed file is never run: the launcher goes back to the previous verified build (and says so), or, with none, stops and says to reinstall. **The key file on the way back.** The build being left may have encrypted the key file (Standard isolation). When the previous build cannot read an encrypted key file (it carries no key store), `conclave rollback` decrypts the key file and writes it back in plain form before it switches, as the older connector wrote it; when the file cannot be decrypted (its secret is gone from the platform store), the rollback is refused and says so, and the PC stays on the current build. When the launcher goes back on its own, it cannot open the platform store, so it says that the key file is encrypted and that the build it now runs cannot read it: the keys are still in the file, and installing the newer connector again reads them. At the hardened level the key file belongs to the key service and is left alone. Only starts that crash early count: a worker that has run a minute takes its start back, so a PC that is offline, restarts or sleeps keeps a good update. A worker that stops because the PC has no hub yet (exit 76, as on a PC that has not run `conclave migrate`), or because another worker of the installation runs (exit 77), is not counted as a failed start either; the installer says to migrate first on a PC that still has the old setup. Only the current and the previous build are kept.
 
 **Where the files are.** `~/.config/conclave/conclave.mjs` is a small fixed launcher that runs the current build named in
 `app/builds.json`. Folder entries name the launcher, so an update never rewrites an agent folder.
@@ -1117,89 +1160,57 @@ program that looks alive and does nothing. A lone collecting entry whose wake pa
 collector is running, so the program stays up and the exit code is 0 until it is stopped. If a line never reaches `helper.log`, check that the program runs as the same
 PC user that reads the log: the log is under that user's `.config/conclave` folder.
 
-### Collecting a rotated key
+### Receiving a rotated key or a recruit
 
-For a **routine** rotation of a key that has already logged in, the operator can click **Collect on <PC>** on the key page instead
-of copying a key prompt. The wake on that PC picks the new key up and writes it into that agent's own keys file. Nothing
-is pasted, no key goes through a chat or a model, and the hub never stores or pushes a secret. After a suspected leak the
-hub does not offer Collect: rotate the PC's app key too and use a key prompt. The design and its failure modes are in
-`docs/onboarding.md` (key prompts) and the threat model.
+A rotated session key, a new key made for an agent on this PC, and a coordinator's recruit reach the PC by **key handover**
+(design and hub side: [onboarding](onboarding.md#key-handover-a-rotated-key-or-a-recruit-reaches-a-connector-pc)). Nothing is pasted, and no key goes through a chat, a model,
+a log or the environment.
 
-#### Opting in
+1. The check-in answer's `handovers`, or `event: handovers` on the push stream, makes the connector read
+   `GET /connector/v1/handovers` (app key; `423 lockdown` under a lockdown of all writes or of this PC, which changes nothing on the PC): ids, plain descriptions, the agents and, for a rotation, the public id of each key
+   being replaced. A rotation names agents by that id; the connector finds the label whose key has it (the key service
+   answers this on a hardened PC). When this PC holds none of the keys a rotation names, it calls
+   `POST /connector/v1/handovers/:id/skip {reason: "key_not_held"}`, and the hub cancels the handover (`not_on_pc`). A
+   Re-enrol's handover names every agent key of the PC; a key this PC lost is still taken, under a label of its own, so
+   the others are not held back. When a Re-enrol's handover is skipped, the hub revokes those keys and reopens the PC's
+   collected requests: `conclave setup continue` picks them up again, or `conclave setup withdraw` withdraws one.
+2. Each one is listed on the connector's screen with **Allow**, its description shown as the hub's words. Nothing is
+   picked up before the click, on the standard and the hardened level alike. The click is bound to the handover's id and
+   covers it until it is confirmed; it is spent at confirm, or when the handover leaves the list (cancelled or expired).
+3. After the click: `POST /onboard/pickup {request_id}`, then the list is saved (`handovers/<hub id>.json`, no secrets), then
+   the keys are written (through the key service on a hardened PC). A rotated key is **staged** beside the old one under
+   the same label; the old key stays in use. A recruit's keys are staged the same way, and its folder is built and
+   registered (below). Then `POST /onboard/pickup/confirm {pickup_id, written}`. When it answers 200 (also `already: true` after a lost
+   answer), each staged key replaces the old one. When it is refused for good (a 4xx such as expired, cancelled or replaced, whose body carries the hub's own code: `invalid_state`, `not_found` or `conflict`), the staged keys are discarded and the old keys go on; a 401, 408, 429 or 5xx answer, or a bare 404 or 409 without the hub's code (a misrouted relay), counts as no answer, and the keys stay staged for the next run.
+   On a hardened PC the key service does the staging (`stage_agent`, `commit_staged`, `discard_staged`, `label_for_key`): the key service runs its own copy of the connector's code (`app\`, which only administrators may change), so after an update to a build with key handover an administrator must put the new build there and restart the key service before a handover can be taken. Until then the key service refuses these steps, nothing is swapped, and the handover waits (it expires after 24 hours as any other).
+4. A crash before the keys are written picks up again; a crash after they are written only confirms, then swaps or
+   discards. The old key works until the confirm, so the agent is never left without a working key.
+5. A recruit's folder name and its team's name come from the hub. The folder is built only inside the team's root on this
+   PC (beside the team's other agents, else under the root of the request that set the team up here, else the default
+   root), as a real path: each name follows the transfer rules (no `..`, no reserved name), and no folder below the root
+   may be a link or junction. Anything else is refused and reported with
+   `skip {reason: "folder_refused"}`, so the hub cancels the recruit.
 
-Collection is off until the user turns it on per agent, in the same opt-in file. Nothing from the hub can set it.
+The Codex wake's `collect_keys` and `setup.mjs key` no longer collect anything: the hub refuses their routes.
 
-```json
-{"agents": [
-  {"name": "rowan", "keys_file": "C:/Users/alice/.config/conclave/keys.env", "session_var": "CONCLAVE_X_ROWAN_SESSION_KEY",
-   "workspace": "C:/Users/alice/work/rowan-review", "codex_session": "<codex session id>",
-   "codex_exe": "C:/Users/alice/AppData/Local/Programs/codex/codex.exe", "collect_keys": true},
-  {"name": "claude-dev", "keys_file": "C:/Users/alice/.config/conclave/keys-dev.env", "session_var": "CONCLAVE_X_DEV_SESSION_KEY", "collect_keys": true}
-]}
-```
+**After a possible leak.** A rotation answered "Yes, or I'm not sure" also replaces this PC's connector app key
+([onboarding](onboarding.md#key-handover-a-rotated-key-or-a-recruit-reaches-a-connector-pc)). The old app key is refused
+at once, also for the handover, so until the PC user pairs again (`conclave pair` with the new code the operator was shown
+once) the connector cannot list the handover and no agent on this PC gets a session or turn token. The agents' session keys
+stay valid: after pairing they work again, and the handover is picked up as above, within its 24 hours.
 
-- `"collect_keys": true` on an entry makes the wake collect that agent's rotated key into that entry's `keys_file`.
-- An entry with **no** `workspace`, `codex_session` or `codex_exe` is **collect-only**: it starts no Codex turn, so a
-  Claude Code agent can opt in too. An entry with neither the Codex fields nor `collect_keys` is refused.
-- Give each agent its own keys file holding its own app key. Where several agents share an app key the hub does not offer
-  Collect for them.
-- **Instance id.** On first start the wake makes a random id and keeps it in its own user-only state folder
-  (`~/.config/conclave/codex-wake/instance`, mode 600), not in the opt-in file, because the wake never writes that file.
-  Every poll and pickup carries it, so the hub can tell a second copy of the wake from this one.
-
-#### What it does
-
-For each opted-in entry, every 60 seconds (15 seconds while a collection is open, as the hub says):
-
-1. `POST /onboard/key-collect/poll {instance_id, session_var}` with that entry's **app key**. The answer holds the ids of
-   collections open for this variable, never a secret.
-2. For an open one, `POST /onboard/key-pickup {collect_id, instance_id}` with the same app key. The hub creates the new
-   session key now and returns it once.
-3. The wake replaces only that variable's line in the entry's keys file: it writes a temporary file beside it, renames it
-   over the old file (mode 600 off Windows), then reads the file back and compares.
-4. `POST /onboard/key-collect/confirm {collect_id, instance_id, ok}`. `ok: false` (the file could not be written, or the
-   variable is not in it) makes the hub cancel the new key at once; with no confirmation the hub cancels it after 10
-   minutes.
-
-The pickup goes over **HTTPS with the pinned hub CA** only. The wake refuses a plain-HTTP hub address (loopback, on this
-computer, is the one exception, for a local dev hub) and an HTTPS hub with no `AGENT_HUB_CA`; it logs one line and the
-collection waits. `setup.mjs check --https` fixes it.
-
-#### The key stays out of every model and log
-
-The new key goes only into the keys file. It is never in a Codex environment, argument or prompt (the turn's environment
-is still the allowlist above, with no `*_SESSION_KEY`), and never in a log line. One fixed line is logged per outcome, to
-stderr and `~/.config/conclave/helper.log`, and none holds a key or a collection id:
-
-| Outcome | Line |
-|---|---|
-| Collected | `rowan: collected the new key for <variable> into rowan's keys file` |
-| Collected, hub not told | the same, plus `but the hub did not hear it; the hub cancels the key after 10 minutes` |
-| Pickup refused (expired, not found, refused) | `rowan: the hub did not hand over the new key for <variable> (<code>); the keys file is unchanged` |
-| Could not write | `rowan: could not collect the new key for <variable>: <reason>; the keys file is unchanged and the hub cancelled the key` |
-| Lockdown | `rowan: waiting to collect the new key for <variable>: a lockdown is on` (the collection stays open) |
-| No pinned CA or plain HTTP | `rowan: no key collection: it needs the hub over HTTPS with its CA pinned (AGENT_HUB_CA); run setup.mjs check --https` |
-| Poll refused or hub unreachable | one line, then it tries again |
-
-A pickup that fails or expires leaves the keys file as it was.
-
-#### Reconnecting the agent
-
-The wake kills or restarts no one's session.
-
-- **Codex wake turns** start the hub connection afresh, so the next turn reads the new key. The wake's own login reads the
-  keys file at every login, and while a collection is open for a revoked key it waits for the collection instead of
-  retrying the dead key in a loop.
-- **Codex interactive (`codex-bridge.mjs`)**: after a login the hub refused, the bridge reads the keys file once more and,
-  if the session key is a different one, signs in with it once. A key that is still dead is not retried in a loop.
-- **Claude Code**: the headers helper reads the variable at each login. Reconnect agent-hub in that session (`/mcp`) if it
-  shows no hub tools.
+**What the operator can still do by hand.** When the connector cannot be paired again in time, or the operator wants no
+connector involved, there are three ways. **Revoke** the agent's key in Keys: it stops at once, and the agent needs a new
+key later. Or **bind the key Free**, then **Rotate and show the key once**: a free key has no connector PC, so the new key
+is shown raw, once, in the console, and the person puts it on the PC by hand (`setup.mjs key` is refused). Or **Re-enrol
+PC**: the PC pairs the connector again with the new code, and one handover moves every agent key on it to the new app
+key (on a PC that holds none of them the keys are revoked and the requests reopened, [onboarding](onboarding.md#later)).
 
 ### Not covered
 
 - Showing the woken turn in the operator's own desktop chat.
 - Agents other than opted-in Codex reviewers.
-- Rotation after a suspected leak, new or never-signed-in keys and app keys: a key prompt (see Collecting a rotated key).
+- App keys: a key prompt (see Collecting a rotated key).
 
 Checked with codex-cli 0.167 on a local dev hub. Two reviews in a row woke two turns and got two verdicts. A restart
 mid-turn led to exactly one verdict.
@@ -1214,7 +1225,7 @@ One release runs both sides: the hub serves the old helper and the connector tog
 - **A PC that already moved.** `conclave migrate` also runs after a first move, even after `--finish`: the hub comes from the key file, only folders still on the old layout are moved, the moved ones are left alone, and a rollback undoes only what that run did (it never removes the hub's section or the other agents' keys). Before `--finish`, a second move is refused with `finish_first` (it would lose the first move's rollback copies): run `--finish` first, removing any retired folders it names. The dry run lists what it would move.
 - Every file is saved before it changes (mode 0600, in a folder of that run's own under `migration/backups`, so a second run never writes over the copies of the first). `conclave migrate --rollback` restores them byte for byte, including the removed old pieces, except a file edited or recreated since, which is kept and listed. It removes the key-file section and bindings this move created, and the folder-trust entries it added to `~/.claude.json` (only those keys). It does not restart the old Codex wake or the old transfer bridge.
 - **A move a crash interrupted.** If the PC crashed or lost power during `--apply`, the journal still says the move was in progress. The dry run says so, `--apply` first rolls that move back from its own copies and then makes the move again, and `--rollback` only rolls it back. The interrupted run's copies are kept until `--finish`. If that rollback fails, `--apply` changes nothing else and says where the copies are (`interrupted_move`).
-- `conclave migrate --finish` refuses while a skipped agent's folder is still on the PC (with its old `agent-hub` entry), and names it. There is no `--retire` command: the way out is to remove those folders yourself, then run `--finish` again. It deletes the rollback copies of every run, including the saved old pieces; after that the move cannot be undone. `--finish --remove-legacy-ca` also unsets `NODE_EXTRA_CA_CERTS`, only if it points at the old `hub-ca.pem`, that file is this hub's pinned CA, and the key file holds the pinned section. Otherwise it is left.
+- `conclave migrate --finish` refuses while a skipped agent's folder is still on the PC (with its old `agent-hub` entry), and names it. There is no `--retire` command: the way out is to remove those folders yourself, then run `--finish` again. It deletes the rollback copies of every run, including the saved old pieces; after that the move cannot be undone. `--finish --remove-legacy-ca` also unsets `NODE_EXTRA_CA_CERTS` (it also works on a move that an earlier plain `--finish` already finished, then touching only that setting), only if it points at the old `hub-ca.pem`, that file is this hub's pinned CA, and the key file holds the pinned section. Otherwise it is left.
 - Until a folder is moved, `conclave check` names it first (`old_layout`) and gives the command to run. `conclave migrate` is the only place that knows the old layout; the rest of the connector keeps no fallback for it. The global Codex entries are not part of this release's move.
 - The old client files are removed from the repository the release after this one. There is no compatibility with the old bridge: a PC either removes the old version before installing the connector, or runs `conclave migrate`.
 
@@ -1226,6 +1237,12 @@ connector's local screen has the same add and remove forms. Only the id and labe
 names the id), never the path. `conclave restores` shows the restores in progress, what each waits for and the start
 lines of finished ones. A folder that holds agent config of its own is built without trust and waits for the PC's user:
 "Approve folder" on the local screen, or `conclave repair --grant-trust` in that folder. The service never asks.
+
+An approved destination keeps the filesystem identity its folder had when it was approved. If the folder is swapped
+afterwards (removed and made again, or replaced by a link or junction to another place), the destination is no longer
+reported to the hub, a restore into it fails with a sentence saying so, and the local screen shows "The folder was
+replaced since you approved it". The PC's user approves it again with `conclave destinations add`, which records the new
+identity under the same id. A destination approved before identities were recorded is not blocked.
 
 A restore that fails before the hub confirmed the key pickup removes the agent keys it wrote, so no unused key stays in
 the key file (the old sessions keep running). When the restore is tried again, a folder it already bound keeps its

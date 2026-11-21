@@ -10,10 +10,10 @@
  *
  * Every system command goes through `exec`, so tests can check them on any platform. Nothing here needs a key.
  */
-import { join, posix, win32 } from 'node:path';
+import { join, dirname, posix, win32 } from 'node:path';
 import { homedir as osHome } from 'node:os';
 import { spawnSync, spawn } from 'node:child_process';
-import { existsSync, rmSync, readFileSync } from 'node:fs';
+import { existsSync, rmSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { atomicWrite, pathKey, readJson } from './paths.mjs';
 import { alive } from './run.mjs';
@@ -50,25 +50,27 @@ export function serviceSpec(home, { platform = process.platform, node = process.
   if (platform === 'win32') {
     const args = `--headless "${node}" "${launcher}" service run`;
     const me = '([System.Security.Principal.WindowsIdentity]::GetCurrent().Name)';
-    const install = [
+    const register = [
       "$ErrorActionPreference = 'Stop'",
       `$a = New-ScheduledTaskAction -Execute ${psq(CONHOST)} -Argument ${psq(args)} -WorkingDirectory ${psq(home)}`,
       `$t = New-ScheduledTaskTrigger -AtLogOn -User ${me}`,
-      // The logon trigger repeats every REVIVE_INTERVAL_MIN for as long as the user is logged on (no duration: no end).
+      // A logon trigger's repetition only starts at the next logon, so a second, time trigger repeats from the moment the task is
+      // registered (once, every REVIVE_INTERVAL_MIN, no end). It brings a killed service back without a logon.
       `$t.Repetition = (New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes ${REVIVE_INTERVAL_MIN})).Repetition`,
+      `$r = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes ${REVIVE_INTERVAL_MIN})`,
       `$p = New-ScheduledTaskPrincipal -UserId ${me} -LogonType Interactive -RunLevel Limited`,
       // Restart-on-failure covers a start that fails; a service that dies later comes back through the repeating trigger above.
       `$s = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount ${RESTART_COUNT} -RestartInterval (New-TimeSpan -Minutes ${RESTART_INTERVAL_MIN})`,
-      `Register-ScheduledTask -TaskName ${psq(place.name)} -TaskPath '\\' -Action $a -Trigger $t -Principal $p -Settings $s -Description 'Conclave connector: checks in with the hub, runs transfers and approved updates.' -Force | Out-Null`,
-      `Start-ScheduledTask -TaskName ${psq(place.name)} -TaskPath '\\'`,
-    ].join('; ');
+      `Register-ScheduledTask -TaskName ${psq(place.name)} -TaskPath '\\' -Action $a -Trigger @($t, $r) -Principal $p -Settings $s -Description 'Conclave connector: checks in with the hub, runs transfers and approved updates.' -Force | Out-Null`,
+    ];
+    const install = [...register, `Start-ScheduledTask -TaskName ${psq(place.name)} -TaskPath '\\'`].join('; ');
     const remove = [
       `$t = Get-ScheduledTask -TaskName ${psq(place.name)} -TaskPath '\\' -ErrorAction SilentlyContinue`,
       `if ($t) { Stop-ScheduledTask -TaskName ${psq(place.name)} -TaskPath '\\' -ErrorAction SilentlyContinue; Unregister-ScheduledTask -TaskName ${psq(place.name)} -TaskPath '\\' -Confirm:$false }`,
     ].join('; ');
     const status = `$t = Get-ScheduledTask -TaskName ${psq(place.name)} -TaskPath '\\' -ErrorAction SilentlyContinue; if ($t) { [string]$t.State } else { 'absent' }`;
     const ps = (s) => [POWERSHELL, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', Buffer.from(s, 'utf16le').toString('base64')], s];
-    return { place, file: null, install: [ps(install)], remove: [ps(remove)], status: ps(status) };
+    return { place, file: null, install: [ps(install)], register: ps(register.join('; ')), remove: [ps(remove)], status: ps(status) };
   }
   if (platform === 'darwin') {
     const file = `<?xml version="1.0" encoding="UTF-8"?>
@@ -148,7 +150,38 @@ export function installService(home, o = {}) {
     if (r.status !== 0 && !optional) return { ok: false, reason: 'service_install_failed', detail: firstLine(r.stderr || r.stdout), place: spec.place };
   }
   if (spec.start_now && !o.noStart) (o.spawnDetached ?? spawnDetached)(...spec.start_now);
+  if (spec.register) markDefinition(home, spec);
   return { ok: true, place: spec.place };
+}
+
+export const REFRESH_RETRY_MS = 3600_000;
+const definitionPath = (home) => join(home, 'run', 'service-task.json');
+const definitionHash = (spec) => createHash('sha256').update(spec.register[2]).digest('hex');
+function markDefinition(home, spec) { try { mkdirSync(dirname(definitionPath(home)), { recursive: true }); writeFileSync(definitionPath(home), JSON.stringify({ sha256: definitionHash(spec) })); } catch { /* the next start tries again */ } }
+
+/**
+ * Windows: when the registered task is not the one this build makes (an update leaves the old task in place), registers the
+ * current one without starting or stopping anything. `{changed}`, plus `error` if it could not. Other platforms, and a PC
+ * with no service: no change.
+ */
+export function refreshService(home, o = {}) {
+  const platform = o.platform ?? process.platform;
+  if (platform !== 'win32') return { changed: false };
+  const spec = serviceSpec(home, { ...o, platform });
+  const sha = definitionHash(spec), mark = readJson(definitionPath(home), null), now = (o.now ?? Date.now)();
+  if (mark?.sha256 === sha) return { changed: false };
+  // A registration that failed is not tried again for an hour: each minute's revive runs this, and it must cost nothing.
+  if (mark?.failed_sha256 === sha && now - (mark.failed_at ?? 0) < REFRESH_RETRY_MS) return { changed: false };
+  if (!serviceStatus(home, o).installed) return { changed: false };
+  const exec = o.exec ?? execDefault;
+  const r = exec(spec.register[0], spec.register[1]);
+  if (r.status !== 0) {
+    const error = firstLine(r.stderr || r.stdout) || 'the task could not be registered';
+    try { mkdirSync(dirname(definitionPath(home)), { recursive: true }); writeFileSync(definitionPath(home), JSON.stringify({ failed_sha256: sha, failed_at: now, error })); } catch { /* tried again at the next start */ }
+    return { changed: false, error };
+  }
+  markDefinition(home, spec);
+  return { changed: true };
 }
 
 /** Removes the logon entry and stops the service it started. Safe when nothing is installed. */

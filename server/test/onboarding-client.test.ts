@@ -1,13 +1,13 @@
 /**
  * End to end for the onboarding client (docs/onboarding.md, build 4): deploy/client/setup.mjs against a local hub on
  * 127.0.0.1 behind an HTTPS proxy whose CA this test makes (pure Node, nothing committed). A clean root folder and a
- * fake HOME: Add PC, download and hash check, enrol, request, a wait killed mid-way, the approval through the admin API,
+ * fake HOME: Add PC, the legacy files copied from the repository (the hub serves only the restore template), enrol, request, a wait killed mid-way, the approval through the admin API,
  * a crash after keys.env is written, the resumed pickup and confirm, folders with working logins, the team started,
  * and the doctor. No secret may appear in any output.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { execFile, spawn } from 'node:child_process';
-import { createHash, generateKeyPairSync, randomBytes, sign, X509Certificate, type KeyObject } from 'node:crypto';
+import { generateKeyPairSync, randomBytes, sign, X509Certificate, type KeyObject } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import http from 'node:http';
 import https from 'node:https';
@@ -72,7 +72,6 @@ const setup = (args: string[], extra: Record<string, string> = {}) => new Promis
 const getPinned = (url: string) => new Promise<string>((ok, no) => {
   https.get(url, { ca: readFileSync(join(dir, 'ca.pem')) }, (r) => { let s = ''; r.setEncoding('utf8'); r.on('data', (c) => { s += c; }); r.on('end', () => ok(s)); }).on('error', no);
 });
-const sha = (s: string) => createHash('sha256').update(s).digest('hex');
 const teamStatus = (id: string) => (app.db.prepare('SELECT status FROM teams WHERE id=?').get(id) as { status: string }).status;
 
 beforeAll(async () => {
@@ -111,19 +110,15 @@ afterAll(async () => {
 describe('setup.mjs end to end', () => {
   let requestId = '', vars: string[] = [], coordFolder = '';
 
-  it('Add PC, download and hash check, enrol over the pinned CA', async () => {
+  it('Add PC, the legacy files copied by hand (the hub no longer serves them), enrol over the pinned CA', async () => {
     const add = await api('POST', '/pcs/add', { name: 'e2e-pc' });
     expect(add.status).toBe(200);
-    const prompt: string = add.body.prompt.text;
-    const field = (label: string) => new RegExp(`${label} SHA-256: ([0-9a-f]{64})`).exec(prompt)?.[1];
-    expect(field('Hub CA certificate')).toBe(caSha);
-    // What Claude does from the prompt: download both files over HTTPS and check them against the prompt's hashes.
-    for (const [f, label] of [['setup.mjs', 'setup.mjs'], ['agent-hub-headers.mjs', 'agent-hub-headers.mjs']] as const) {
-      const text = await getPinned(`${hub}/onboard/client/${f}`);
-      expect(sha(text)).toBe(field(label.replace('.', '\\.')));
-      writeFileSync(join(conf, f), text);
-    }
-    expect(prompt).toContain(add.body.code);
+    expect(add.body).not.toHaveProperty('prompt'); // the console offers only the connector prompt
+    expect(add.body.connector_prompt).toContain('conclave setup request');
+    expect(add.body.pairing.ca_check).toBe(caSha.slice(0, 16).match(/.{4}/g)!.join(' '));
+    // The hub serves only the restore template now; the legacy client is copied from the repository for this test.
+    expect(Object.keys(JSON.parse(await getPinned(`${hub}/onboard/client/manifest`)).files)).toEqual(['restore-prompt.md']);
+    for (const f of ['setup.mjs', 'agent-hub-headers.mjs']) writeFileSync(join(conf, f), readFileSync(join(SETUP_SRC, f), 'utf8'));
     // The code goes to a file, never onto a command line; --code is refused.
     expect((await setup(['enrol', '--hub', hub, '--ca-sha256', caSha, '--code', add.body.code])).code).toBe(2);
     mkdirSync(join(conf, 'onboarding'), { recursive: true });

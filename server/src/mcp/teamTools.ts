@@ -180,7 +180,7 @@ export function registerTeamTools(reg: Reg, teams: Teams, ToolError: ToolErrorCt
     // Never a key (docs/onboarding.md#recruits-from-a-coordinator): the key is created at pickup, on the PC, into keys.env.
     const p = r.pickup!;
     return { text: `Recruited ${r.agent_id} as ${a.role}. ${Teams.pickupText(a.label.trim(), p)}`,
-      data: { status: 'created', agent_id: r.agent_id, pickup: { request_id: p.request_id, pc: p.pc, session_var: p.session_var, folder: p.folder, command: p.command } } };
+      data: { status: 'created', agent_id: r.agent_id, pickup: { request_id: p.request_id, pc: p.pc, session_var: p.session_var, folder: p.folder, expires_at: p.expires_at } } };
   }));
 
   reg('team_pause', 'Coordinator: pause your team until a set time, at most 24 hours ahead, for example while the account usage limit runs out. Leases, stall warnings and review timers are held, so no task drops back to open; writes and messages on team resources wait. The team resumes by itself at until. Only the operator lengthens a pause or sets a longer one.', {

@@ -14,7 +14,7 @@ import { SAMPLE_MAX } from '../hardware/hardware.js';
 import { LONG_POLL_MAX_S } from './stream.js';
 import { Connector, CLIENTS, DELIVER_REASONS, WAKE_STATES, ISOLATION, KEY_STORES, DESTINATION_RE, PC_REPORTED, RESET_RESULT_CODES, VERSION_RE } from './connector.js';
 
-const STATUS: Record<string, number> = { invalid_argument: 400, contains_key: 400, forbidden: 403, not_found: 404, conflict: 409, invalid_state: 409 };
+const STATUS: Record<string, number> = { invalid_argument: 400, contains_key: 400, forbidden: 403, not_found: 404, conflict: 409, invalid_state: 409, lockdown: 423 };
 const version = z.string().max(40).regex(VERSION_RE);
 const short = (n: number) => z.string().max(n).nullable().optional();
 const tokens = z.number().int().min(0).max(100_000_000);
@@ -24,6 +24,7 @@ const ContextRow = z.object({
   context_tokens: tokens, window: tokens.nullable(), percent: z.number().int().min(0).max(1000).nullable().optional(), turn_tokens: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
   compacted_at: when, compacts: z.number().int().min(0).max(1_000_000), at: when,
 }).strict();
+const SkipBody = z.object({ reason: z.enum(['key_not_held', 'folder_refused']) }).strict();
 const CheckInBody = z.object({
   version, platform: short(40), node: short(40), git: short(40),
   clients: z.array(z.object({ client: z.enum(CLIENTS), version: z.string().max(40).nullable() }).strict()).max(10).optional(),
@@ -31,6 +32,8 @@ const CheckInBody = z.object({
   remove_connector_with_last_hub: z.boolean().nullable().optional(), usage_opt_in: z.boolean().nullable().optional(),
   hardware_opt_in: z.boolean().nullable().optional(),
   isolation: z.enum(ISOLATION).nullable().optional(), key_store: z.enum(KEY_STORES).nullable().optional(),
+  // Only a yes or no: the PC never says which pieces or where.
+  legacy_leftovers: z.boolean().nullable().optional(),
   agents: z.array(z.object({ agent_id: z.string().max(100), state: z.enum(PC_REPORTED), profile: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9 _-]{0,39}$/).optional(), profile_hidden: z.literal(true).optional() }).strict()).max(200).optional(),
   // Restore destinations the PC's user approved: an id and a plain label, never a path.
   destinations: z.array(z.object({ id: z.string().regex(DESTINATION_RE), label: z.string().min(1).max(80) }).strict()).max(20)
@@ -84,16 +87,34 @@ export function registerConnector(f: FastifyInstance, db: Db, connector: Connect
       throw e;
     }
   };
-  const withPc = (fn: (pc: string, req: FastifyRequest) => unknown, bridge = false) => async (req: FastifyRequest, reply: FastifyReply) => {
+  const withPc = (fn: (pc: string, req: FastifyRequest, credential: string | null) => unknown, bridge = false) => async (req: FastifyRequest, reply: FastifyReply) => {
     const who = pcOf(req, bridge);
     if ('refused' in who) {
       if (who.receipt) return reply.code(401).send({ error: 'disconnected', message: 'This hub was disconnected from this PC. Fetch the cleanup order with the receipt credential.', receipt: who.receipt, disconnect_url: '/connector/v1/disconnect' });
       return refuse(reply);
     }
-    return run(reply, () => fn(who.pc, req));
+    return run(reply, () => fn(who.pc, req, who.credential ?? null));
   };
 
-  f.post('/connector/v1/check-in', withPc((pc, req) => connector.checkIn(pc, CheckInBody.parse(req.body ?? {})), true));
+  f.post('/connector/v1/check-in', withPc((pc, req, cred) => connector.checkIn(pc, CheckInBody.parse(req.body ?? {}), cred), true));
+  // Key handovers waiting for this app key (docs/connector.md, "Receiving a rotated key or a recruit"): descriptions and public key ids, no secret.
+  // The app key only: a bridge key or a turn token gets nothing here.
+  f.get('/connector/v1/handovers', withPc((pc, _req, cred) => {
+    const app = cred ? keys.credential(cred) : null;
+    // Under a lockdown of all writes or of this PC the list is refused like the pickup (423), not answered empty.
+    if (connector.handoversLocked?.(pc) || connector.isLocked(pc)) throw new KeyError('lockdown', 'Key handovers are locked down by the administrator; nothing is listed until the lockdown is lifted.');
+    if (!app || !connector.handovers) return { handovers: [] };
+    return { handovers: connector.handovers.list(app) };
+  }));
+  // The connector cannot take a handover: the PC does not hold the key being rotated, or a recruit's folder broke the rules.
+  // The hub cancels it at once (not_on_pc or folder_refused), so the operator sees why instead of waiting 24 hours.
+  f.post('/connector/v1/handovers/:id/skip', withPc((pc, req, cred) => {
+    const app = cred ? keys.credential(cred) : null;
+    if (!app || app.kind !== 'app_key' || !connector.handovers) throw new KeyError('not_found', 'No such handover for this PC.');
+    const { reason } = SkipBody.parse(req.body ?? {});
+    connector.handovers.skip(app, (req.params as { id: string }).id, reason);
+    return { ok: true };
+  }));
   // The long poll (the fallback when the stream cannot open): with ?wait=N (at most 25 s) it holds the answer until an order is queued.
   f.get('/connector/v1/orders', async (req, reply) => {
     const who = pcOf(req, false);
@@ -158,7 +179,11 @@ export function registerConnector(f: FastifyInstance, db: Db, connector: Connect
     return connector.revokeTurn(pc, b.token, b.reason);
   }));
   // Folders the connector allowed without a click at the upgrade to turn tokens (registered before it, unchanged since): one audit entry each.
+  f.post('/connector/v1/folders-denied', withPc((pc, req) => connector.foldersDenied(pc, z.object({ denied: z.array(z.discriminatedUnion('what', [z.object({ what: z.literal('folder'), agent: z.string().max(100) }).strict(), z.object({ what: z.literal('pickup'), request: z.string().max(100) }).strict()])).max(50) }).strict().parse(req.body ?? {}).denied)));
+  f.post('/connector/v1/folders-allowed-with-pickup', withPc((pc, req) => connector.foldersAllowedWithPickup(pc, z.object({ allowed: z.array(z.object({ agent_id: z.string().max(100), ref: z.string().max(100) }).strict()).max(100) }).strict().parse(req.body ?? {}).allowed)));
   f.post('/connector/v1/folders-grandfathered', withPc((pc, req) => connector.foldersGrandfathered(pc, z.object({ agents: z.array(z.string().max(100)).max(200) }).strict().parse(req.body ?? {}).agents)));
+  // The agent folders the connector registered: each becomes a proposed folder row, for the operator to approve (docs/connector.md, "Folders").
+  f.post('/connector/v1/folders', withPc((pc, req) => connector.proposeFolders(pc, z.object({ folders: z.array(z.object({ agent: z.string().max(100), path: z.string().max(600) }).strict()).max(200) }).strict().parse(req.body ?? {}).folders)));
   // The wake: a run's state (a heartbeat rides on it) and the completion check after it (docs/connector.md, "The wake").
   const wakeId = z.string().regex(/^[A-Za-z0-9_-]{1,100}$/);
   f.post('/connector/v1/wake/report', withPc((pc, req) => connector.wakeReport(pc, z.object({ agent_id: wakeId, state: z.enum(WAKE_STATES), run: wakeId.optional(), task: wakeId.optional(), session_id: z.string().regex(/^[A-Za-z0-9_.:-]{1,100}$/).optional(), last_activity: count.optional(), resumes_at: count.optional(), waiting_on: wakeId.optional() }).strict().parse(req.body ?? {}))));

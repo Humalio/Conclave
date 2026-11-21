@@ -265,7 +265,7 @@ describe('key lifecycle', () => {
     const A = await connect(own.secret), B = await connect(own.secret);
     try {
       const t = (await A.login(big.secret)).token, tb = (await B.login(other.secret)).token;
-      const body = JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'file_search', arguments: { session_token: t, query: 'x'.repeat(2 * 1024 * 1024 + 10) } } });
+      const body = JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'file_search', arguments: { session_token: t, query: 'x'.repeat(2 * 1024 * 1024 + 128 * 1024) } } });
       const r = await fetch(`${base}/mcp`, { method: 'POST', headers: { Authorization: `Bearer ${own.secret}`, 'content-type': 'application/json', accept: 'application/json, text/event-stream' }, body });
       expect(r.status).toBe(413);
       expect(JSON.stringify(await r.json().catch(() => ({})))).toMatch(/too large|Request body is too large/i);

@@ -128,6 +128,7 @@ Legend: **admin** = admin-only (403). **self** = the signed-in user's own data. 
 
 | Route(s) | Member scope |
 |---|---|
+| `GET /api/session` | public: `{signed_in}` only, so the console can show the login page without a refused `/api/me` |
 | `POST /api/login`, `GET /api/me`, `POST /api/me/password`, `POST /api/logout`, `POST /api/totp/enroll`, `/confirm` | self. `/api/me` adds `role`, `display_name`, `external`, `org`, `expires_at`, `totp_required`, `setup_needed` (2FA still to enrol), `password_locked` (true for the .env operator on a demo hub, whose `POST /api/me/password` is refused) and `password_changed_at` (null when the password was set before the hub recorded the date); for a member also `grants`, `decider_teams` and `deciding_now` (the teams they decide for now), and it omits `public_url` and demo state |
 | `GET/POST /api/pcs`, `/api/pcs/:id/*` (suspend, reactivate, setup, add, re-enrol, enrolment), `GET /api/onboarding/pcs`, `/api/onboarding*`, `PUT/DELETE /api/keys/:id/onboarding` | admin |
 | `/api/keys*` (list, create, get, rotate, end-logins, binding, patch, rules, versions, rollback, apply-template, effective), `POST /api/simulate`, `/api/templates` | admin |

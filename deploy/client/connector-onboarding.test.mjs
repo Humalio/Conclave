@@ -22,7 +22,8 @@ import { OVERRIDE_MARKER, overrideState, roleFileProblem } from './connector/rol
 import { trustStatus } from './connector/trust.mjs';
 import { runCheck } from './connector/check.mjs';
 import { commitFiles } from './connector/commit.mjs';
-import { pendingList, approvePickup } from './connector/approvals.mjs';
+import { pendingList, approvePickup, folderApproved } from './connector/approvals.mjs';
+import { summary as requestSummary } from './connector/request.mjs';
 process.env.CONCLAVE_KEY_STORE = 'file';
 /** Setup as the PC's user drives it: when a key pickup waits for the click on the screen, click it and go on. */
 async function advance(home, hubKey, o) {
@@ -39,7 +40,7 @@ const tmp = (p) => mkdtempSync(join(tmpdir(), `cnob-${p}-`));
 const check16 = (sha) => sha.slice(0, 16).match(/.{4}/g).join(' ');
 
 /** A stub hub: the routes pairing and setup use, with a log of what it was sent. */
-function stubHub(pki, { hubId = 'hub-aaaabbbbcccc' } = {}) {
+function stubHub(pki, { hubId = 'hub-aaaabbbbcccc', claimOrigin = null } = {}) {
   const st = { codes: [], request: null, state: 'submitted', confirmed: null, connected: new Set(), pickups: 0, origin: '' };
   const agents = [
     { agent_id: 'agt_coord', label: 'Coordinator', role: 'coordinator', team_role: 'coordinator', session_var: 'CONCLAVE_T_COORDINATOR_SESSION_KEY', folder: 'coordinator', instructions: '# You are the coordinator\n' },
@@ -53,7 +54,7 @@ function stubHub(pki, { hubId = 'hub-aaaabbbbcccc' } = {}) {
       const json = (status, j) => { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(j)); };
       const authed = req.headers.authorization === `Bearer ${APP_KEY}`;
       if (u.pathname === '/onboard/ca.crt') { res.writeHead(200, { 'content-type': 'application/x-pem-file' }); return res.end(pki.caPem); }
-      if (u.pathname === '/connector/v1/hub') return json(200, { hub_id: hubId, origin: st.origin });
+      if (u.pathname === '/connector/v1/hub') return json(200, { hub_id: hubId, origin: claimOrigin ?? st.origin });
       if (u.pathname === '/connector/v1/pair') {
         st.codes.push(body.pairing_code);
         if (body.pairing_code !== CODE || st.codes.length > 1 && st.codes.slice(0, -1).includes(CODE)) return json(401, { error: 'invalid_pairing_code', message: 'This pairing code is not valid, has expired or was already used. Make a new code in the console.' });
@@ -200,6 +201,40 @@ and after
   });
 });
 
+describe('a hub that names another address, and a known hub that moved', () => {
+  test('a hub that says its address is another one than it was reached at is refused (origin_mismatch)', async () => {
+    const pki = testCa('Conclave hub CA'), liar = await stubHub(pki, { claimOrigin: 'https://elsewhere.example' });
+    try {
+      const home = tmp('mismatch');
+      const r = await checkHub(home, { origin: liar.origin, check: check16(pki.caSha256) });
+      assert.equal(r.ok, false);
+      assert.equal(r.reason, 'origin_mismatch');
+      assert.deepEqual(liar.st.codes, []); // the code was never sent
+      const p = await pair(home, { origin: liar.origin, check: check16(pki.caSha256), code: CODE });
+      assert.equal(p.reason, 'origin_mismatch');
+      assert.deepEqual(liar.st.codes, []);
+    } finally { liar.server.close(); }
+  });
+
+  test('a known hub (same id, same CA) now reached at another address needs the user to confirm (origin_changed)', async () => {
+    const pki = testCa('Conclave hub CA'), hub = await stubHub(pki);
+    try {
+      const home = tmp('moved');
+      const { putHub } = await import('./connector/keyfile.mjs');
+      putHub(home, { hubId: 'hub-aaaabbbbcccc', origin: 'https://old-address.example', caPem: pki.caPem, appKey: 'old' });
+      const r = await checkHub(home, { origin: hub.origin, check: check16(pki.caSha256) });
+      assert.equal(r.ok, false);
+      assert.equal(r.reason, 'origin_changed');
+      assert.equal(r.hub.id, 'hub-aaaabbbbcccc');
+      const p = await pair(home, { origin: hub.origin, check: check16(pki.caSha256), code: CODE });
+      assert.equal(p.reason, 'origin_changed');
+      assert.deepEqual(hub.st.codes, []); // refused before the code was sent
+      const ok = await checkHub(home, { origin: hub.origin, check: check16(pki.caSha256) }, { confirmChange: true });
+      assert.equal(ok.ok, true);
+    } finally { hub.server.close(); }
+  });
+});
+
 describe('the local screen', () => {
   let s, home;
   const get = (path, headers = {}) => fetch(`http://127.0.0.1:${s.port}${path}`, { headers, redirect: 'manual' });
@@ -290,7 +325,7 @@ describe('setup with the connector', () => {
   test('waits for approval, and the screen can be closed meanwhile (state is on disk)', async () => {
     assert.equal((await advance(home, hubKey, opts())).phase, 'waiting');
     const rows = await agentRows(home, hubKey);
-    assert.deepEqual(rows.agents.map((a) => a.state), ['ready_to_open', 'ready_to_open']); // the stub's timeline; nothing built yet
+    assert.deepEqual(rows.agents.map((a) => a.state), ['waiting_for_approval', 'waiting_for_approval']); // the stub says ready, but no keys are here and the request is not approved: not "ready to open"
     assert.equal(loadSetup(home, 'hub-aaaabbbbcccc').request.state, 'submitted');
   });
 
@@ -302,7 +337,9 @@ describe('setup with the connector', () => {
     writeFileSync(devDir, 'not a folder');
     // At standard isolation the key pickup waits for the PC user's click on the screen: nothing is picked up before it.
     const waiting = await advanceRaw(home, hubKey, opts());
-    assert.deepEqual([waiting.phase, waiting.pickup_click, hub.st.pickups], ['waiting', true, 0]);
+    assert.deepEqual([waiting.phase, waiting.pickup_click, waiting.stage, hub.st.pickups], ['waiting', true, 'allow', 0]);
+    assert.deepEqual((await agentRows(home, hubKey)).agents.map((a) => [a.state, a.text]), [['waiting_for_allow', 'Waiting for your Allow'], ['waiting_for_allow', 'Waiting for your Allow']], 'approved, but the keys wait for the PC user pressing Allow: not "ready to open"');
+    assert.deepEqual(pendingList(home).pickups.map((k) => k.folders.length), [2], 'the row lists the folders the click also allows');
     assert.equal(pendingList(home).pickups.length, 1);
     const r = await advance(home, hubKey, opts());
     assert.equal(r.phase, 'set_up');
@@ -318,6 +355,7 @@ describe('setup with the connector', () => {
     assert.equal(readFileSync(join(coord, 'CLAUDE.md'), 'utf8'), '# You are the coordinator\n');
     assert.equal(existsSync(join(coord, 'AGENTS.override.md')), false, 'a Claude Code agent gets no Codex role file');
     assert.equal(resolveFolder(home, coord).binding.provider, undefined, 'and its folder is not marked Codex (no commit tool)');
+    assert.equal(folderApproved(home, coord, resolveFolder(home, coord).binding), true, 'a folder built inside the pickup the PC user allowed needs no second click');
     assert.deepEqual([resolveFolder(home, coord).binding.team, resolveFolder(home, coord).binding.team_name], ['team_1', 'Grants'], 'the team from the pickup is recorded, for Bind team');
     assert.ok(entries(home).some((e) => e.kind === 'instructions' && e.target === join(coord, 'CLAUDE.md') && e.installed?.sha256 === createHash('sha256').update('# You are the coordinator\n').digest('hex')), 'recorded with the hash of what setup wrote, so uninstall can tell an edit');
     const ck = await runCheck(home, coord, opts());
@@ -530,4 +568,14 @@ describe('the signed installer (throwaway test key only)', async () => {
     assert.throws(() => buildInstaller(tpl, { version: '9.1.0', release_base: null, keys: [] }));
     assert.throws(() => buildInstaller('no marker', embed('9.1.0')));
   });
+});
+
+// The summary `conclave setup request` shows says where the requirements or the brief come from in a whole sentence.
+test('the request summary names the source of the requirements in a whole sentence', () => {
+  const base = { kind: 'new_team', project: { name: 'Atlas', existing: false }, team: { name: 'Atlas', goal: 'Build the grant tracker.' }, roles: [] };
+  const line = (from, ref) => requestSummary({ ...base, source: { from, ...(ref ? { ref } : {}) } }).split('\n')[1];
+  assert.equal(line('operator'), 'You supply the requirements or the brief later.');
+  assert.equal(line('coordinator'), 'The coordinator derives the requirements or the brief.');
+  assert.equal(line('existing', 'docs/spec.md'), 'The requirements or the brief come from an existing source: docs/spec.md.');
+  assert.doesNotMatch(requestSummary({ ...base, source: { from: 'operator' } }), /come from you/);
 });

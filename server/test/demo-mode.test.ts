@@ -173,7 +173,7 @@ describe('demo mode on', () => {
     expect((await get(`/users/${guest.id}/folder-grants`)).folder_grants.map((g: any) => g.path)).toEqual(['/Captures/', '/Case Command/'].sort());
     expect((await get('/lockdown')).pcs).toHaveLength(1);
     const watch = (await get('/keys')).keys.find((k: any) => k.label === 'Watch console session' && k.status === 'active');
-    expect((await get(`/keys/${watch.id}/collect`)).collection?.status).toBe('signed_in');
+    expect((await get(`/keys/${watch.id}/handover`)).confirmed?.key).toBeTruthy();
   }, 300_000);
 
   it('a failed vault copy still brings the hub back up', async () => {

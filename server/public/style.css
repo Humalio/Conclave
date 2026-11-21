@@ -1683,7 +1683,8 @@ button.av{cursor:pointer}
 @media (min-width:768px){.sheet.wide{width:min(640px,calc(100vw - 2 * var(--gutter)))}}
 .ob-prompt{max-height:min(46dvh,420px);overflow:auto;padding-right:var(--s4);word-break:normal;overflow-wrap:anywhere}
 .ob-kv .kv{padding:var(--s1) 0}
-.ob-fp{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* The pairing code and the hub check the PC user types on the connector's pairing screen: chips, selectable in one click. */
+.ob-chip{display:inline-block;padding:1px 6px;border-radius:var(--r-chip);background:var(--panel-3);border:1px solid var(--line);color:var(--text);font:var(--t-id);white-space:nowrap;user-select:all}
 .ob-ags{display:flex;flex-direction:column}
 .ob-ag{display:grid;grid-template-columns:var(--h-touch) minmax(0,1fr) 180px auto;align-items:center;gap:var(--s3);height:56px;padding:0;border-top:1px solid var(--line)}
 .ob-ag:first-child{border-top:0}
@@ -3278,6 +3279,17 @@ body.view-busy #app{cursor:progress}
 /* The Needs you screen (docs/dashboard-ux.md, Needs you screen): each row in full, with what is needed to decide there. */
 .ny-team{max-width:240px;margin-inline-start:auto}
 .ny-list{display:flex;flex-direction:column}
+/* Folded identical rows (nyCards): the first card, then Show N more like this and the others under it. */
+.ny-grp{display:flex;flex-direction:column;margin-top:var(--s3)}
+.ny-grp:first-child{margin-top:0}
+.ny-grp-btn{align-self:flex-start;margin-top:var(--s2)}
+.ny-grp-btn[aria-expanded="true"] svg{transform:rotate(90deg)}
+.ny-grp-more>.ny-card:first-child{margin-top:var(--s2)}
+.ny-grp-more[hidden]{display:none}
+/* The checkout's required unmerged-work box: the reason, the box, and its error under it. */
+.co-req{display:flex;flex-direction:column;gap:var(--s2)}
+.co-req .co-chk{margin-top:0}
+.co-req .hint{margin:0}
 .ny-card+.ny-card,[data-ny-box]>div>.ny-card:first-child{margin-top:var(--s3)}
 /* Inside the team page's Needs you section each card keeps its own surface, a step lighter than the section. */
 [data-ny-box="team"] .ny-card{background:var(--panel-2)}
@@ -3464,11 +3476,6 @@ button.bp-sk-c:hover .stat-l{color:var(--text)}
 
 /* ---------- Collect on the PC (docs/onboarding.md): the leak question in the Rotate sheet and the collection's status card ---------- */
 .rot-q{margin:var(--s2) 0 0;font:var(--t-body);font-weight:600}
-.rot-opts{display:flex;flex-direction:column;gap:var(--s2);margin-top:var(--s3)}
-.rot-opt{display:flex;flex-direction:column;align-items:flex-start;gap:2px;width:100%;padding:var(--s3);text-align:left;border-radius:var(--r-lg);background:var(--panel);border:1px solid var(--line);color:var(--text);font:var(--t-body);cursor:pointer}
-.rot-opt span{color:var(--muted)}
-.rot-opt.on{border-color:var(--accent);background:var(--accent-soft)}
-.rot-opt:disabled{opacity:.55;cursor:not-allowed}
 .rot-why{margin:0;padding:0 var(--s1);color:var(--muted);font:var(--t-body)}
 .col-status{display:flex;flex-direction:column;gap:var(--s1);padding:var(--s3);border-radius:var(--r-lg);border:1px solid var(--line);background:var(--panel-2)}
 .col-status.ok{background:var(--ok-soft);border-color:color-mix(in srgb,var(--ok) 40%,transparent)}

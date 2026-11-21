@@ -146,8 +146,10 @@ describe('Usage and messages', () => {
 describe('Add PC and plain HTTP', () => {
   it('Add PC shows the download link and, when set, the 30-minute pairing code', () => {
     const s = fn('joinSheet');
-    expect(s).toContain('made.download_url ? `<div class="jn-dl">');
-    expect(s).toContain('it is valid for 30 minutes');
+    expect(s).toContain('${jnInstallH(made)}');
+    expect(js.slice(js.indexOf('const jnInstallH = '), js.indexOf('const OB_NO_PROMPT'))).toContain('const get = made.download_url ? `download <code>');
+    expect(s).toContain("${obPairH(made, '<b>2.</b> ')}");
+    expect(js.slice(js.indexOf('const obPairH = '), js.indexOf('const OB_NO_PROMPT'))).toContain('The code works once and it is valid for 30 minutes');
   });
   it('drops the HTTP tag and the Plain HTTP pill', () => {
     expect(js).not.toContain('Plain HTTP');

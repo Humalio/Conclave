@@ -13,7 +13,7 @@ import { nodePath, connectorPath, isApproved } from './entries.mjs';
 import { trustStatus } from './trust.mjs';
 import { askBroker } from './brokerclient.mjs';
 import { line } from './reasons.mjs';
-import { hasLegacyEntry } from './migrate.mjs';
+import { hasLegacyEntry, leftoversOffer } from './migrate.mjs';
 import { canonicalFolder } from './paths.mjs';
 import { roleFileProblem } from './role.mjs';
 import { storeName, STORE_LINES } from './keystore.mjs';
@@ -50,5 +50,8 @@ export async function runCheck(home, folderArg, { claudeJson, node, connector, p
     if (!r.ok) return stop(typeof r.reason === 'string' ? r.reason : 'connector_not_running');
     steps.push({ step: 'the hub accepted this agent (nothing kept)', ok: true });
   }
+  // Old setup left on the PC: offered in plain words, never run, and never a reason to fail the check.
+  const offer = leftoversOffer(home);
+  if (offer) steps.push({ step: offer, ok: true, offer: 'migrate --finish --remove-legacy-ca' });
   return { ok: true, reason: null, line: 'Conclave is set up for this folder.', steps };
 }

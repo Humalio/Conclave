@@ -5,7 +5,8 @@ import type { OwnerScope } from '../policy/ownerScope.js';
 import type { Keys } from '../keys/keys.js';
 import type { Teams } from '../teams/teams.js';
 import type { Vault } from '../vault/vault.js';
-import { VaultError } from '../vault/vault.js';
+import { VaultError, textProblem } from '../vault/vault.js';
+import type { Audit } from '../audit/audit.js';
 import type { VaultStore, Who, RevisionRow } from '../vault/store.js';
 import { MAX_CONTENT } from '../vault/store.js';
 import { authorize } from '../policy/engine.js';
@@ -13,12 +14,41 @@ import { authorize } from '../policy/engine.js';
 type Out = { text: string; data: Record<string, unknown> };
 type Reg = (name: string, description: string, shape: z.ZodRawShape, needsToken: boolean, fn: (ctx: any, a: any) => Promise<Out>) => void;
 type ToolErrorCtor = new (code: string, message: string, extra?: Record<string, unknown>) => Error;
-export interface FileToolDeps { store: VaultStore; vault: Vault; keys: Keys; teams: Teams; ToolError: ToolErrorCtor; hint?: (agentId: string, relPath: string) => string | null; ownerScope?: OwnerScope }
+export interface FileToolDeps { store: VaultStore; vault: Vault; keys: Keys; teams: Teams; ToolError: ToolErrorCtor; audit?: Audit; hint?: (agentId: string, relPath: string) => string | null; ownerScope?: OwnerScope }
 
 const BASE = z.string().max(100).describe('The revision (sha256:...) you last read; use "absent" for a file that does not exist');
 
 export function registerFileWriteTools(reg: Reg, d: FileToolDeps): void {
-  const { store, vault, keys, teams, ToolError, hint } = d;
+  const { store, vault, keys, teams, ToolError, hint, audit } = d;
+  const regRaw = reg;
+  /**
+   * The write tools: each outcome is an audit event of the agent (`vault.file.<op>` for a write that landed, `vault.file.refused`
+   * for one that did not, with the code and the reason), so the operator sees agent writes and attempted ones, not only the console's.
+   * An audit failure never changes what the tool answers.
+   */
+  const OPS: Record<string, string> = { file_create: 'create', file_update: 'update', file_patch: 'update', file_rename: 'rename', file_delete: 'delete', file_restore: 'restore' };
+  reg = (name, description, shape, needsToken, fn) => regRaw(name, description, shape, needsToken, async (ctx, a) => {
+    const op = OPS[name];
+    if (!op || !audit) return fn(ctx, a);
+    const actor = { kind: 'agent' as const, id: ctx.session.agent.id as string };
+    try {
+      const out = await fn(ctx, a);
+      try {
+        const x = out.data as Record<string, unknown>;
+        if (!(op === 'update' && x.revision === x.previous_revision)) {
+          const path = String(x.path ?? a.path);
+          audit.event(actor, `vault.file.${op}`, { kind: 'vault_file', id: path }, { path, ...(x.from ? { from: x.from } : {}), revision: x.revision ?? 'tombstone', ...(x.previous_revision ? { previous_revision: x.previous_revision } : {}), ...(x.restored_from ? { restored_from: x.restored_from } : {}), tool: name, author_kind: 'agent' });
+        }
+      } catch { /* the audit must not change the answer */ }
+      return out;
+    } catch (e) {
+      try {
+        const code = (e as { code?: unknown }).code, path = String(a.path ?? a.from ?? '').slice(0, 300);
+        audit.event(actor, 'vault.file.refused', { kind: 'vault_file', id: path || name }, { tool: name, path, ...(a.to ? { to: String(a.to).slice(0, 300) } : {}), code: typeof code === 'string' ? code : 'internal_error', reason: e instanceof Error ? e.message.slice(0, 300) : 'unknown' });
+      } catch { /* the audit must not change the answer */ }
+      throw e;
+    }
+  });
   const withHint = (ctx: any, rel: string[], text: string, data: Record<string, unknown>): Out => {
     const h = hint?.(ctx.session.agent.id, rel.join('/')) ?? null;
     return { text: h ? `${text}\n${h}` : text, data: h ? { ...data, graph_hint: h } : data };
@@ -58,13 +88,22 @@ export function registerFileWriteTools(reg: Reg, d: FileToolDeps): void {
   const revisionVisible = (ctx: any, fileId: string, revision: string, actions: string[]) =>
     store.revisionPaths(fileId, revision).some((p) => mayAt(ctx, p, actions));
   const label = (id: string | null) => (id ? keys.agent(id)?.label ?? null : null);
-  const content = z.string().max(MAX_CONTENT).describe('Full text content (UTF-8)');
+  // No length limit in the schema: it counts characters, the limit is in bytes, and a refusal there would carry no reason.
+  const content = z.string().describe('Full text content (UTF-8, at most 2 MiB)');
+  /** A text the hub can store as the agent wrote it, or a ToolError saying why not (size in bytes, then the characters that would change). */
+  const checkText = (text: string, what = 'content'): void => {
+    const n = Buffer.byteLength(text, 'utf8');
+    if (n > MAX_CONTENT) throw new ToolError('too_large', `The ${what} is ${n} bytes; a vault write takes at most ${MAX_CONTENT} bytes (2 MiB) of UTF-8 text. Split it into several files, or write the large part with a file transfer.`, { limit_bytes: MAX_CONTENT, size_bytes: n });
+    const why = textProblem(text);
+    if (why) throw new ToolError('invalid_argument', why);
+  };
 
   reg('file_create', 'Create a new text file in the vault (parent folders are created). Fails with conflict if the path exists.', {
     path: z.string(), content,
   }, true, async (ctx, a) => {
     const { path, rel } = norm(a.path);
     ctx.need('fs.create', path);
+    checkText(a.content);
     const r = await store.write(rel, Buffer.from(a.content, 'utf8'), 'absent', 'create', who(ctx, 'fs.create', [path]));
     return { text: `Created ${path} (revision ${r.revision})`, data: { path, revision: r.revision } };
   });
@@ -74,6 +113,7 @@ export function registerFileWriteTools(reg: Reg, d: FileToolDeps): void {
   }, true, async (ctx, a) => {
     const { path, rel } = norm(a.path);
     ctx.need('fs.update', path);
+    checkText(a.content);
     const r = await store.write(rel, Buffer.from(a.content, 'utf8'), a.base_revision, 'update', who(ctx, 'fs.update', [path]));
     return withHint(ctx, rel, `Updated ${path} (revision ${r.revision})`, { path, revision: r.revision, previous_revision: r.previous_revision });
   });
@@ -93,20 +133,23 @@ export function registerFileWriteTools(reg: Reg, d: FileToolDeps): void {
       const n = text.split(e.old).length - 1;
       if (n === 0) throw new ToolError('no_match', `edit ${i}: the old text was not found. Nothing was changed.`, { edit_index: i, matches: 0 });
       if (n > 1) throw new ToolError('ambiguous_match', `edit ${i}: the old text occurs ${n} times; include more surrounding text so it matches once. Nothing was changed.`, { edit_index: i, matches: n });
+      const bad = textProblem(e.new);
+      if (bad) throw new ToolError('invalid_argument', `edit ${i}: ${bad} Nothing was changed.`);
       const at = text.indexOf(e.old);
       text = text.slice(0, at) + e.new + text.slice(at + e.old.length);
     });
+    checkText(text, 'patched file');
     const r = await store.write(rel, Buffer.from(text, 'utf8'), a.base_revision, 'patch', w);
     return withHint(ctx, rel, `Patched ${path} (revision ${r.revision})`, { path, revision: r.revision, previous_revision: r.previous_revision, edits_applied: a.edits.length });
   });
 
-  reg('file_rename', 'Rename or move a vault file. The destination must not exist. base_revision is the current revision of the source.', {
-    from: z.string(), to: z.string(), base_revision: BASE,
+  reg('file_rename', 'Rename or move a vault file. The destination must not exist. base_revision is the current revision of the source; leave it out to move the file whatever its content is now (a rename does not change content), which an editor busy on the same file cannot starve.', {
+    from: z.string(), to: z.string(), base_revision: BASE.optional(),
   }, true, async (ctx, a) => {
     const f = norm(a.from), t = norm(a.to);
     ctx.need('fs.rename', f.path);
     ctx.need('fs.rename', t.path);
-    const r = await store.rename(f.rel, t.rel, a.base_revision, who(ctx, 'fs.rename', [f.path, t.path]));
+    const r = await store.rename(f.rel, t.rel, a.base_revision ?? null, who(ctx, 'fs.rename', [f.path, t.path]));
     const s = ctx.session;
     const linked = await vault.linkedFrom(f.rel, (p) => authorize(s.rules, s.cap, 'fs.read', `path:${p}`).allowed);
     return { text: `Renamed ${f.path} to ${t.path}${linked.length ? `; ${linked.length} note(s) still link to the old name` : ''}`, data: { from: f.path, path: t.path, revision: r.revision, still_linking_to_old_name: linked } };

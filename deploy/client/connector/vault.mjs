@@ -7,7 +7,8 @@
  * - `/relay/<hub key>/<path>`: a call the connector would make to the hub, with a PLACEHOLDER where a key goes (`vault:app`,
  *   `vault:agent:<label>:<tag>`). The service puts the real key in (headers, and a small JSON body), sends it to the hub over
  *   the pinned CA, and streams the answer back. Only `/connector/v1/…`, `/bridge/…`, `/vault-sync/v1/…` and `/mcp` of a hub it knows.
- * - `/ops/<name>`: `put_hub`, `put_agent`, `remove_agent`, `remove_hub` (a key goes IN), `mark_disconnected` (a Disconnect
+ * - `/ops/<name>`: `put_hub`, `put_agent`, `stage_agent`, `remove_agent`, `remove_hub` (a key goes IN), `commit_staged` and
+ *   `discard_staged` (a handover's rotated key swapped in or dropped), `label_for_key` (a label, never a key), `mark_disconnected` (a Disconnect
  *   with remote cleanup off: the hub's section is kept and marked, so the worker stops checking in with it), `scan` (does this transcript hold a
  *   key: a yes or no), `view` and `ping`. No operation returns a key; the tests search every answer for one.
  *
@@ -18,7 +19,7 @@ import https from 'node:https';
 import { createHash } from 'node:crypto';
 import { mkdirSync, writeFileSync, renameSync, rmSync, chmodSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { readKeyFile, putHub, putAgentKey, removeAgentKey, removeHub, markDisconnected, findHub, hubKeyOf, normalizeOrigin, caFingerprint } from './keyfile.mjs';
+import { readKeyFile, putHub, putAgentKey, removeAgentKey, removeHub, markDisconnected, findHub, hubKeyOf, normalizeOrigin, caFingerprint, stageAgentKey, commitStaged, discardStaged, labelIn } from './keyfile.mjs';
 import { scanTranscript } from './leak.mjs';
 import { APP_PLACEHOLDER, agentPlaceholder } from './isolation.mjs';
 import { WIN, oneLine } from './paths.mjs';
@@ -134,6 +135,12 @@ export async function startVault({ dir, view, address, log = () => {} }) {
     put_hub: (p) => { const hub_key = putHub(dir, p); writeView(); return { ok: true, hub_key }; },
     put_agent: (p) => { putAgentKey(dir, p.hubKey, p.label, p.sessionKey); writeView(); return { ok: true }; },
     remove_agent: (p) => { const removed = removeAgentKey(dir, p.hubKey, p.label); writeView(); return { ok: true, removed }; },
+    // A rotated key waits beside the old one until the hub confirms (keyfile.mjs): staged, then swapped in or dropped.
+    stage_agent: (p) => { stageAgentKey(dir, p.hubKey, p.handoverId, p.label, p.sessionKey); return { ok: true }; },
+    commit_staged: (p) => { const committed = commitStaged(dir, p.hubKey, p.handoverId); writeView(); return { ok: true, committed }; },
+    discard_staged: (p) => ({ ok: true, discarded: discardStaged(dir, p.hubKey, p.handoverId) }),
+    /** Which label holds the key with this public id: a label or null, never the key. */
+    label_for_key: (p) => { const kf = readKeyFile(dir); return { ok: true, label: kf.ok ? labelIn(kf.data.hubs[p.hubKey], p.keyId) : null }; },
     remove_hub: (p) => { const removed = removeHub(dir, p.hubKey); writeView(); return { ok: true, removed }; },
     mark_disconnected: (p) => { const marked = markDisconnected(dir, p.hubKey, typeof p.at === 'string' ? p.at : undefined); writeView(); return { ok: true, marked }; },
     /** Does this transcript hold the exact key of one agent of one hub (or any agent of it)? A yes or no, never the key. */

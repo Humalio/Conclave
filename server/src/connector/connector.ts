@@ -11,6 +11,7 @@ import { hmacHex, randomToken, safeEqualHex, sha256Hex } from '../util/crypto.js
 import { KeyError } from '../keys/keys.js';
 import type { Keys } from '../keys/keys.js';
 import type { LeakGuard } from '../guard/leakGuard.js';
+import type { Handovers } from '../keys/handover.js';
 import { scrub } from '../audit/scrub.js';
 import { Streams } from './stream.js';
 
@@ -78,7 +79,19 @@ const DISCONNECT_OPEN = ['access_revoked', 'cleanup_pending'];
 /** A disconnect order still open: no result, not expired into Needs attention, not ended by Re-enrol PC. */
 const DSC_OPEN_SQL = "kind='disconnect' AND state IN ('access_revoked','cleanup_pending') AND finished_at IS NULL AND ended_at IS NULL";
 
-export const DISCONNECT_REMOVES = ["This hub's worker and transfers, stopped first", "This hub's keys on the PC", "This hub's folder registrations", "The connector's files for this hub"];
+/** The most folder rows one PC holds, proposed or decided: an agent's folder count, with room to spare. */
+const MAX_PC_FOLDERS = 500;
+/** Why a path cannot be an agent's folder, or null: one absolute path (a drive path or a POSIX one), normalised, at least two folders deep. */
+export function folderRefusal(p: unknown): string | null {
+  if (typeof p !== 'string' || p === '' || p.length > 500) return 'bad_path';
+  if (/[\u0000-\u001f\u007f]/.test(p)) return 'bad_path';
+  const win = /^[A-Za-z]:[\\/]/.test(p);
+  if (!win && !p.startsWith('/')) return 'not_absolute';
+  const parts = (win ? p.slice(3) : p.slice(1)).split(win ? /[\\/]/ : '/');
+  if (parts.some((s) => s === '' || s === '.' || s === '..')) return 'not_normalised';
+  return parts.length < 2 ? 'too_wide' : null;
+}
+export const DISCONNECT_REMOVES =["This hub's worker and transfers, stopped first", "This hub's keys on the PC", "This hub's folder registrations", "The connector's files for this hub"];
 export const DISCONNECT_KEEPS = ['Repositories and worktrees', 'Chat history', "The PC user's own settings", 'Other hubs on the PC'];
 
 /** List prices per million tokens, by model, as the hub's config sets them; none set: every cost is Unknown. */
@@ -99,6 +112,8 @@ export interface CheckIn {
   agents?: { agent_id: string; state: (typeof PC_REPORTED)[number]; profile?: string; profile_hidden?: true }[];
   /** Restore destinations the PC's user approved on the PC: an id and a label, never a path. */
   destinations?: { id: string; label: string }[];
+  /** True while the PC still holds pieces of the old setup (rollback copies, the old CA setting). A flag only: no path, no name. */
+  legacy_leftovers?: boolean | null;
   /** How full each agent's context is (design 3c), sent only while the PC's user opted in to usage reports. */
   context?: ContextReport[];
 }
@@ -108,7 +123,7 @@ export const DESTINATION_RE = /^dst_[a-z0-9]{6,32}$/;
 interface ReportRow {
   machine_id: string; version: string | null; platform: string | null; node: string | null; git: string | null; clients: string;
   auto_update: number | null; remote_cleanup: number | null; remove_with_last_hub: number | null; usage_opt_in: number | null; hardware_opt_in: number | null;
-  agents: string; destinations: string | null; isolation: string | null; key_store: string | null; first_check_in_at: number; last_check_in_at: number;
+  agents: string; destinations: string | null; isolation: string | null; key_store: string | null; legacy_leftovers: number | null; first_check_in_at: number; last_check_in_at: number;
 }
 interface ActionRow {
   id: string; machine_id: string; kind: string; state: string; payload: string; result: string | null; created_at: number; created_by: string | null;
@@ -133,6 +148,8 @@ const scrubDeep = (v: unknown): unknown => (typeof v === 'string' ? scrub(v) : A
 export class Connector {
   /** Text from the PC is L2: a key shape is refused (and alerted), other secrets are redacted (docs/connector.md). */
   guard: LeakGuard | null = null;
+  /** Key handovers (keys/handover.ts): the check-in says how many wait for the app key it came with. */
+  handovers: Handovers | null = null;
   /** The push stream and the long poll (docs/connector.md, "The push stream"). */
   readonly streams: Streams;
   constructor(private db: Db, private keys: Keys, private audit: Audit, private pepper: string, private prices: Record<string, ModelPrice> = {}, private now: () => number = Date.now) {
@@ -179,22 +196,29 @@ export class Connector {
   measureOnly(machineId: string): boolean { return !!this.db.prepare('SELECT 1 FROM hw_machines WHERE machine_id=?').get(machineId); }
 
   // ───── the connector's report ─────
-  checkIn(machineId: string, report: CheckIn): { ok: true; orders: number; ignored_agents: number; measure_only?: true } {
+  checkIn(machineId: string, report: CheckIn, appCredentialId: string | null = null): { ok: true; orders: number; ignored_agents: number; handovers: number; measure_only?: true } {
     const r = this.pcText(machineId, report); // every string from the PC passes the leak guard
     const now = this.now(), own = this.ownAgents(machineId);
     const agents = (r.agents ?? []).filter((a) => own.has(a.agent_id));
     tx(this.db, () => {
       const had = this.db.prepare('SELECT 1 FROM connector_reports WHERE machine_id=?').get(machineId);
       const vals = [r.version, r.platform ?? null, r.node ?? null, r.git ?? null, JSON.stringify(r.clients ?? []), toInt(r.auto_update), toInt(r.remote_cleanup),
-        toInt(r.remove_connector_with_last_hub), toInt(r.usage_opt_in), toInt(r.hardware_opt_in), JSON.stringify(agents), r.destinations === undefined ? null : JSON.stringify(r.destinations), r.isolation ?? null, r.key_store ?? null];
-      if (had) this.db.prepare('UPDATE connector_reports SET version=?,platform=?,node=?,git=?,clients=?,auto_update=?,remote_cleanup=?,remove_with_last_hub=?,usage_opt_in=?,hardware_opt_in=?,agents=?,destinations=?,isolation=?,key_store=?,last_check_in_at=? WHERE machine_id=?').run(...vals, now, machineId);
-      else this.db.prepare('INSERT INTO connector_reports(version,platform,node,git,clients,auto_update,remote_cleanup,remove_with_last_hub,usage_opt_in,hardware_opt_in,agents,destinations,isolation,key_store,first_check_in_at,last_check_in_at,machine_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').run(...vals, now, now, machineId);
+        toInt(r.remove_connector_with_last_hub), toInt(r.usage_opt_in), toInt(r.hardware_opt_in), JSON.stringify(agents), r.destinations === undefined ? null : JSON.stringify(r.destinations), r.isolation ?? null, r.key_store ?? null, toInt(r.legacy_leftovers)];
+      // The app key it checked in with is the one a key handover for this PC is bound to (a bridge key leaves it as it was).
+      if (had) this.db.prepare('UPDATE connector_reports SET version=?,platform=?,node=?,git=?,clients=?,auto_update=?,remote_cleanup=?,remove_with_last_hub=?,usage_opt_in=?,hardware_opt_in=?,agents=?,destinations=?,isolation=?,key_store=?,legacy_leftovers=?,last_check_in_at=?,app_credential_id=COALESCE(?, app_credential_id) WHERE machine_id=?').run(...vals, now, appCredentialId, machineId);
+      else this.db.prepare('INSERT INTO connector_reports(version,platform,node,git,clients,auto_update,remote_cleanup,remove_with_last_hub,usage_opt_in,hardware_opt_in,agents,destinations,isolation,key_store,legacy_leftovers,first_check_in_at,last_check_in_at,app_credential_id,machine_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').run(...vals, now, now, appCredentialId, machineId);
       if (this.noteReported(r.version, machineId)) this.audit.alert('info', 'connector_version_pending', r.version, { version: r.version, pc: machineId });
       // Context numbers only under the usage opt-in, and only for this PC's own agents; with the opt-in off nothing is kept from this report.
       if (r.usage_opt_in === true) for (const c of (r.context ?? []).filter((x) => own.has(x.agent_id))) this.putContext(machineId, c, now);
     });
+    // The hub learns a destination only here, after the checkout was rendered: a rendered checkout waiting for this PC starts its restore now.
+    if (r.destinations?.length) {
+      const waiting = this.db.prepare("SELECT id FROM checkouts WHERE status='rendered' AND target_machine_id=?").all(machineId) as { id: string }[];
+      for (const c of waiting) { try { this.restoreIfOneDestination(c.id, { kind: 'system', id: null }); } catch { /* the operator's Restore button stays */ } }
+    }
     const orders = this.isLocked(machineId) ? 0 : (this.db.prepare(`SELECT COUNT(*) n FROM pc_actions WHERE machine_id=? AND ((state='queued' AND COALESCE(release_at,0)<=?) OR (state='fetched' AND kind<>'disconnect' AND COALESCE(handed_at, fetched_at, 0)<=?))${this.tooOld(machineId, 'deliver') ? " AND kind<>'deliver'" : ''}`).get(machineId, now, now - REHAND_MS) as { n: number }).n;
-    return { ok: true, orders, ignored_agents: (r.agents ?? []).length - agents.length, ...(this.measureOnly(machineId) ? { measure_only: true as const } : {}) };
+    const handovers = this.isLocked(machineId) ? 0 : this.handovers?.count(appCredentialId) ?? 0;
+    return { ok: true, orders, ignored_agents: (r.agents ?? []).length - agents.length, handovers, ...(this.measureOnly(machineId) ? { measure_only: true as const } : {}) };
   }
 
   private putContext(machineId: string, c: ContextReport, now: number) {
@@ -336,9 +360,80 @@ export class Connector {
   /** The audit entry for each agent folder of this PC that the connector allowed at the upgrade without a click. Agents that are not this PC's are ignored. */
   foldersGrandfathered(machineId: string, agentIds: string[]) {
     const own = this.ownAgents(machineId);
-    const ok = [...new Set(agentIds)].filter((a) => own.has(a));
+    // The connector knows an agent by its label on this PC (its registry has no hub id), so a name matches an id or, when only one agent of this PC has it, a label.
+    const rows = this.db.prepare('SELECT id, label FROM agents WHERE id IN (' + [...own].map(() => '?').join(',') + ')').all(...own) as { id: string; label: string }[];
+    const resolve = (n: string) => (own.has(n) ? n : rows.filter((r) => r.label === n).length === 1 ? rows.find((r) => r.label === n)!.id : null);
+    const ok = [...new Set(agentIds.map(resolve).filter((a): a is string => a !== null))];
     for (const a of ok) this.audit.event({ kind: 'system', id: null }, 'connector.folder_grandfathered', { kind: 'agent', id: a }, { pc: machineId });
     return { audited: ok.length };
+  }
+
+  /**
+   * The folders the connector registered for this PC's agents (docs/connector.md, "Folders"): each becomes a proposed `machine_folders`
+   * row, the same row and the same operator approval as setup_pc's, so a transfer into the PC still needs an approved one. A path is
+   * refused when it names no agent of this PC (by label, among the agents whose session key is bound to it), is not one absolute path,
+   * or is a root or a top-level folder: an agent's folder is never that wide. A row that exists is left as it is (an approved or a
+   * rejected one keeps its decision), and a PC holds at most MAX_PC_FOLDERS rows.
+   */
+  proposeFolders(machineId: string, entries: { agent: string; path: string }[]) {
+    const own = this.ownAgents(machineId);
+    const labels = new Set<string>();
+    for (const id of own) { const a = this.db.prepare('SELECT label FROM agents WHERE id=?').get(id) as { label: string } | undefined; if (a) labels.add(a.label); }
+    const now = this.now(), refused: { path: string; reason: string }[] = [];
+    let proposed = 0, known = 0;
+    tx(this.db, () => {
+      for (const e of entries) {
+        const why = !labels.has(e.agent) ? 'unknown_agent' : folderRefusal(e.path);
+        if (why) { refused.push({ path: e.path.slice(0, 200), reason: why }); continue; }
+        if (this.db.prepare('SELECT 1 FROM machine_folders WHERE machine_id=? AND path=?').get(machineId, e.path)) { known++; continue; }
+        const n = (this.db.prepare('SELECT COUNT(*) n FROM machine_folders WHERE machine_id=?').get(machineId) as { n: number }).n;
+        if (n >= MAX_PC_FOLDERS) { refused.push({ path: e.path.slice(0, 200), reason: 'too_many_folders' }); continue; }
+        this.db.prepare("INSERT INTO machine_folders(machine_id,path,status,proposed_at) VALUES (?,?,'proposed',?)").run(machineId, e.path, now);
+        this.audit.event({ kind: 'system', id: null }, 'connector.folder_proposed', { kind: 'pc', id: machineId }, { path: e.path, agent: e.agent });
+        proposed++;
+      }
+      if (refused.length) this.audit.event({ kind: 'system', id: null }, 'connector.folder_refused', { kind: 'pc', id: machineId }, { count: refused.length, reasons: [...new Set(refused.map((r) => r.reason))] });
+    });
+    return { proposed, known, refused: refused.slice(0, 20) };
+  }
+
+  /** The audit entry for each folder the connector built inside a pickup or restore the PC user allowed, and so allowed without a second click. Agents that are not this PC's are ignored. */
+  foldersAllowedWithPickup(machineId: string, items: { agent_id: string; ref: string }[]) {
+    const own = this.ownAgents(machineId);
+    let audited = 0;
+    for (const it of items) {
+      if (!own.has(it.agent_id)) continue;
+      this.audit.event({ kind: 'system', id: null }, 'connector.folder_allowed_with_pickup', { kind: 'agent', id: it.agent_id }, { pc: machineId, pickup: it.ref });
+      audited++;
+    }
+    return { audited };
+  }
+
+  /**
+   * What the PC's user denied on the connector's screen (docs/connector.md, "The connector's screen"): one audit entry for each, and a
+   * warning alert when one agent is denied three times within an hour. A folder's chat is named by the agent's label on this PC (an id
+   * also matches); a name that is not one of this PC's agents is counted only in the total. A pickup is named by its request id.
+   */
+  foldersDenied(machineId: string, items: { what: 'folder' | 'pickup'; agent?: string; request?: string }[]) {
+    const rows = this.db.prepare("SELECT DISTINCT c.agent_id id, a.label label FROM credentials c JOIN agents a ON a.id=c.agent_id WHERE c.kind='session_key' AND c.bound_machine_id=? AND c.status<>'revoked'").all(machineId) as { id: string; label: string }[];
+    let audited = 0;
+    for (const it of items) {
+      if (it.what === 'pickup') {
+        this.audit.event({ kind: 'system', id: null }, 'connector.pickup_declined', { kind: 'pc', id: machineId }, { pc: machineId, request: it.request ?? null, note: 'Declined on this PC' });
+        audited++;
+        continue;
+      }
+      const name = it.agent ?? '';
+      const own = rows.find((r) => r.id === name) ?? (rows.filter((r) => r.label === name).length === 1 ? rows.find((r) => r.label === name) : undefined);
+      this.audit.event({ kind: 'system', id: null }, 'connector.folder_denied', own ? { kind: 'agent', id: own.id } : { kind: 'pc', id: machineId }, { pc: machineId, ...(own ? {} : { agent_name: name.slice(0, 100) }), note: 'Denied on this PC' });
+      audited++;
+      if (own) {
+        const n = (this.db.prepare("SELECT COUNT(*) n FROM audit_events WHERE action='connector.folder_denied' AND target_id=? AND created_at>?").get(own.id, Date.now() - 3600_000) as { n: number }).n;
+        if (n >= 3) this.audit.alert('warning', 'connector_folder_denied_repeat', own.id, { pc: machineId, agent: own.id, denied_last_hour: n, note: 'The PC user denied this agent\'s chat again and again. Someone may be opening chats that claim this agent without being asked to.' });
+      }
+    }
+    return { audited };
+
   }
 
   // ───── the wake (docs/connector.md, "The wake") ─────
@@ -440,7 +535,7 @@ export class Connector {
     const held = this.disconnected(machineId) ? 'disconnected' as const : this.keys.machine(machineId)?.status === 'suspended' ? 'suspended' as const : null;
     if (!r) {
       return { online: false, status: held ?? 'never' as const, first_check_in_at: null, last_check_in_at: null, version: null, platform: null, node: null, git: null, clients: [],
-        auto_update: null, remote_cleanup: null, remove_connector_with_last_hub: null, usage_opt_in: null, hardware_opt_in: null, destinations: null, isolation: null, key_store: null, version_status: null, update_available: null };
+        auto_update: null, remote_cleanup: null, remove_connector_with_last_hub: null, usage_opt_in: null, hardware_opt_in: null, destinations: null, isolation: null, key_store: null, legacy_leftovers: null, version_status: null, update_available: null };
     }
     const online = !held && this.now() - r.last_check_in_at < ONLINE_MS;
     const vs = r.version ? (this.db.prepare('SELECT status FROM connector_versions WHERE version=?').get(r.version) as { status: string } | undefined)?.status ?? null : null;
@@ -449,7 +544,7 @@ export class Connector {
       online, status: held ?? (online ? 'online' as const : 'offline' as const), first_check_in_at: r.first_check_in_at, last_check_in_at: r.last_check_in_at,
       version: r.version, platform: r.platform, node: r.node, git: r.git, clients: parse(r.clients, [] as unknown[]),
       auto_update: bool(r.auto_update), remote_cleanup: bool(r.remote_cleanup), remove_connector_with_last_hub: bool(r.remove_with_last_hub), usage_opt_in: bool(r.usage_opt_in), hardware_opt_in: bool(r.hardware_opt_in),
-      destinations: parse(r.destinations, null as { id: string; label: string }[] | null), isolation: r.isolation, key_store: r.key_store,
+      destinations: parse(r.destinations, null as { id: string; label: string }[] | null), isolation: r.isolation, key_store: r.key_store, legacy_leftovers: bool(r.legacy_leftovers),
       version_status: vs, update_available: newer.length ? newer[newer.length - 1]! : null,
     };
   }
@@ -461,12 +556,14 @@ export class Connector {
     const st = this.status(machineId);
     const reportedRows = new Map(parse((this.db.prepare('SELECT agents FROM connector_reports WHERE machine_id=?').get(machineId) as { agents: string } | undefined)?.agents ?? null, [] as { agent_id: string; state: string; profile?: string; profile_hidden?: true }[]).map((a) => [a.agent_id, a]));
     const bridge = this.db.prepare("SELECT created_at FROM bridge_keys WHERE machine_id=? AND status<>'revoked' ORDER BY created_at DESC LIMIT 1").get(machineId) as { created_at: number } | undefined;
-    const reqs = this.db.prepare("SELECT id, state, body, filed_at, decided_at, collected_at, team_id FROM onboarding_requests WHERE machine_id=? AND state NOT IN ('denied','withdrawn','cancelled') ORDER BY filed_at").all(machineId) as { id: string; state: string; body: string; filed_at: number; decided_at: number | null; collected_at: number | null; team_id: string | null }[];
-    const slots = this.db.prepare(`SELECT s.agent_id, s.label, s.status, r.team_id, a.connected_at, a.last_active_at FROM onboarding_slots s JOIN onboarding_requests r ON r.id=s.request_id JOIN agents a ON a.id=s.agent_id
-      WHERE r.machine_id=? AND s.status<>'closed' ORDER BY s.created_at`).all(machineId) as { agent_id: string; label: string; status: string; team_id: string | null; connected_at: number | null; last_active_at: number | null }[];
+    const reqs = this.db.prepare("SELECT id, state, body, filed_at, decided_at, collected_at, team_id FROM onboarding_requests WHERE machine_id=? AND kind<>'rotate' AND state NOT IN ('denied','withdrawn','cancelled') ORDER BY filed_at").all(machineId) as { id: string; state: string; body: string; filed_at: number; decided_at: number | null; collected_at: number | null; team_id: string | null }[];
+    // live: the agent's session keys the hub still accepts. A connected agent with none is never shown as Connected.
+    const slots = this.db.prepare(`SELECT s.agent_id, s.label, s.status, r.team_id, a.connected_at, a.last_active_at,
+        (SELECT COUNT(*) FROM credentials c WHERE c.agent_id=s.agent_id AND c.kind='session_key' AND c.status='active') AS live FROM onboarding_slots s JOIN onboarding_requests r ON r.id=s.request_id JOIN agents a ON a.id=s.agent_id
+      WHERE r.machine_id=? AND r.kind<>'rotate' AND s.status<>'closed' ORDER BY s.created_at`).all(machineId) as { agent_id: string; label: string; status: string; team_id: string | null; connected_at: number | null; last_active_at: number | null; live: number }[];
 
     type Next = { action: string; who: 'you' | 'pc_user' | 'agent' } | null;
-    type Agent = { agent_id: string | null; label: string; team_id: string | null; state: 'waiting_for_approval' | 'ready_to_open' | 'connected'; next: Next; connected_at: number | null; last_active_at: number | null; pc_reported: string | null; pc_profile: PcProfile };
+    type Agent = { agent_id: string | null; label: string; team_id: string | null; state: 'waiting_for_approval' | 'ready_to_open' | 'connected' | 'key_refused'; next: Next; connected_at: number | null; last_active_at: number | null; pc_reported: string | null; pc_profile: PcProfile };
     const agents: Agent[] = [];
     for (const q of reqs.filter((x) => x.state === 'submitted' || x.state === 'needs_changes')) {
       const roles = parse(q.body, {} as { roles?: { name?: string; count?: number }[] }).roles ?? [];
@@ -476,8 +573,10 @@ export class Connector {
     }
     for (const s of slots) {
       // Three states (review v2 §3): keys not collected yet is Ready to open, with the PC user's next step.
-      const state = s.connected_at ? 'connected' as const : 'ready_to_open' as const;
-      const next: Next = s.connected_at ? null : s.status === 'waiting' ? { action: 'Continue setup on the PC', who: 'pc_user' } : { action: 'Open the agent on the PC', who: 'pc_user' };
+      // An agent whose keys the hub no longer accepts (revoked or suspended) is Key refused, not Connected.
+      const refused = s.status !== 'waiting' && !s.live;
+      const state = refused ? 'key_refused' as const : s.connected_at ? 'connected' as const : 'ready_to_open' as const;
+      const next: Next = refused ? { action: 'Give the agent a new key', who: 'you' } : s.connected_at ? null : s.status === 'waiting' ? { action: 'Continue setup on the PC', who: 'pc_user' } : { action: 'Open the agent on the PC', who: 'pc_user' };
       agents.push({ agent_id: s.agent_id, label: s.label, team_id: s.team_id, state, next, connected_at: s.connected_at, last_active_at: s.last_active_at, pc_reported: reportedRows.get(s.agent_id)?.state ?? null, pc_profile: pcProfileOf(reportedRows.get(s.agent_id)) });
     }
 
@@ -486,6 +585,18 @@ export class Connector {
     const redeemed = (this.db.prepare("SELECT MIN(used_at) AS at FROM enrolment_codes WHERE machine_id=? AND expires_at IS NULL AND used_at IS NOT NULL AND status<>'revoked'").get(machineId) as { at: number | null }).at;
     const pairedAt = redeemed ?? st.first_check_in_at ?? bridge?.created_at ?? null;
     const steps: Step[] = [{ step: 'added', state: 'done', at: pc.created_at, reason: null, next: null }];
+    // A PC set up before the connector (the older helper, or by hand) works through its app key: its agents call tools through
+    // it, with no pairing, no team request and no pickup. The checklist says so instead of "has not paired yet" next to the
+    // agents that work (the PC page lists them from the same calls).
+    if (pairedAt === null && !reqs.length && !slots.length) {
+      const calls = this.db.prepare(`SELECT MIN(created_at) AS first, COUNT(DISTINCT agent_id) AS n FROM tool_invocations WHERE app_credential_id IN (SELECT id FROM credentials WHERE machine_id=? AND kind='app_key')
+        AND agent_id IS NOT NULL AND tool NOT IN ('session_login','session_whoami')`).get(machineId) as { first: number | null; n: number };
+      if (calls.first !== null) {
+        steps.push({ step: 'app_key', state: 'done', at: calls.first, reason: "Its agents log in with this PC's app key; the connector is not paired. Re-enrol PC makes a pairing code if you want the connector.", next: null });
+        steps.push({ step: 'agents_connected', state: 'done', at: calls.first, reason: `${calls.n} ${calls.n === 1 ? 'agent has' : 'agents have'} worked through this PC.`, next: null });
+        return { steps, agents };
+      }
+    }
     steps.push(pairedAt !== null ? { step: 'paired', state: 'done', at: pairedAt, reason: null, next: null }
       : { step: 'paired', state: 'waiting', at: null, reason: 'The connector has not paired with this hub yet.', next: { action: 'Enter the pairing code on the PC', who: 'pc_user' } });
     const filed = reqs[0];
@@ -502,8 +613,9 @@ export class Connector {
       : uncollected.length ? { step: 'keys_collected', state: 'waiting', at: null, reason: `${uncollected.length} of ${slots.length} agents have no keys on the PC yet.`, next: { action: 'Collect the keys on the PC', who: 'pc_user' } }
       : { step: 'keys_collected', state: 'done', at: Math.max(0, ...reqs.map((x) => x.collected_at ?? 0)) || null, reason: null, next: null });
     const ready = agents.filter((a) => a.state === 'ready_to_open' && a.agent_id && slots.find((s) => s.agent_id === a.agent_id)?.status !== 'waiting');
-    const broken = agents.filter((a) => a.pc_reported === 'repair_connection');
+    const broken = agents.filter((a) => a.pc_reported === 'repair_connection' || a.state === 'key_refused');
     steps.push(!slots.length || uncollected.length === slots.length ? { step: 'agents_connected', state: 'not_yet', at: null, reason: null, next: null }
+      : broken.some((a) => a.state === 'key_refused') ? { step: 'agents_connected', state: 'failed', at: null, reason: `The hub no longer accepts the key of ${broken.filter((a) => a.state === 'key_refused').map((a) => a.label).join(', ')}.`, next: { action: 'Give the agent a new key', who: 'you' } }
       : broken.length ? { step: 'agents_connected', state: 'failed', at: null, reason: `The PC reports that ${broken.map((a) => a.label).join(', ')} cannot reach the hub.`, next: { action: 'Repair the connection on the PC', who: 'pc_user' } }
       : ready.length ? { step: 'agents_connected', state: 'waiting', at: null, reason: `${ready.length} of ${slots.length} agents have not made their first call yet.`, next: { action: 'Open the agent on the PC', who: 'pc_user' } }
       : { step: 'agents_connected', state: 'done', at: Math.max(0, ...agents.map((a) => a.connected_at ?? 0)) || null, reason: null, next: null });
@@ -702,6 +814,8 @@ export class Connector {
   /** Whether the PC may still hold a stream. */
   /** Set in app.ts: whether this PC is locked down (safety/lockdown.ts). While it is, the connector gets no order, its orders wait queued and none expires, and it opens no stream. */
   locked: ((machineId: string) => boolean) | null = null;
+  /** A lockdown of all writes or of this PC: the key handover list answers 423, as the pickup does (set by the app). */
+  handoversLocked: ((machineId: string) => boolean) | null = null;
   isLocked(machineId: string): boolean { return this.locked?.(machineId) === true; }
   streamAllowed(machineId: string, locked: boolean): boolean {
     return !locked && this.keys.machine(machineId)?.status === 'active' && !this.disconnected(machineId);

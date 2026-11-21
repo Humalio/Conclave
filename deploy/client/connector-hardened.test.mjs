@@ -13,7 +13,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, exist
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { testCa } from '../../server/test/test-ca.mjs';
-import { putHub, putAgentKey, readKeyFile, keyFilePath, caFingerprint, markDisconnected } from './connector/keyfile.mjs';
+import { putHub, putAgentKey, readKeyFile, keyFilePath, caFingerprint, markDisconnected, stageAgentKey, commitStaged, discardStaged, labelHoldingKey } from './connector/keyfile.mjs';
 import { readIsolation, vaultPlace, markerPath } from './connector/isolation.mjs';
 import { masterPath } from './connector/keystore.mjs';
 import { askVault } from './connector/vaultclient.mjs';
@@ -219,6 +219,17 @@ describe('turn tokens through the service', () => {
       assert.notEqual(after2, before, 'a rotation changes the tag');
       assert.equal(holds(reachable(p), 'rotated1'), false, 'the new key is nowhere the user can read');
       assert.throws(() => putAgentKey(p.home, 'no-such-hub', 'dev-1', 'ah_ses_FAKEsessionKEYforHARDENEDrotated2'), (e) => e.reason !== undefined);
+      // A key handover's rotated key: staged beside the old one (not in the view, not readable), swapped in only at commit.
+      stageAgentKey(p.home, p.hubKey, 'obr_h1', 'dev-1', 'ah_ses_stagedKEYid01_FAKEsecretSTAGED');
+      assert.equal(readKeyFile(p.home).data.hubs[p.hubKey].agents['dev-1'].session_key, after2, 'the old key stays until commit');
+      assert.equal(readKeyFile(p.home).data.hubs[p.hubKey].staged, undefined, 'the view never shows a staged key');
+      assert.equal(holds(reachable(p), 'FAKEsecretSTAGED'), false);
+      assert.equal(labelHoldingKey(p.home, p.hubKey, 'stagedKEYid01'), null);
+      assert.equal(commitStaged(p.home, p.hubKey, 'obr_h1'), 1);
+      assert.notEqual(readKeyFile(p.home).data.hubs[p.hubKey].agents['dev-1'].session_key, after2, 'swapped in');
+      assert.equal(labelHoldingKey(p.home, p.hubKey, 'stagedKEYid01'), 'dev-1', 'a label, never the key');
+      assert.equal(discardStaged(p.home, p.hubKey, 'obr_h1'), false, 'nothing left to drop');
+      assert.equal(holds(reachable(p), 'FAKEsecretSTAGED'), false);
       // A Disconnect with remote cleanup off: marked through the service, shown in the view the worker reads, once; pairing again clears it.
       assert.equal(markDisconnected(p.home, p.hubKey, '2026-11-21T01:00:00.000Z'), true);
       assert.equal(readKeyFile(p.home).data.hubs[p.hubKey].disconnected_at, '2026-11-21T01:00:00.000Z');

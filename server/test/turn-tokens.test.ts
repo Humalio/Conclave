@@ -210,8 +210,55 @@ describe('folders the connector grandfathered at the upgrade', () => {
     const before = n();
     expect((await cn('POST', '/folders-grandfathered', w.appKey, { agents: [a.id, a.id, b.id] })).body).toEqual({ audited: 1 });
     expect(n()).toBe(before + 1);
+    // The connector names an agent by its label on this PC: that is audited too, once, and never for another PC's agent.
+    const lab = w.agent('label agent');
+    expect((await cn('POST', '/folders-grandfathered', w.appKey, { agents: ['label agent', 'foreign agent'] })).body).toEqual({ audited: 1 });
+    expect(app.db.prepare("SELECT COUNT(*) n FROM audit_events WHERE action='connector.folder_grandfathered' AND target_id=?").get(lab.id)).toEqual({ n: 1 });
     expect((await cn('POST', '/folders-grandfathered', null, { agents: [a.id] })).status).toBe(401);
     expect((await cn('POST', '/folders-grandfathered', w.appKey, { agents: [a.id], extra: 1 })).status).toBe(400);
+  });
+});
+
+describe('folders allowed with a pickup', () => {
+  it('get one audit entry each under their own name, only for the agents of this PC, and the route needs the app key and a strict body', async () => {
+    const w = await world('turn-pickup-allow'), a = w.agent('pickup agent'), other = await world('turn-pickup-allow-other'), b = other.agent('foreign pickup agent');
+    const n = () => (app.db.prepare("SELECT COUNT(*) n FROM audit_events WHERE action='connector.folder_allowed_with_pickup'").get() as { n: number }).n;
+    const before = n();
+    expect((await cn('POST', '/folders-allowed-with-pickup', w.appKey, { allowed: [{ agent_id: a.id, ref: 'opk_1' }, { agent_id: b.id, ref: 'opk_1' }] })).body).toEqual({ audited: 1 });
+    expect(n()).toBe(before + 1);
+    const row = app.db.prepare("SELECT target_id, details FROM audit_events WHERE action='connector.folder_allowed_with_pickup' ORDER BY rowid DESC LIMIT 1").get() as { target_id: string; details: string };
+    expect(row.target_id).toBe(a.id);
+    expect(JSON.parse(row.details)).toMatchObject({ pc: w.pc, pickup: 'opk_1' });
+    expect((await cn('POST', '/folders-allowed-with-pickup', null, { allowed: [{ agent_id: a.id, ref: 'opk_1' }] })).status).toBe(401);
+    expect((await cn('POST', '/folders-allowed-with-pickup', w.appKey, { allowed: [{ agent_id: a.id, ref: 'opk_1', extra: 1 }] })).status).toBe(400);
+  });
+});
+
+describe('chats the PC user denied on the connector screen', () => {
+  it('are audited, a declined pickup too, only for the agents of this PC, and the route needs the app key and a strict body', async () => {
+    const w = await world('turn-deny'), a = w.agent('deny agent'), other = await world('turn-deny-other'), b = other.agent('foreign agent');
+    const count = (action: string) => (app.db.prepare('SELECT COUNT(*) n FROM audit_events WHERE action=?').get(action) as { n: number }).n;
+    const d0 = count('connector.folder_denied'), p0 = count('connector.pickup_declined');
+    const r = await cn('POST', '/folders-denied', w.appKey, { denied: [{ what: 'folder', agent: a.id }, { what: 'pickup', request: 'obr_1' }, { what: 'folder', agent: b.id }] });
+    expect(r.body).toEqual({ audited: 3 });
+    expect(count('connector.folder_denied')).toBe(d0 + 2);
+    expect(count('connector.pickup_declined')).toBe(p0 + 1);
+    const foreign = app.db.prepare("SELECT target_kind, target_id FROM audit_events WHERE action='connector.folder_denied' ORDER BY created_at DESC, rowid DESC LIMIT 1").get() as { target_kind: string; target_id: string };
+    expect(foreign.target_id).not.toBe(b.id); // an agent of another PC is not named
+    expect((await cn('POST', '/folders-denied', null, { denied: [{ what: 'folder', agent: a.id }] })).status).toBe(401);
+    expect((await cn('POST', '/folders-denied', w.appKey, { denied: [{ what: 'folder', agent: a.id, extra: 1 }] })).status).toBe(400);
+    expect((await cn('POST', '/folders-denied', w.appKey, { denied: [{ what: 'other' }] })).status).toBe(400);
+  });
+  it('raise one warning when the same agent is denied three times in an hour', async () => {
+    const w = await world('turn-deny-rep'), a = w.agent('repeat agent');
+    const alerts = () => app.db.prepare("SELECT details FROM security_alerts WHERE type='connector_folder_denied_repeat' AND subject=?").all(a.id) as { details: string }[];
+    await cn('POST', '/folders-denied', w.appKey, { denied: [{ what: 'folder', agent: a.id }, { what: 'folder', agent: a.id }] });
+    expect(alerts()).toHaveLength(0);
+    await cn('POST', '/folders-denied', w.appKey, { denied: [{ what: 'folder', agent: 'repeat agent' }] }); // a local label names it too
+    expect(alerts()).toHaveLength(1);
+    expect(JSON.parse(alerts()[0]!.details)).toMatchObject({ agent: a.id, pc: w.pc, denied_last_hour: 3 });
+    await cn('POST', '/folders-denied', w.appKey, { denied: [{ what: 'folder', agent: a.id }] });
+    expect(alerts()).toHaveLength(1); // not repeated within the hour
   });
 });
 

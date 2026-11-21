@@ -77,8 +77,9 @@ export async function syncList(home, { edits = true } = {}) {
   const out = [];
   for (const s of listSyncs(home)) {
     let local_edits = s.local_edits;
-    if (edits) { try { local_edits = await createEngine({ home, rec: s, api: null }).countLocalEdits(); } catch { /* the folder is gone: the count stays */ } }
-    out.push({ id: s.id, name: s.name, hub_id: s.hub_id, folder: s.folder, state: s.state, last_run_at: s.last_run_at, files: s.files, bytes: s.bytes, local_edits, warnings: s.warnings, refused: s.refused, last_error: s.last_error });
+    let local_new = s.local_new ?? 0;
+    if (edits) { try { const eng = createEngine({ home, rec: s, api: null }); local_edits = await eng.countLocalEdits(); local_new = await eng.countLocalNew(); } catch { /* the folder is gone: the counts stay */ } }
+    out.push({ id: s.id, name: s.name, hub_id: s.hub_id, folder: s.folder, state: s.state, last_run_at: s.last_run_at, files: s.files, bytes: s.bytes, local_edits, local_new, warnings: s.warnings, refused: s.refused, last_error: s.last_error });
   }
   return out;
 }

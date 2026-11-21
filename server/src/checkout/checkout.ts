@@ -360,7 +360,7 @@ export class Checkouts {
       const ins = this.db.prepare("INSERT INTO handouts(id,checkout_id,agent_id,status,created_at,updated_at) VALUES (?,?,?,'requested',?,?)");
       for (const m of members) ins.run(`hnd_${randomToken(10)}`, id, m.agent_id, now, now);
       const integration = this.integrationOf(teamId);
-      for (const m of members) this.keys.notify(m.agent_id, 'checkout_requested', this.requestText(t, id, m.agent_id, integration));
+      for (const m of members) this.keys.notify(m.agent_id, 'checkout_requested', this.requestText(t, id, m.agent_id, integration), { kind: 'checkout', id });
       this.audit.event(actor, 'checkout.start', { kind: 'checkout', id }, { team: teamId, agents: members.length });
       return id;
     });
@@ -407,7 +407,7 @@ export class Checkouts {
       this.db.prepare("INSERT INTO checkouts(id,team_id,status,source_machine_id,requested_by,created_at,updated_at,expires_at,scope,agent_id,delegate_user_id,delegate_render) VALUES (?,?,'collecting',?,?,?,?,?,'agent',?,?,?)")
         .run(id, t.id, bound ?? this.sourceMachine(t.id), actor.id, now, now, now + EXPIRY_MS, agentId, o.delegateUserId, JSON.stringify(o.render ?? null));
       this.db.prepare("INSERT INTO handouts(id,checkout_id,agent_id,status,created_at,updated_at) VALUES (?,?,?,'requested',?,?)").run(`hnd_${randomToken(10)}`, id, agentId, now, now);
-      this.keys.notify(agentId, 'checkout_requested', this.requestText(t, id, agentId, this.integrationOf(t.id), this.personLabel(o.delegateUserId)));
+      this.keys.notify(agentId, 'checkout_requested', this.requestText(t, id, agentId, this.integrationOf(t.id), this.personLabel(o.delegateUserId)), { kind: 'checkout', id });
       this.audit.event(actor, 'checkout.start', { kind: 'checkout', id }, { team: t.id, agents: 1, scope: 'agent', agent: agentId, delegate: o.delegateUserId });
       return id;
     });
@@ -674,7 +674,7 @@ export class Checkouts {
    * and moves to another user or PC only when the operator accepts that.
    */
   private builtBody(h: HandoutRow): Record<string, unknown> {
-    const slot = this.db.prepare("SELECT folder, session_var FROM onboarding_slots WHERE agent_id=? AND status IN ('confirmed','issued') ORDER BY created_at DESC LIMIT 1").get(h.agent_id) as { folder: string; session_var: string } | undefined;
+    const slot = this.db.prepare("SELECT folder, session_var FROM onboarding_slots WHERE agent_id=? AND role<>'rotate' AND status IN ('confirmed','issued') ORDER BY created_at DESC LIMIT 1").get(h.agent_id) as { folder: string; session_var: string } | undefined;
     const a = this.keys.agent(h.agent_id);
     const r = h.status === 'merged' && this.incomplete(h) === null ? parse<MergedReport | null>(h.report, null) : null;
     const ok = !!r && (r.no_repo !== undefined

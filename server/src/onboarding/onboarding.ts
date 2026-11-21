@@ -10,7 +10,8 @@ import { RateLimit } from '../db/rateLimit.js';
 import type { Audit, Actor } from '../audit/audit.js';
 import type { Keys, Credential, Machine } from '../keys/keys.js';
 import { KeyError } from '../keys/keys.js';
-import type { KeyCollections } from '../keys/keyCollect.js';
+import type { Handovers, RotateBody } from '../keys/handover.js';
+import { HANDOVER_TTL_MS } from '../keys/handover.js';
 import type { Teams, TeamRow } from '../teams/teams.js';
 import type { Vault } from '../vault/vault.js';
 import type { LeakGuard } from '../guard/leakGuard.js';
@@ -37,7 +38,8 @@ const PROJECT_RE = /^[A-Za-z0-9][A-Za-z0-9 ._-]*$/;
 const TEAM_ROLES = ['coordinator', 'worker', 'reviewer', 'stakeholder'] as const;
 type TeamRole = typeof TEAM_ROLES[number];
 /** SQL for a request that is not yet collected, denied, cancelled or withdrawn. */
-const PENDING = "state IN ('submitted','needs_changes','approved')";
+// A key handover (handover set) is never an onboarding request anyone acts on (docs/onboarding.md#key-handover-a-rotated-key-or-a-recruit-reaches-a-connector-pc).
+const PENDING = "(state IN ('submitted','needs_changes','approved') AND handover IS NULL)";
 /** An enrolment code is handed out at most this many times without confirmation. */
 export const ENROL_ISSUES = 3;
 const sys: Actor = { kind: 'system', id: null };
@@ -59,7 +61,6 @@ const SETTING_BOUNDS: Record<keyof OnboardingSettings, [number, number]> = { max
 /** Bounds of one rule in a request (docs/onboarding.md#the-request). */
 export const RULE_TITLE_MAX = 120, RULE_SOURCE_MAX = 200, RULE_TEXT_MAX = 2000;
 /** Fixed per-key limits (docs/onboarding.md#the-app-key-and-its-onboarding-capability). */
-export const KEY_COLLECT_POLLS_PER_HOUR = 600;
 export const STATUS_PER_HOUR = 120, PICKUP_PER_HOUR = 10, ENROL_FAILS_PER_HOUR = 10, AUTH_FAILS_PER_HOUR = 10, PICKUP_ISSUES = 3;
 
 export interface FolderIn { path: string; access: 'read' | 'write' }
@@ -76,7 +77,7 @@ export interface RequestIn { kind: 'new_team' | 'add_agents' | 'vault_agent'; pr
   /** A vault agent's name (kind vault_agent): one teamless agent; its one role holds the job and the proposed folders. */
   agent?: { name: string } }
 /** A recruit's pickup on the coordinator's PC: what the tool result and the operator's approval say. No secret. */
-export interface RecruitPickup { request_id: string; pc: { id: string; name: string }; session_var: string; folder: string; command: string }
+export interface RecruitPickup { request_id: string; pc: { id: string; name: string }; session_var: string; folder: string; expires_at: number }
 /** The one role of a vault agent's request (docs/onboarding.md#a-vault-agent). */
 export const VAULT_ROLE = 'vault_agent';
 export type ProjectKind = 'implementation' | 'research';
@@ -87,17 +88,21 @@ export type CheckoutBodyIn = Omit<RequestIn, 'kind'> & { kind: 'checkout' };
 export interface Warning { code: string; message: string; field?: string }
 
 export interface RequestRow {
-  id: string; app_credential_id: string; machine_id: string; kind: 'new_team' | 'add_agents' | 'checkout' | 'vault_agent'; state: string; version: number; body: string; approved_body: string | null;
+  id: string; app_credential_id: string; machine_id: string; kind: 'new_team' | 'add_agents' | 'checkout' | 'vault_agent' | 'rotate'; state: string; version: number; body: string; approved_body: string | null;
   warnings: string; operator_note: string | null; edits: string; team_id: string | null; start_when_set_up: number; pickup_id: string | null; pickup_issues: number;
   pickup_allowed: number; transport: string | null; filed_at: number; updated_at: number; waiting_since: number; decided_at: number | null; collected_at: number | null;
   /** The Blueprint proposal the approval filed, the version it approved, and what it filed with each item's scope (migration 0118). */
   proposal_id: string | null; approved_version: number | null; filed: string;
   /** The source the operator set after setup, on the team's card (migration 0136): JSON {from, ref?, note?, by, at}, read first. */
   source_set: string | null;
+  /** A key handover the hub filed itself (migration 0167, keys/handover.ts), and when it expires; null for a PC's own request. */
+  handover?: 'rotate' | 'recruit' | null; expires_at?: number | null;
 }
 export interface SlotRow {
   id: string; request_id: string; slot: string; agent_id: string; role: string; team_role: TeamRole; label: string; session_var: string; folder: string; bound: number;
   template_id: string | null; ceiling: string; credential_id: string | null; status: 'waiting' | 'issued' | 'confirmed' | 'closed'; created_at: number;
+  /** A rotation's new secret between pickup and confirm: its key id and verifier only (migration 0167). */
+  staged_key_id?: string | null; staged_verifier?: string | null;
 }
 
 /** The one approval's input (POST /api/onboarding/:id/approve). */
@@ -162,7 +167,7 @@ function readSource(v: unknown, bad: (field: string, rule: string) => void): Sou
   return source;
 }
 
-export interface OnboardingDeps { db: Db; keys: Keys; teams: Teams; audit: Audit; vault: Vault; guard: LeakGuard; lockdown: Lockdown; pepper: string; hubUrl: string; collections?: KeyCollections }
+export interface OnboardingDeps { db: Db; keys: Keys; teams: Teams; audit: Audit; vault: Vault; guard: LeakGuard; lockdown: Lockdown; pepper: string; hubUrl: string; handovers?: Handovers }
 
 export class Onboarding {
   private readonly em = new EventEmitter();
@@ -198,6 +203,10 @@ export class Onboarding {
     // Recruiting delivers keys through this pickup (docs/onboarding.md#recruits-from-a-coordinator).
     d.teams.recruitPickup = (o, actor) => this.recruitFile(o, actor);
     d.teams.onRecruitsRetired = (teamId, actor) => this.cancelRecruits(teamId, actor);
+    // A recruit's handover that expires or is cancelled ends the onboarding way: its waiting agent is archived.
+    if (d.handovers) d.handovers.cancelRecruit = (id, note, actor) => { this.cancel(id, note, actor, true); };
+    if (d.handovers) d.handovers.replaceAppKey = (machineId, oldAppId, actor, why) => this.replaceAppKey(machineId, oldAppId, actor, why);
+    if (d.handovers) d.handovers.reEnrolKeysLost = (machineId, credentialIds) => this.reEnrolKeysLost(machineId, credentialIds);
   }
 
   // ───────────── settings ─────────────
@@ -272,40 +281,108 @@ export class Onboarding {
       .map((m) => ({ machine_id: m.id, enrolment: codes.get(m.id) ?? null, mcp_transport: m.mcp_transport ?? null, pending: pend.get(m.id) ?? 0 }));
   }
   /**
-   * Re-enrol PC: revokes at once the PC's onboarding app keys, the session keys of every agent still onboarded on it and any
-   * unused code; issues a new key and code; moves the PC's requests to the new key and reopens a pickup on collected ones.
-   * Only what is still this PC's counts: an agent a checkout moved away has no open slot here, so its key and the request
-   * it came from are left alone.
+   * The PC's work moves to a new app key: its open requests and handovers, and the connector report a handover binds to.
+   * The old key's requests that are done (collected, denied …) stay as they were.
    */
-  reEnrol(machineId: string, actor: Actor): { pc: Machine; key: Credential; code: string; reopened: string[] } {
+  private moveToKey(machineId: string, fromIds: string[] | null, key: Credential, now: number): void {
+    const only = fromIds ? ` AND app_credential_id IN (${fromIds.map(() => '?').join(',')})` : '';
+    const args = fromIds ?? [];
+    this.db.prepare(`UPDATE onboarding_requests SET app_credential_id=?, updated_at=? WHERE machine_id=? AND (${PENDING} OR (handover IS NOT NULL AND state='approved'))${only}`).run(key.id, now, machineId, ...args);
+    this.db.prepare(`UPDATE connector_reports SET app_credential_id=? WHERE machine_id=?${fromIds ? ` AND app_credential_id IN (${fromIds.map(() => '?').join(',')})` : ''}`).run(key.id, machineId, ...args);
+  }
+
+  /**
+   * A possible leak of one of the PC's session keys (Handovers.rotate, reason suspected_leak): whoever took it may hold the
+   * connector's app key too. Only that app key is revoked (its sessions and turn tokens end with it); a new app key and its
+   * pairing code are issued, and the PC's open requests, handovers and connector report move to the new key. The PC user
+   * pairs the connector again with the code. Other app keys and every session key stay as they are.
+   */
+  replaceAppKey(machineId: string, oldAppId: string, actor: Actor, why: string): { key: Credential; code: string } {
+    const pc = this.keys.machine(machineId); if (!pc) throw fail('not_found', 'PC not found');
+    if (pc.status === 'retired') throw fail('invalid_state', 'A retired PC has no app key to replace.');
+    return tx(this.db, () => {
+      const codes = this.revokeCodes(machineId, ['unused', 'issued']);
+      const key = this.newPcKey(pc, actor);
+      const code = this.newCode(pc.id, key.id);
+      this.moveToKey(machineId, [oldAppId], key, Date.now());
+      const old = this.keys.credential(oldAppId);
+      if (old && old.status !== 'revoked') this.keys.setStatus(oldAppId, 'revoked', why, actor);
+      this.audit.event(actor, 'pc.app_key_replaced', { kind: 'pc', id: pc.id }, { replaced: oldAppId, replacement: key.id, reason: why, codes_revoked: codes });
+      return { key, code };
+    });
+  }
+
+  /** The PC's collected requests that still have an agent here are reopened for a new pickup by the given app key. */
+  private reopenPickups(machineId: string, key: Credential, actor: Actor, now: number): string[] {
+    const reopened: string[] = [];
+    // A collected request is reopened only while one of its slots is still open; once its agents moved, it is not this PC's.
+    for (const r of this.db.prepare(`SELECT * FROM onboarding_requests q WHERE machine_id=? AND handover IS NULL AND (${PENDING} OR (state='collected' AND EXISTS (SELECT 1 FROM onboarding_slots s WHERE s.request_id=q.id AND s.status<>'closed')))`).all(machineId) as unknown as RequestRow[]) {
+      if (r.state === 'collected' || r.state === 'approved') {
+        this.db.prepare("UPDATE onboarding_slots SET status='waiting' WHERE request_id=? AND status<>'closed'").run(r.id);
+        this.db.prepare("UPDATE onboarding_requests SET state='approved', app_credential_id=?, pickup_id=NULL, pickup_issues=0, pickup_allowed=?, collected_at=NULL, version=version+1, updated_at=?, waiting_since=? WHERE id=?")
+          .run(key.id, PICKUP_ISSUES, now, now, r.id);
+        if (r.state === 'collected') { reopened.push(r.id); this.history(r.id, actor, 'pickup_reopen', {}); this.audit.event(actor, 'onboarding.pickup_reopen', { kind: 'onboarding_request', id: r.id }); }
+      } else {
+        this.db.prepare('UPDATE onboarding_requests SET app_credential_id=?, updated_at=? WHERE id=?').run(key.id, now, r.id);
+      }
+      this.changed(r.id);
+    }
+    return reopened;
+  }
+
+  /**
+   * A Re-enrol's handover reached a connector that holds none of the PC's keys (the PC was reinstalled or replaced): its
+   * keys are revoked and its collected requests reopened for a new pickup by the PC's current app key, the way Re-enrol
+   * worked before the handover. `conclave setup continue` then rebuilds the agents, or `conclave setup withdraw` drops the request.
+   */
+  reEnrolKeysLost(machineId: string, credentialIds: string[]): void {
+    const app = this.d.handovers ? this.db.prepare("SELECT c.id FROM connector_reports r JOIN credentials c ON c.id=r.app_credential_id WHERE r.machine_id=? AND c.status='active'").get(machineId) as { id: string } | undefined : undefined;
+    const key = app ? this.keys.credential(app.id) : null;
+    if (!key) return;
+    tx(this.db, () => {
+      for (const id of credentialIds) { const c = this.keys.credential(id); if (c && c.status !== 'revoked') this.keys.setStatus(id, 'revoked', 're-enrol: keys not on the PC', sys); }
+      const reopened = this.reopenPickups(machineId, key, sys, Date.now());
+      this.audit.event(sys, 'pc.re_enrol_keys_lost', { kind: 'pc', id: machineId }, { agents_revoked: credentialIds.length, reopened: reopened.length });
+    });
+  }
+
+  /**
+   * Re-enrol PC: revokes the PC's onboarding app keys and any unused code, and issues a new key and code; the PC's open
+   * requests move to the new key. On a PC that runs the connector, every agent key still onboarded there is handed over to
+   * the new key by one key handover (docs/onboarding.md#key-handover-a-rotated-key-or-a-recruit-reaches-a-connector-pc): the
+   * old session keys keep working until the connector confirms, so nobody is locked out and nothing has to be picked up
+   * again by hand. Collected requests stay collected. A PC with no connector report (an older setup) keeps the old way: its
+   * session keys are revoked and its collected requests reopened for a new pickup.
+   * Only what is still this PC's counts: an agent a checkout moved away has no open slot here, so its key is left alone.
+   */
+  reEnrol(machineId: string, actor: Actor): { pc: Machine; key: Credential; code: string; reopened: string[]; handover: string | null } {
     const pc = this.keys.machine(machineId); if (!pc) throw fail('not_found', 'PC not found');
     this.checkoutGuard({ machineId }, actor, 're_enrol');
     if (pc.status === 'retired') throw fail('invalid_state', 'A retired PC cannot be re-enrolled.');
+    const connector = !!this.d.handovers && !!(this.db.prepare('SELECT 1 FROM connector_reports WHERE machine_id=?').get(machineId));
     return tx(this.db, () => {
       const oldKeys = this.db.prepare(`SELECT id FROM credentials WHERE kind='app_key' AND machine_id=? AND status<>'revoked'
-        AND (onboarding_enabled_at IS NOT NULL OR id IN (SELECT app_credential_id FROM enrolment_codes WHERE machine_id=?) OR id IN (SELECT app_credential_id FROM onboarding_requests WHERE machine_id=?))`).all(machineId, machineId, machineId) as { id: string }[];
-      for (const k of oldKeys) this.keys.setStatus(k.id, 'revoked', 're-enrol', actor);
-      const sessionKeys = this.db.prepare(`SELECT DISTINCT c.id FROM onboarding_slots s JOIN onboarding_requests r ON r.id=s.request_id JOIN credentials c ON c.agent_id=s.agent_id
-        WHERE r.machine_id=? AND s.status<>'closed' AND c.kind='session_key' AND c.status<>'revoked'`).all(machineId) as { id: string }[];
-      for (const k of sessionKeys) this.keys.setStatus(k.id, 'revoked', 're-enrol', actor);
+        AND (onboarding_enabled_at IS NOT NULL OR id IN (SELECT app_credential_id FROM enrolment_codes WHERE machine_id=?) OR id IN (SELECT app_credential_id FROM onboarding_requests WHERE machine_id=?) OR id IN (SELECT app_credential_id FROM connector_reports WHERE machine_id=?))`).all(machineId, machineId, machineId, machineId) as { id: string }[];
+      const sessionKeys = (this.db.prepare(`SELECT DISTINCT c.id FROM onboarding_slots s JOIN onboarding_requests r ON r.id=s.request_id JOIN credentials c ON c.agent_id=s.agent_id
+        WHERE r.machine_id=? AND r.handover IS NULL AND s.status<>'closed' AND c.kind='session_key' AND c.status<>'revoked'`).all(machineId) as { id: string }[]).map((k) => k.id);
       const codes = this.revokeCodes(machineId, ['unused', 'issued']);
       const key = this.newPcKey(pc, actor);
       const code = this.newCode(pc.id, key.id);
       const now = Date.now(), reopened: string[] = [];
-      // A collected request is reopened only while one of its slots is still open; once its agents moved, it is not this PC's.
-      for (const r of this.db.prepare(`SELECT * FROM onboarding_requests q WHERE machine_id=? AND (${PENDING} OR (state='collected' AND EXISTS (SELECT 1 FROM onboarding_slots s WHERE s.request_id=q.id AND s.status<>'closed')))`).all(machineId) as unknown as RequestRow[]) {
-        if (r.state === 'collected' || r.state === 'approved') {
-          this.db.prepare("UPDATE onboarding_slots SET status='waiting' WHERE request_id=? AND status<>'closed'").run(r.id);
-          this.db.prepare("UPDATE onboarding_requests SET state='approved', app_credential_id=?, pickup_id=NULL, pickup_issues=0, pickup_allowed=?, collected_at=NULL, version=version+1, updated_at=?, waiting_since=? WHERE id=?")
-            .run(key.id, PICKUP_ISSUES, now, now, r.id);
-          if (r.state === 'collected') { reopened.push(r.id); this.history(r.id, actor, 'pickup_reopen', {}); this.audit.event(actor, 'onboarding.pickup_reopen', { kind: 'onboarding_request', id: r.id }); }
-        } else {
-          this.db.prepare('UPDATE onboarding_requests SET app_credential_id=?, updated_at=? WHERE id=?').run(key.id, now, r.id);
-        }
-        this.changed(r.id);
+      let handover: string | null = null;
+      if (connector) {
+        // The new key first, so revoking the old ones cannot cancel anything; then one handover for every agent key here.
+        this.moveToKey(machineId, null, key, now);
+        for (const k of oldKeys) this.keys.setStatus(k.id, 'revoked', 're-enrol', actor);
+        handover = this.d.handovers!.rotateAll(machineId, key, sessionKeys, actor);
+      } else {
+        for (const k of oldKeys) this.keys.setStatus(k.id, 'revoked', 're-enrol', actor);
+        for (const id of sessionKeys) this.keys.setStatus(id, 'revoked', 're-enrol', actor);
+        reopened.push(...this.reopenPickups(machineId, key, actor, now));
+        this.moveToKey(machineId, null, key, now);
       }
-      this.audit.event(actor, 'pc.re_enrol', { kind: 'pc', id: pc.id }, { app_keys_revoked: oldKeys.length, session_keys_revoked: sessionKeys.length, codes_revoked: codes, reopened: reopened.length, app_key: key.id });
-      return { pc, key, code, reopened };
+      this.audit.event(actor, 'pc.re_enrol', { kind: 'pc', id: pc.id }, { app_keys_revoked: oldKeys.length, session_keys_revoked: connector ? 0 : sessionKeys.length, agents_handed_over: connector ? sessionKeys.length : 0, handover, codes_revoked: codes, reopened: reopened.length, app_key: key.id });
+      return { pc, key, code, reopened, handover };
     });
   }
 
@@ -512,49 +589,12 @@ export class Onboarding {
     }
   }
   /**
-   * A key prompt's pickup (docs/onboarding.md#key-prompts-a-new-rotated-or-reissued-session-key): swaps a single-use code for
-   * its session key. Needs no onboarding capability: the code is the operator's word. A refused code counts against the
-   * address like a failed PC key (pickup_fail) and is audited as key.pickup_refused, without the code. A lockdown (all writes,
-   * this PC or the key's agent) refuses it like a write and leaves the code open; it does not count as a failure.
+   * The key pickup codes (`setup.mjs key`) and the Codex wake's key collection ended with the key handover
+   * (docs/onboarding.md#key-handover-a-rotated-key-or-a-recruit-reaches-a-connector-pc): their routes refuse, and their tables
+   * are no longer read or written.
    */
-  keyPickup(app: Credential, code: unknown, source: string, collect?: { collect_id?: unknown; instance_id?: unknown }): { session_var: string; secret: string; label: string; pc: string } {
-    const lim = this.authLimit(), scope = `ip:${source}`;
-    const b = lim.blocked(scope, 'pickup_fail');
-    if (b.blocked) throw fail('rate_limited', 'Too many failed attempts from this address. Try again later.', { retry_after_s: Math.ceil(b.retryAfterMs / 1000) });
-    // A collection (docs/onboarding.md#collect-on-a-pc-the-codex-wake-picks-up-a-routine-rotation) names a collect_id and
-    // the wake's instance id in place of a code; every other rule of the pickup is the same.
-    const viaCollect = collect?.collect_id !== undefined && collect.collect_id !== null;
-    if (viaCollect && !this.d.collections) throw fail('not_found', 'Unknown key collection.');
-    if (!viaCollect && (typeof code !== 'string' || !code)) throw fail('invalid_argument', 'code: the key pickup code from the prompt');
-    if (viaCollect && typeof collect.instance_id !== 'string') throw fail('invalid_argument', 'instance_id: the Codex wake\'s instance id');
-    const what = 'collecting a key';
-    if (this.d.lockdown.writes() || this.d.lockdown.pc(app.machine_id)) throw fail('lockdown', `Onboarding is locked down by the administrator; ${what} is refused.`);
-    try {
-      const refuse = (agentId: string | null) => agentId && this.d.lockdown.agent(agentId) ? `This agent is locked down by the administrator; ${what} is refused.` : null;
-      const r = viaCollect ? this.d.collections!.redeem(app, collect.collect_id, collect.instance_id, refuse) : this.keys.redeemPickup(app, (code as string).trim(), refuse);
-      return { session_var: r.session_var, secret: r.secret, label: r.label, pc: r.pc };
-    } catch (e) {
-      if (!(e instanceof KeyError)) throw e;
-      if (e.code === 'lockdown') throw fail('lockdown', e.message);
-      if (e.code === 'invalid_argument') throw fail('invalid_argument', e.message);
-      this.audit.event(sys, 'key.pickup_refused', { kind: 'pc', id: app.machine_id ?? '' }, { reason: e.code, app_key: app.id, source, ...(viaCollect ? { via: 'collect' } : {}) });
-      lim.fail(scope, 'pickup_fail');
-      if (lim.blocked(scope, 'pickup_fail').blocked) this.audit.alert('warning', 'onboarding_auth_fail', source, { failures: AUTH_FAILS_PER_HOUR, window_minutes: 60 });
-      throw fail(e.code === 'not_found' ? 'not_found' : 'invalid_state', e.message);
-    }
-  }
-  /** The Codex wake's heartbeat for one entry (POST /onboard/key-collect/poll): no secret, rate-limited per app key. */
-  keyCollectPoll(app: Credential, body: unknown, source: string): { collect_ids: string[]; poll_after_s: number } {
-    if (!this.d.collections) throw fail('not_found', 'Key collection is not available on this hub.');
-    this.limit(app, 'key_collect_poll', KEY_COLLECT_POLLS_PER_HOUR, HOUR, 'key collection polls');
-    try { return this.d.collections.poll(app, (body && typeof body === 'object' ? body : {}) as Record<string, unknown>, source); }
-    catch (e) { if (e instanceof KeyError) throw fail(e.code, e.message); throw e; }
-  }
-  /** The wake's word that the collected key is written (ok: true) or not (the new secret is void). */
-  keyCollectConfirm(app: Credential, body: unknown): { ok: true; status: string } {
-    if (!this.d.collections) throw fail('not_found', 'Unknown key collection.');
-    try { return this.d.collections.confirm(app, (body && typeof body === 'object' ? body : {}) as Record<string, unknown>); }
-    catch (e) { if (e instanceof KeyError) throw fail(e.code, e.message); throw e; }
+  keyRouteGone(): never {
+    throw fail('invalid_state', "Key pickup codes and key collections ended: a rotated key now reaches its PC through the connector, which the PC's user allows on its screen. Ask the administrator to rotate the key again.", { reason: 'key_handover' });
   }
   private requireCapability(app: Credential, what: string): void {
     if (!app.onboarding_enabled_at) throw fail('capability_off', `Onboarding is turned off for this PC key; ${what} is refused. Ask the administrator.`);
@@ -582,7 +622,7 @@ export class Onboarding {
   slots(requestId: string): SlotRow[] { return this.db.prepare('SELECT * FROM onboarding_slots WHERE request_id=? ORDER BY rowid').all(requestId) as unknown as SlotRow[]; }
   private ownRequest(app: Credential, id: string): RequestRow {
     const r = typeof id === 'string' ? this.request(id) : null;
-    if (!r || r.app_credential_id !== app.id) throw fail('not_found', 'Not allowed, or does not exist.');
+    if (!r || r.app_credential_id !== app.id || r.handover) throw fail('not_found', 'Not allowed, or does not exist.');
     return r;
   }
   /** Every state change of a request is recorded here, after its row changed: a request no longer submitted closes its alert. */
@@ -975,11 +1015,32 @@ export class Onboarding {
     this.requireCapability(app, 'withdrawing');
     this.fileLimit(app);
     const r = this.ownRequest(app, id);
+    // A request an earlier Re-enrol reopened for a new pickup (any kind, a checkout's too) can be withdrawn: its agents that
+    // joined their team stay, nothing else changes, and the PC can file a new request.
+    if (r.state === 'approved' && this.reopenedByReEnrol(r.id)) return this.withdrawReopened(app, r);
     if (r.kind === 'checkout') throw fail('invalid_state', 'This request belongs to a checkout; only the administrator changes it, from the checkout.');
     if (r.state !== 'submitted' && r.state !== 'needs_changes') throw fail('invalid_state', `The request is ${r.state}; ${r.state === 'approved' ? 'after approval only the administrator can cancel it' : 'it cannot be withdrawn'}.`);
     this.db.prepare("UPDATE onboarding_requests SET state='withdrawn', version=version+1, updated_at=? WHERE id=?").run(Date.now(), r.id);
     this.history(r.id, { kind: 'agent', id: app.id }, 'withdrawn', {});
     this.audit.event(sys, 'onboarding.request_withdraw', { kind: 'onboarding_request', id: r.id });
+    this.changed(r.id);
+    return this.statusView(this.request(r.id)!);
+  }
+
+  private reopenedByReEnrol(id: string): boolean {
+    return !!this.db.prepare("SELECT 1 FROM onboarding_events WHERE request_id=? AND action='pickup_reopen'").get(id);
+  }
+  private withdrawReopened(app: Credential, r: RequestRow): ReturnType<Onboarding['statusView']> {
+    tx(this.db, () => {
+      this.revokeUnconfirmed(r, 'request withdrawn', { kind: 'agent', id: app.id });
+      for (const sl of this.slots(r.id)) {
+        const member = sl.status === 'confirmed' || (r.team_id && this.teams.roleOf(r.team_id, sl.agent_id));
+        this.db.prepare('UPDATE onboarding_slots SET status=? WHERE id=?').run(member ? 'confirmed' : 'closed', sl.id);
+      }
+      this.db.prepare("UPDATE onboarding_requests SET state='withdrawn', pickup_id=NULL, version=version+1, updated_at=? WHERE id=?").run(Date.now(), r.id);
+      this.history(r.id, { kind: 'agent', id: app.id }, 'withdrawn', { reopened: true });
+    });
+    this.audit.event(sys, 'onboarding.request_withdraw', { kind: 'onboarding_request', id: r.id }, { reopened: true });
     this.changed(r.id);
     return this.statusView(this.request(r.id)!);
   }
@@ -1086,8 +1147,8 @@ export class Onboarding {
   list(status?: string) {
     const rows = (status === 'pending'
       ? this.db.prepare(`SELECT * FROM onboarding_requests WHERE ${PENDING} ORDER BY filed_at`).all()
-      : status ? this.db.prepare('SELECT * FROM onboarding_requests WHERE state=? ORDER BY filed_at DESC LIMIT 200').all(status)
-        : this.db.prepare('SELECT * FROM onboarding_requests ORDER BY filed_at DESC LIMIT 200').all()) as unknown as RequestRow[];
+      : status ? this.db.prepare('SELECT * FROM onboarding_requests WHERE state=? AND handover IS NULL ORDER BY filed_at DESC LIMIT 200').all(status)
+        : this.db.prepare('SELECT * FROM onboarding_requests WHERE handover IS NULL ORDER BY filed_at DESC LIMIT 200').all()) as unknown as RequestRow[];
     // One query each for the PCs and the team names, not one per row.
     const pcs = new Map(this.keys.machines().map((m) => [m.id, m]));
     const teamIds = [...new Set(rows.map((r) => r.team_id).filter((x): x is string => !!x))];
@@ -1117,8 +1178,8 @@ export class Onboarding {
       standard_directives: r.kind === 'new_team' ? STANDARD_DIRECTIVES : [],
     };
   }
-  private decidable(id: string, states: string[], version?: number): RequestRow {
-    const r = this.request(id); if (!r) throw fail('not_found', 'request not found');
+  private decidable(id: string, states: string[], version?: number, handover = false): RequestRow {
+    const r = this.request(id); if (!r || (!!r.handover !== handover)) throw fail('not_found', 'request not found');
     if (r.kind === 'checkout') throw fail('invalid_state', 'This request belongs to a checkout: approve, render again or cancel it from the checkout.', { checkout: true });
     if (!states.includes(r.state)) throw fail('invalid_state', `The request is ${r.state}.`);
     if (version !== undefined && version !== r.version) throw fail('conflict', `The request changed (current version ${r.version}). Reload it.`, { version: r.version });
@@ -1201,6 +1262,7 @@ export class Onboarding {
       // A repeated approval after a lost response: the same version, already approved by it, finds the original team
       // and proposal and creates nothing (docs/onboarding.md#one-time-pickup-retries-and-a-lost-response).
       const prior = this.request(id);
+      if (prior?.handover) throw fail('not_found', 'request not found');
       if (prior && prior.kind !== 'checkout' && prior.approved_version === p.version && (prior.state === 'approved' || prior.state === 'collected')) return 'replayed' as const;
       this.approveIn(id, p, actor);
       return 'approved' as const;
@@ -1310,7 +1372,9 @@ export class Onboarding {
    * leaves no agent behind. No key exists until the PC picks it up; nothing returned here is a secret.
    */
   recruitFile(o: { team: TeamRow; agentId: string; label: string; role: string; purpose: string; rules: Omit<Rule, 'id'>[]; days: number; machineId: string | null; by: string }, actor: Actor): RecruitPickup {
-    const app = o.machineId ? this.pcKey(o.machineId) : null;
+    // The app key its connector checks in with, when that key may onboard; else the PC's onboarding key (docs/onboarding.md#key-handover-a-rotated-key-or-a-recruit-reaches-a-connector-pc).
+    const conn = o.machineId && this.d.handovers ? this.d.handovers.appKeyFor(o.machineId) : null;
+    const app = conn?.onboarding_enabled_at ? conn : o.machineId ? this.pcKey(o.machineId) : null;
     if (!app) throw fail('invalid_state', "The coordinator's PC is not set up for key pickup, so the recruit's key has nowhere to go, and nothing was created. The administrator sets up that PC with Add PC first.");
     this.requireCapability(app, 'recruiting');
     this.checkoutGuard({ teamId: o.team.id }, actor, 'add_agents');
@@ -1320,23 +1384,24 @@ export class Onboarding {
     const names = this.uniqueOnPc(pc.id, `${up(project)}_${up(o.team.name)}_${up(o.label)}`, slug(o.label) || 'recruit');
     const body: RequestIn = { kind: 'add_agents', project: { name: project, existing: true }, team: { id: o.team.id }, roles: [{ name: o.role, team_role: o.role as TeamRole, count: 1, job: o.purpose }],
       prompt: `Recruited by ${o.by} for team ${o.team.name}.`, recruit: { by: o.by, days: o.days } };
-    const id = `obr_${randomToken(10)}`, now = Date.now();
+    const id = `obr_${randomToken(10)}`, now = this.now(), expires = now + HANDOVER_TTL_MS;
     tx(this.db, () => {
-      this.db.prepare(`INSERT INTO onboarding_requests(id,app_credential_id,machine_id,kind,state,version,body,approved_body,team_id,start_when_set_up,filed_at,updated_at,waiting_since,decided_at) VALUES (?,?,?,'add_agents','approved',1,?,?,?,0,?,?,?,?)`)
-        .run(id, app.id, pc.id, JSON.stringify(body), JSON.stringify(body), o.team.id, now, now, now, now);
+      this.db.prepare(`INSERT INTO onboarding_requests(id,app_credential_id,machine_id,kind,state,version,body,approved_body,team_id,start_when_set_up,filed_at,updated_at,waiting_since,decided_at,handover,expires_at) VALUES (?,?,?,'add_agents','approved',1,?,?,?,0,?,?,?,?,'recruit',?)`)
+        .run(id, app.id, pc.id, JSON.stringify(body), JSON.stringify(body), o.team.id, now, now, now, now, expires);
       this.db.prepare(`INSERT INTO onboarding_slots(id,request_id,slot,agent_id,role,team_role,label,session_var,folder,bound,template_id,ceiling,status,created_at) VALUES (?,?,?,?,?,?,?,?,?,1,NULL,?,'waiting',?)`)
         .run(`obs_${randomToken(8)}`, id, o.role, o.agentId, o.role, o.role, o.label, names.session_var, names.folder, JSON.stringify(o.rules), now);
       this.history(id, actor, 'recruit_filed', { agent: o.agentId, by: o.by, team: o.team.id });
     });
     this.audit.event(actor, 'onboarding.recruit_file', { kind: 'onboarding_request', id }, { pc: pc.id, team: o.team.id, agent: o.agentId, by: o.by });
+    this.d.handovers?.recruitFiled(id, pc.id, app.id, [o.agentId], actor, expires);
     this.changed(id);
-    return { request_id: id, pc: { id: pc.id, name: pc.name }, ...names, command: `node ~/.config/conclave/setup.mjs wait --request ${id}` };
+    return { request_id: id, pc: { id: pc.id, name: pc.name }, ...names, expires_at: expires };
   }
   /** Recruiting ended for a team (switched off, or the team ended): its recruits' waiting pickups are cancelled. */
   cancelRecruits(teamId: string, actor: Actor): number {
-    const rows = this.db.prepare("SELECT id, body FROM onboarding_requests WHERE team_id=? AND state='approved' AND kind='add_agents'").all(teamId) as { id: string; body: string }[];
+    const rows = this.db.prepare("SELECT id, body, handover FROM onboarding_requests WHERE team_id=? AND state='approved' AND kind='add_agents'").all(teamId) as { id: string; body: string; handover: string | null }[];
     let n = 0;
-    for (const r of rows) if (parse<RequestIn | null>(r.body, null)?.recruit) { this.cancel(r.id, 'Recruiting ended for the team.', actor); n++; }
+    for (const r of rows) if (parse<RequestIn | null>(r.body, null)?.recruit) { this.cancel(r.id, 'Recruiting ended for the team.', actor, !!r.handover); n++; }
     return n;
   }
 
@@ -1459,8 +1524,9 @@ export class Onboarding {
     ].join('\n');
   }
   /** Cancel after approval, before collection: unconfirmed keys revoked, agents archived, slots closed, a new draft team stopped. */
-  cancel(id: string, note: string | null, actor: Actor) {
-    const r = this.decidable(id, ['approved']);
+  cancel(id: string, note: string | null, actor: Actor, handover = false) {
+    // The handover's own cancel (Handovers.cancelRecruit) reaches a recruit's row; the operator's Cancel route never does.
+    const r = this.decidable(id, ['approved'], undefined, handover);
     tx(this.db, () => {
       this.revokeUnconfirmed(r, 'onboarding cancelled', actor);
       for (const s of this.slots(r.id)) {
@@ -1542,6 +1608,7 @@ export class Onboarding {
       this.audit.event(sys, 'onboarding.pickup_refused', r ? { kind: 'onboarding_request', id: r.id } : null, { reason: 'wrong_key', app_key: app.id, source });
       throw fail('not_found', 'Not allowed, or does not exist.');
     }
+    if (r.kind === 'rotate') return this.rotatePickup(app, r, source);
     this.requireCapability(app, 'pickup');
     if (r.state === 'collected') {
       this.audit.event(sys, 'onboarding.pickup_refused', { kind: 'onboarding_request', id: r.id }, { reason: 'after_collect', source });
@@ -1549,6 +1616,10 @@ export class Onboarding {
       throw fail('invalid_state', 'The keys of this request were already collected. Only Re-enrol PC reopens a pickup.');
     }
     if (r.state !== 'approved') throw fail('invalid_state', `The request is ${r.state}; keys are picked up only after approval.`);
+    if (r.handover && (r.expires_at ?? 0) <= this.now()) {
+      this.audit.event(sys, 'onboarding.pickup_refused', { kind: 'onboarding_request', id: r.id }, { reason: 'expired', source });
+      throw fail('invalid_state', 'This handover expired after 24 hours. Ask the coordinator to recruit again.', { reason: 'expired' });
+    }
     if (r.kind === 'add_agents' && r.team_id) this.checkoutGuard({ teamId: r.team_id }, { kind: 'agent', id: app.id }, 'add_agents');
     if (r.pickup_issues >= r.pickup_allowed) {
       this.audit.event(sys, 'onboarding.pickup_refused', { kind: 'onboarding_request', id: r.id }, { reason: 'issue_limit', issues: r.pickup_issues, source });
@@ -1601,6 +1672,7 @@ export class Onboarding {
     });
     this.audit.event(sys, 'onboarding.pickup_issue', { kind: 'onboarding_request', id: r.id }, { issue, agents: agents.length, source });
     if (r.kind === 'checkout') this.audit.event(sys, 'checkout.pickup', { kind: 'onboarding_request', id: r.id }, { issue, agents: agents.length, mode, source });
+    if (r.handover) this.audit.event(sys, 'key.handover.picked_up', { kind: 'onboarding_request', id: r.id }, { kind: r.handover, pc: r.machine_id, app_key: app.id, agents: agents.map((a) => a.agent_id), issue, source });
     if (issue === PICKUP_ISSUES) this.audit.alert('warning', 'onboarding_pickup_retry', r.id, { issues: issue });
     this.changed(r.id);
     return { pickup_id: pickupId, hub_url: this.d.hubUrl, kind: r.kind, team: team ? { id: team.id, name: team.name } : null, agents };
@@ -1614,6 +1686,7 @@ export class Onboarding {
       throw fail('invalid_state', 'Unknown pickup, or replaced by a later one. Run the pickup again.');
     }
     if (r.state === 'collected') return { request_id: r.id, state: r.state, team_id: r.team_id, already: true };
+    if (r.kind === 'rotate') return this.rotateConfirm(app, r, written, source);
     this.requireCapability(app, 'pickup');
     if (r.state !== 'approved') throw fail('invalid_state', `The request is ${r.state}.`);
     if (transport !== undefined && transport !== 'https' && transport !== 'http') throw fail('invalid_argument', 'transport: https or http');
@@ -1642,7 +1715,80 @@ export class Onboarding {
       this.history(r.id, { kind: 'agent', id: app.id }, 'pickup_confirm', { transport: transport ?? null, agents: slots.length, started });
     });
     this.audit.event(sys, 'onboarding.pickup_confirm', { kind: 'onboarding_request', id: r.id }, { transport: transport ?? null, agents: slots.length, team: team?.id ?? null, started, source });
+    if (r.handover) this.audit.event(sys, 'key.handover.confirmed', { kind: 'onboarding_request', id: r.id }, { kind: r.handover, pc: r.machine_id, app_key: app.id, agents: slots.map((s) => s.agent_id), source });
     this.changed(r.id);
     return { request_id: r.id, state: 'collected', team_id: team?.id ?? null, team_status: team ? this.teams.team(team.id)!.status : null, started, ...(trust ? { trust } : {}) };
+  }
+
+  /**
+   * A rotation's pickup (docs/onboarding.md#key-handover-a-rotated-key-or-a-recruit-reaches-a-connector-pc): one new secret per
+   * key, answered once; the hub keeps only its verifier on the slot and the old key keeps working. A second pickup before
+   * confirm replaces the staged secrets, so a secret picked up and lost never works. No onboarding capability is needed:
+   * the operator's Rotate is the approval, and only the bound app key gets here.
+   */
+  private rotatePickup(app: Credential, r: RequestRow, source: string) {
+    if (this.d.lockdown.writes() || this.d.lockdown.pc(app.machine_id)) throw fail('lockdown', 'Onboarding is locked down by the administrator; picking up a key is refused.');
+    if (r.state === 'collected') throw fail('invalid_state', 'This key handover was already confirmed.');
+    if (r.state !== 'approved') throw fail('invalid_state', `The key handover is ${r.state}.`);
+    if ((r.expires_at ?? 0) <= this.now()) {
+      this.audit.event(sys, 'onboarding.pickup_refused', { kind: 'onboarding_request', id: r.id }, { reason: 'expired', source });
+      throw fail('invalid_state', 'This key handover expired after 24 hours. Ask the administrator to rotate the key again.', { reason: 'expired' });
+    }
+    const pickupId = `pku_${randomToken(10)}`, issue = r.pickup_issues + 1;
+    const agents = tx(this.db, () => {
+      const out: { agent_id: string; label: string; role: string; team_role: string; session_var: string; folder: string; key_id: string | null; secret: string; instructions: string }[] = [];
+      for (const s of this.slots(r.id)) {
+        if (s.status === 'closed') continue;
+        const c = s.credential_id ? this.keys.credential(s.credential_id) : null;
+        if (!c || !this.handoverable(c)) throw fail('invalid_state', 'The key of this handover is no longer active.');
+        if (c.agent_id && this.d.lockdown.agent(c.agent_id)) throw fail('lockdown', 'This agent is locked down by the administrator; picking up its key is refused.');
+        const st = this.keys.stageSecret();
+        this.db.prepare("UPDATE onboarding_slots SET staged_key_id=?, staged_verifier=?, status='issued' WHERE id=?").run(st.keyId, st.verifier, s.id);
+        out.push({ agent_id: s.agent_id, label: s.label, role: s.role, team_role: s.team_role, session_var: s.session_var, folder: s.folder, key_id: this.keys.hasSecret(c.id) ? c.key_id : null, secret: st.full, instructions: '' });
+      }
+      this.db.prepare('UPDATE onboarding_requests SET pickup_id=?, pickup_issues=?, updated_at=? WHERE id=?').run(pickupId, issue, this.now(), r.id);
+      this.history(r.id, { kind: 'agent', id: app.id }, 'pickup_issue', { issue, agents: out.length });
+      return out;
+    });
+    this.audit.event(sys, 'key.handover.picked_up', { kind: 'onboarding_request', id: r.id }, { kind: 'rotate', pc: r.machine_id, app_key: app.id, agents: agents.map((a) => a.agent_id), issue, source });
+    this.changed(r.id);
+    return { pickup_id: pickupId, hub_url: this.d.hubUrl, kind: r.kind, team: null, agents };
+  }
+  /**
+   * A rotation's confirm: only now is each old key rotated (revoked, its logins and turn tokens ended, its rules, grants and
+   * team places moved to the new key), with the secret the pickup staged. A new key that had no secret yet takes it.
+   * The request is collected first, so the rotation does not cancel its own handover.
+   */
+  /** A rotation's key may be picked up and confirmed while active, or while held by its leak rotation (Keys.hold). */
+  private handoverable(c: Credential): boolean {
+    return this.keys.effectiveStatus(c) === 'active' || (this.keys.isHeld(c) && (c.expires_at === null || this.now() < c.expires_at));
+  }
+  private rotateConfirm(app: Credential, r: RequestRow, written: unknown, source: string) {
+    if (r.state !== 'approved') throw fail('invalid_state', `The key handover is ${r.state}.`);
+    const slots = this.slots(r.id).filter((s) => s.status !== 'closed');
+    const got = new Set(Array.isArray(written) ? written.filter((x) => typeof x === 'string') : []);
+    const missing = slots.filter((s) => !got.has(s.session_var)).map((s) => s.session_var);
+    if (missing.length) throw fail('invalid_argument', `written: must list every agent's variable; missing ${missing.join(', ')}`, { missing });
+    if (slots.some((s) => !s.staged_key_id || !s.staged_verifier)) throw fail('invalid_state', 'Nothing was picked up for this handover yet. Run the pickup again.');
+    const body = parse<RotateBody | null>(r.body, null);
+    const actor: Actor = body?.by ?? sys;
+    tx(this.db, () => {
+      const now = this.now();
+      const res = this.db.prepare("UPDATE onboarding_requests SET state='collected', collected_at=?, version=version+1, updated_at=? WHERE id=? AND state='approved'").run(now, now, r.id);
+      if (!res.changes) throw fail('conflict', 'The key handover changed. Run the pickup again.');
+      for (const s of slots) {
+        const c = s.credential_id ? this.keys.credential(s.credential_id) : null;
+        if (!c || !this.handoverable(c)) throw fail('invalid_state', 'The key of this handover is no longer active. Run the pickup again.');
+        const staged = { keyId: s.staged_key_id!, verifier: s.staged_verifier! };
+        let nid = c.id;
+        if (this.keys.hasSecret(c.id)) nid = this.keys.rotate(c.id, actor, { reason: body?.reason ?? null, delivery: 'handover', staged }).credential.id;
+        else this.keys.takeStagedSecret(c.id, staged, 'handover');
+        this.db.prepare("UPDATE onboarding_slots SET credential_id=?, status='confirmed', staged_key_id=NULL, staged_verifier=NULL WHERE id=?").run(nid, s.id);
+      }
+      this.history(r.id, { kind: 'agent', id: app.id }, 'pickup_confirm', { agents: slots.length });
+    });
+    this.audit.event(sys, 'key.handover.confirmed', { kind: 'onboarding_request', id: r.id }, { kind: 'rotate', pc: r.machine_id, app_key: app.id, agents: slots.map((s) => s.agent_id), source });
+    this.changed(r.id);
+    return { request_id: r.id, state: 'collected', team_id: null, team_status: null, started: false };
   }
 }

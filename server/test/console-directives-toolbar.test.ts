@@ -51,7 +51,7 @@ describe('console: Work → Directives list toolbar', () => {
     const l = fn('function dirListHtml(');
     expect(l).toContain('const sum = all.length ? listOverline([');
     // Select all shown sits outside the live region, which holds only the count line.
-    expect(l).toMatch(/\{ html: `<input type="checkbox" class="dl-chk" id="dlAll" aria-label="Select all shown"[^`]*` \} : '',\n    \{ html: `<span class="lov-n" id="dlShown" tabindex="-1" aria-live="polite"><b>\$\{L\.length\}<\/b> of \$\{all\.length\}/);
+    expect(l).toMatch(/\{ html: `<input type="checkbox" class="dl-chk" id="dlAll" aria-label="Select all shown"[^`]*` \} : '',\n    \{ html: `<span class="lov-n" id="dlShown" tabindex="-1" aria-live="polite"><b>\$\{L\.length\}<\/b> of \$\{rules\}/); // the same rule for several scopes counts once
     expect(l).toContain('${unrev} not reviewed');
     expect(l).toContain('${behind} not read by everyone');
     expect(l).toContain("{ name: 'Group by', attrs: 'id=\"dlG\"', options: DIR_GROUPS, value: f.g }");

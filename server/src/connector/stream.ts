@@ -72,6 +72,11 @@ export class Streams {
     if (e) { try { e.res.write('event: orders\ndata: {}\n\n'); } catch { this.drop(pc, e.res); } }
     this.em.emit(`orders:${pc}`);
   }
+  /** A key handover waits for this PC (keys/handover.ts): the connector lists it with its app key. No secret, no id. */
+  handovers(pc: string): void {
+    const e = this.open.get(pc);
+    if (e) { try { e.res.write('event: handovers\ndata: {}\n\n'); } catch { this.drop(pc, e.res); } }
+  }
   /** Vault sync: a reader of this PC has a change in its scope. No paths, only the reader's id. */
   hint(pc: string, readerId: string): void {
     const e = this.open.get(pc);

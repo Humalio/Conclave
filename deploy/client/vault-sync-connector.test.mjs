@@ -235,6 +235,23 @@ describe('following the hub', () => {
     assert.equal(await createEngine({ home: t.home, rec: t.rec(), api: null }).countLocalEdits(), 1);
     assert.equal((await syncList(t.home))[0].local_edits, 1);
   });
+  test('a file created locally in the mirror folder is counted and warned about by sync list, and left alone (never uploaded, never moved)', async () => {
+    const t = setup();
+    t.h.put('n.md', 'v1');
+    await t.run();
+    assert.equal((await syncList(t.home))[0].local_new, 0);
+    mkdirSync(join(t.folder, 'mine'), { recursive: true });
+    writeFileSync(join(t.folder, 'mine', 'draft.md'), 'only here');
+    writeFileSync(join(t.folder, 'scratch.txt'), 'only here too');
+    assert.equal(await createEngine({ home: t.home, rec: t.rec(), api: null }).countLocalNew(), 2, 'the mirror\'s own n.md and the trash are not counted');
+    const row = (await syncList(t.home))[0];
+    assert.equal(row.local_new, 2);
+    t.h.put('n.md', 'v2');
+    await t.run();
+    assert.equal(t.read('mine/draft.md'), 'only here', 'a run leaves it alone');
+    assert.equal(trashFiles(t.folder).length, 0);
+    assert.equal((await syncList(t.home))[0].local_new, 2);
+  });
   test('a file the reader may no longer see after a scope edit is a delete in the trash, never a moved path', async () => {
     const t = setup();
     t.h.put('Open/a.md', 'a'); t.h.put('Secret/b.md', 'b'); t.h.put('Open/c.md', 'c');

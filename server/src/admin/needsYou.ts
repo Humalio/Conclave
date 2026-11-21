@@ -26,7 +26,7 @@ import type { Blueprint } from '../blueprint/blueprint.js';
 import { BP_RULES, milestoneLate, type BpRule } from '../blueprint/kinds.js';
 import { pauseLabel, type Teams, type TeamRow, type MemberRow } from '../teams/teams.js';
 import type { Onboarding } from '../onboarding/onboarding.js';
-import { KeyError } from '../keys/keys.js';
+import { KeyError, LEAK_HOLD } from '../keys/keys.js';
 import { questions } from '../blueprint/questions.js';
 import { hubShortSummary } from '../teams/shortSummary.js';
 import type { TaskAttachments } from '../shares/taskAttachments.js';
@@ -560,16 +560,21 @@ export class NeedsYou {
       out.push({ id: `keys:${q.id}`, kind: 'keys_not_collected', record: `onboarding:${q.id}`, episode: String(q.version), scope: { project_id: null, team_id: q.team_id ?? null },
         title: 'Keys approved, not collected yet', reason: `${q.pc?.name ?? 'The PC'} has not collected them`, open: { kind: 'onboarding', id: q.id }, at: q.waiting_since ?? q.updated_at });
     }
-    // A key collection that expired or failed (docs/onboarding.md, "Collect on a PC"): the key has no usable secret until the operator
-    // tries again or shows a key prompt on the key's page. Only the key's newest collection, and only while that key is not revoked.
+    // A rotated key waiting for its PC's user (docs/onboarding.md#key-handover-a-rotated-key-or-a-recruit-reaches-a-connector-pc):
+    // the old key works on until the connector confirms; the key's page has Cancel. The row leaves when the handover ends.
     if (v.isAdmin) {
-      const why: Record<string, string> = { expired: 'Not collected in 24 hours', write_failed: 'The PC could not write the keys file', unconfirmed: 'Collected but not confirmed in 10 minutes', elsewhere: 'The new key was used from somewhere else', conflict: 'Two copies of the Codex wake asked for this key' };
-      for (const c of this.db.prepare(`SELECT k.id, k.credential_id, k.status, k.outcome, k.ended_at, k.machine_id, c.agent_id, m.name AS pc
-        FROM key_collections k JOIN credentials c ON c.id=k.credential_id LEFT JOIN machines m ON m.id=k.machine_id
-        WHERE (k.status IN ('failed','expired') OR (k.status='void' AND k.outcome='conflict')) AND k.ended_at>? AND c.status<>'revoked'
-          AND NOT EXISTS (SELECT 1 FROM key_collections n WHERE n.credential_id=k.credential_id AND n.created_at>k.created_at)`).all(now - 14 * 86_400_000) as { id: string; credential_id: string; outcome: string | null; ended_at: number; agent_id: string | null; pc: string | null }[]) {
-        out.push({ id: `keycollect:${c.credential_id}`, kind: 'key_collection', record: `keycollect:${c.credential_id}`, episode: c.id, scope: { project_id: null, team_id: null },
-          title: `${this.agentName(c.agent_id)}'s key was not collected`, reason: `${why[c.outcome ?? 'expired'] ?? 'The collection failed'}${c.pc ? ` · ${c.pc}` : ''}`, open: { kind: 'key', id: c.credential_id }, at: c.ended_at });
+      for (const h of this.db.prepare(`SELECT r.id, r.filed_at, r.pickup_id, s.credential_id, s.agent_id, m.name AS pc FROM onboarding_requests r
+        JOIN onboarding_slots s ON s.request_id=r.id LEFT JOIN machines m ON m.id=r.machine_id
+        WHERE r.handover='rotate' AND r.state='approved' AND r.expires_at>?`).all(now) as { id: string; filed_at: number; pickup_id: string | null; credential_id: string; agent_id: string | null; pc: string | null }[]) {
+        out.push({ id: `handover:${h.credential_id}`, kind: 'key_handover', record: `handover:${h.credential_id}`, episode: h.id, scope: { project_id: null, team_id: null },
+          title: `${this.agentName(h.agent_id)}'s new key: waiting for the PC user`, reason: `${h.pickup_id ? 'Picked up, not confirmed yet' : 'Not allowed on the PC yet'}${h.pc ? ` · ${h.pc}` : ''}`, open: { kind: 'key', id: h.credential_id }, at: h.filed_at });
+      }
+      // A leak rotation that ended without confirm: the old key stays held (Keys.hold) until the operator rotates again or revokes.
+      for (const c of this.db.prepare(`SELECT c.id, c.agent_id, c.created_at, m.name AS pc FROM credentials c LEFT JOIN machines m ON m.id=c.machine_id
+        WHERE c.kind='session_key' AND c.status='suspended' AND c.status_reason=? AND NOT EXISTS (SELECT 1 FROM onboarding_requests r JOIN onboarding_slots s ON s.request_id=r.id
+          WHERE r.handover='rotate' AND r.state='approved' AND r.expires_at>? AND s.credential_id=c.id)`).all(LEAK_HOLD, now) as { id: string; agent_id: string | null; created_at: number; pc: string | null }[]) {
+        out.push({ id: `leak:${c.id}`, kind: 'key_leak_unfinished', record: `leak:${c.id}`, episode: c.id, scope: { project_id: null, team_id: null },
+          title: 'Leak rotation not finished: rotate again or revoke', reason: `${this.agentName(c.agent_id)}'s key is held; its logins are refused${c.pc ? ` · ${c.pc}` : ''}`, open: { kind: 'key', id: c.id }, at: c.created_at });
       }
     }
     const gone = new Set((this.db.prepare("SELECT record, episode FROM attention_dismissals WHERE user_id=? AND kind='dismiss'").all(v.id) as { record: string; episode: string }[]).map((x) => `${x.record}\u0000${x.episode}`));

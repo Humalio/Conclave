@@ -172,7 +172,7 @@ describe('The Needs you screen: each card leads with its title and is decided fr
   });
 
   it('the team page\'s Needs you card uses the same expanded row', () => {
-    expect(fn('function teamAttention(')).toContain('const need = (ny?.items || []).map((r) => nyCard(r));');
+    expect(fn('function teamAttention(')).toContain('const need = nyCards(ny?.items || []);');
   });
 
   it('#needs hangs under Home, rooted at a team or project when filtered', () => {

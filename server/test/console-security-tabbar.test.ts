@@ -12,23 +12,34 @@ import vm from 'node:vm';
 const pub = (f: string) => readFileSync(join(process.cwd(), 'public', f), 'utf8').replace(/\r\n/g, '\n');
 const html = pub('index.html'), css = pub('style.css');
 const bar = html.slice(html.indexOf('id="securityBar"'), html.indexOf('id="vaultBar"'));
+const appJs = () => pub('app.js');
 
 describe('Security tab bar', () => {
   it('the desktop tabs no longer hold Agent access; one New menu button sits beside them in the same row', () => {
     const seg = bar.slice(bar.indexOf('<nav class="seg ws-tabs'), bar.indexOf('</nav>'));
     expect(seg).not.toContain('data-go="grant"');
-    for (const g of ['keys', 'pcs', 'hardware', 'users', 'req', 'shares', 'reset']) expect(seg, g).toContain(`data-go="${g}"`);
+    for (const g of ['keys', 'pcs', 'hardware', 'users', 'req', 'shares']) expect(seg, g).toContain(`data-go="${g}"`);
+    expect(seg).not.toContain('data-go="reset"'); // Reset is in Lockdown's danger zone, not a tab
     const row = bar.slice(bar.indexOf('<div class="ws-row only-d">'), bar.indexOf('</div>'));
     expect(row).toContain('<nav class="seg ws-tabs');
     expect(row).toContain('<button type="button" class="btn sm ws-grant" data-sec-new aria-haspopup="true"><svg class="i"><use href="#i-plus"/></svg>New<svg class="i"><use href="#i-cdown"/></svg></button>');
     expect(row).not.toContain('data-go="grant"');
   });
-  it('the phone tabs are unchanged: Agent access is still the tab before Reset, and there is no New button', () => {
+  it('the phone tabs end with Agent access, have no Reset tab and no New button', () => {
     const m = bar.slice(bar.indexOf('<nav class="tabs only-m"'));
-    expect([...m.slice(0, m.indexOf('</nav>')).matchAll(/data-go="([a-z]+)"/g)].map((x) => x[1])).toEqual(['keys', 'pcs', 'hardware', 'users', 'req', 'shares', 'grant', 'reset']);
+    expect([...m.slice(0, m.indexOf('</nav>')).matchAll(/data-go="([a-z]+)"/g)].map((x) => x[1])).toEqual(['keys', 'pcs', 'hardware', 'users', 'req', 'shares', 'grant']);
     expect(m).not.toContain('data-sec-new');
-    expect(m.indexOf('data-go="grant"')).toBeGreaterThan(-1);
-    expect(m.indexOf('data-go="grant"')).toBeLessThan(m.indexOf('data-go="reset"'));
+  });
+  it('Reset is a danger zone at the end of the Lockdown page, for admins only (operator walk-through finding 3)', () => {
+    expect(html).not.toContain('data-go="reset"');
+    const js = appJs();
+    const dangerFn = js.slice(js.indexOf('const lkDanger = '), js.indexOf('VIEWS.lock = '));
+    expect(dangerFn).toContain("S.me?.role !== 'admin' ? ''");
+    expect(dangerFn).toContain("kd('Danger zone')");
+    expect(dangerFn).toContain('data-go="reset"');
+    expect(dangerFn).toContain('nothing is removed until you confirm with your password');
+    const lock = js.slice(js.indexOf('VIEWS.lock = '), js.indexOf('\n};\n', js.indexOf('VIEWS.lock = ')));
+    expect(lock).toContain("'<div id=\"lkNone\" hidden></div>' + lkDanger(),");
   });
   it('a workspace tab bar is one row: the tabs never wrap and scroll sideways instead', () => {
     expect(css).toContain('.ws-tabs{flex-wrap:nowrap;overflow-x:auto;max-width:100%;min-width:0;scrollbar-width:none}');

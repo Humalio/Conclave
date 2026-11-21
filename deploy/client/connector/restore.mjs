@@ -18,7 +18,7 @@ import { join, dirname, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { readJson, atomicWrite, canonicalFolder, pathKey, trustKeys, oneLine, WIN } from './paths.mjs';
 import { readKeyFile, putAgentKey, removeAgentKey, agentKey, LABEL_RE } from './keyfile.mjs';
-import { pickupApproved, requestPickup, spendPickup } from './approvals.mjs';
+import { pickupApproved, requestPickup, spendPickup, pickupDenied, allowWithPickup } from './approvals.mjs';
 import { request, callTool } from './hubclient.mjs';
 import { registerFolder } from './register.mjs';
 import { rerecord, resolveFolder, foldersOfHub } from './registry.mjs';
@@ -27,7 +27,7 @@ import { record } from './manifest.mjs';
 import { codexToml, codexPermission, nodePath, connectorPath, gitPath } from './entries.mjs';
 import { invalidate } from './tokens.mjs';
 import { shellQuote } from './request.mjs';
-import { resolveDestination } from './destinations.mjs';
+import { resolveDestination, destinationChanged } from './destinations.mjs';
 import { OVERRIDE, overrideState, writeOverride } from './role.mjs';
 import { safeGit, noHooks, unsafeRepoConfig } from './commit.mjs';
 
@@ -383,6 +383,7 @@ export async function runRestore(cx, s) {
     const dest = resolveDestination(home, s.destination_id);
     if (!dest) return { phase: 'failed', reason: 'That destination is not approved on this PC any more. Ask the PC\'s user to approve one, then send Restore again.' };
     if (!existsSync(dest.path)) return { phase: 'failed', reason: 'The approved destination folder is not there any more. Ask the PC\'s user to approve a destination, then send Restore again.' };
+    if (destinationChanged(dest)) return { phase: 'failed', reason: 'The approved destination folder was replaced since it was approved (a link or a new folder at the same place). Ask the PC user to approve it again with conclave destinations add, then send Restore again.' };
     // 1. The request that carries this checkout.
     if (!s.request_id) {
       const l = await call('GET', '/onboard/requests');
@@ -448,7 +449,7 @@ export async function runRestore(cx, s) {
           while (taken.has(label)) label = `${base.slice(0, 58)}-${i++}`;
         }
         taken.add(label);
-        registerFolder(home, dir, { hubId: cx.section.hub_id, caSha256: cx.section.ca_sha256, agent: label, claudeJson: cx.claudeJson, node: cx.node, connector: cx.connector, win, held: true, provider: a.provider, team: view.team_id ? { id: view.team_id, name: view.team } : null });
+        registerFolder(home, dir, { hubId: cx.section.hub_id, caSha256: cx.section.ca_sha256, agent: label, agentId: a.agent_id, claudeJson: cx.claudeJson, node: cx.node, connector: cx.connector, win, held: true, provider: a.provider, team: view.team_id ? { id: view.team_id, name: view.team } : null });
         s.agents.push({ agent_id: a.agent_id, folder: a.folder, dir: canonicalFolder(dir) ?? dir, label, session_var: a.session_var });
       }
       s.registered = true; save(home, s);
@@ -470,7 +471,8 @@ export async function runRestore(cx, s) {
     // 6. Pickup, once (a restart after a crash reuses the keys it wrote), then each agent's files and a login test.
     if (!s.confirmed) {
       if (!(s.pickup_id && s.keys_written_for === s.pickup_id)) {
-        if (!pickupApproved(home, hubKey, s.request_id)) { requestPickup(home, hubKey, s.request_id, 'session keys for a restored team'); return { phase: 'waiting', note: "Waiting for the PC's user to allow the key pickup on the connector's screen." }; }
+        if (!pickupApproved(home, hubKey, s.request_id) && pickupDenied(home, hubKey, s.request_id)) return { phase: 'waiting', note: 'Declined on this PC. The PC user can still allow it on the connector screen.' };
+        if (!pickupApproved(home, hubKey, s.request_id)) { requestPickup(home, hubKey, s.request_id, 'session keys for a restored team', s.agents.map((x) => ({ agent: x.label, path: x.dir }))); return { phase: 'waiting', note: "Waiting for the PC's user to allow the key pickup on the connector's screen." }; }
         const p = await call('POST', '/onboard/pickup', { request_id: s.request_id });
         spendPickup(home, hubKey, s.request_id);
         s.pickup_id = p.pickup_id; s.instructions = {};
@@ -518,6 +520,8 @@ export async function runRestore(cx, s) {
         rerecord(home, r.folder);
       } else withheld.push(ag.folder);
     }
+    // The restore folders are the ones the PC user approved on the restore screen; the pickup they allowed also allows the first chat in each, once its settings are final (not for a folder still waiting for its trust).
+    for (const ag of s.agents) if (!withheld.includes(ag.folder)) allowWithPickup(home, ag.dir, { agent: ag.label, agent_id: ag.agent_id, hub_id: cx.section.hub_id, ref: s.pickup_id ?? s.request_id });
     const lines = agents.map((a) => {
       const ag = s.agents.find((x) => x.agent_id === a.agent_id);
       return startLine(ag.dir, resumeMsg(a, team), { provider: a.provider, permissions: a.permissions, win });
